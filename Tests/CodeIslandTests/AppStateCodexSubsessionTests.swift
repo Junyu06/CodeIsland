@@ -300,6 +300,59 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         ]), "parent-thread")
     }
 
+    /// Every Desktop thread runs in Codex's one shared app-server. After a
+    /// Desktop child hook folds into the parent card, the parent's own next
+    /// hook must not take that card for "an active same-PID parent" and fold
+    /// into itself.
+    func testDesktopParentHookAfterAChildHookStaysTheParentsOwn() throws {
+        let previousMode = UserDefaults.standard.object(forKey: SettingsKey.pluginSessionMode)
+        UserDefaults.standard.set("merge", forKey: SettingsKey.pluginSessionMode)
+        defer {
+            if let previousMode {
+                UserDefaults.standard.set(previousMode, forKey: SettingsKey.pluginSessionMode)
+            } else {
+                UserDefaults.standard.removeObject(forKey: SettingsKey.pluginSessionMode)
+            }
+        }
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codeisland-codex-desktop-parent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let parentTranscript = dir.appendingPathComponent("parent.jsonl")
+        try (#"{"type":"session_meta","payload":{"id":"parent-thread","cwd":"/repo","originator":"Codex Desktop","source":"vscode"}}"# + "\n")
+            .write(to: parentTranscript, atomically: true, encoding: .utf8)
+        let childTranscript = dir.appendingPathComponent("child.jsonl")
+        try (#"{"type":"session_meta","payload":{"id":"child-thread","cwd":"/repo","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-thread"}}}}}"# + "\n")
+            .write(to: childTranscript, atomically: true, encoding: .utf8)
+
+        let appState = AppState()
+        let server = HookServer(appState: appState)
+        func deliver(_ event: String, thread: String, transcript: URL) throws -> [String: Any] {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "hook_event_name": event,
+                "session_id": thread,
+                "_source": "codex",
+                "_term_bundle": AppState.codexAppBundleId,
+                "_ppid": Int(getpid()),
+                "cwd": "/repo",
+                "transcript_path": transcript.path,
+            ] as [String: Any])
+            let routed = server.routeSubsessionPayloadIfNeededForTesting(data: data)
+            appState.handleEvent(try XCTUnwrap(HookEvent(from: routed.processedData)))
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: routed.processedData) as? [String: Any])
+        }
+
+        _ = try deliver("UserPromptSubmit", thread: "parent-thread", transcript: parentTranscript)
+        let child = try deliver("PreToolUse", thread: "child-thread", transcript: childTranscript)
+        XCTAssertEqual(child["session_id"] as? String, "codexapp:parent-thread")
+        let stop = try deliver("Stop", thread: "parent-thread", transcript: parentTranscript)
+
+        XCTAssertEqual(stop["session_id"] as? String, "parent-thread")
+        XCTAssertNil(stop["_codex_subagent"])
+        XCTAssertNil(appState.sessions["codexapp:parent-thread"]?.subagents["parent-thread"])
+    }
+
     func testCodexDesktopDoesNotRetainSharedHelperPidButOtherSessionsDo() {
         let appState = AppState()
         let now = Date()

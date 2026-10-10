@@ -84,6 +84,103 @@ final class CLIProcessResolverTests: XCTestCase {
         XCTAssertEqual(pid, 12345)
     }
 
+    // MARK: - codexDesktopTermBundle
+
+    /// The bundled Codex binary lives inside ChatGPT.app, so its own outermost
+    /// bundle is com.openai.codex whoever started it.
+    private func bundledCodex(_ arguments: [String]) -> ProcessAncestor {
+        ProcessAncestor(
+            pid: 900,
+            executablePath: "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+            arguments: arguments,
+            bundleIdentifier: "com.openai.codex"
+        )
+    }
+
+    private let desktopArguments = ["codex", "-c", "features.code_mode_host=true", "app-server", "--analytics-default-enabled"]
+    private let chatGPT = ProcessAncestor(
+        pid: 800,
+        executablePath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+        bundleIdentifier: "com.openai.codex"
+    )
+    private let zsh = ProcessAncestor(pid: 850, executablePath: "/bin/zsh", arguments: ["-zsh"])
+    private let terminal = ProcessAncestor(
+        pid: 700,
+        executablePath: "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal",
+        bundleIdentifier: "com.apple.Terminal"
+    )
+
+    /// ChatGPT starts Codex Desktop's app-server without __CFBundleIdentifier;
+    /// its hooks, run directly or through `sh -c`, still belong to Desktop.
+    func testDesktopAppServerHookGetsCodexDesktopBundle() {
+        let hookShell = ProcessAncestor(pid: 950, executablePath: "/bin/sh", arguments: ["sh", "-c", "codeisland-bridge --source codex"])
+        for ancestry in [
+            [bundledCodex(desktopArguments), chatGPT],
+            [hookShell, bundledCodex(desktopArguments), chatGPT],
+            [bundledCodex(["codex", "app-server"]), chatGPT],
+        ] {
+            XCTAssertEqual(CLIProcessResolver.codexDesktopTermBundle(ancestry: ancestry), "com.openai.codex")
+        }
+    }
+
+    /// The same binary also runs Codex CLI from a terminal (ChatGPT's
+    /// `codex-cli/bin/codex` launcher), from ChatGPT's own terminal, where
+    /// `exec codex` leaves ChatGPT as the direct parent, and as the app-server
+    /// Claude Code's Codex plugin starts (#368).
+    func testSameBinaryOutsideTheDesktopAppServerIsNotDesktop() {
+        let pluginBroker = ProcessAncestor(
+            pid: 850,
+            executablePath: "/opt/homebrew/bin/node",
+            arguments: ["node", "app-server-broker.mjs", "serve"]
+        )
+        let cases: [(String, [ProcessAncestor])] = [
+            ("terminal", [bundledCodex(["codex"]), zsh, terminal]),
+            ("ChatGPT's terminal", [bundledCodex(["codex"]), zsh, chatGPT]),
+            ("exec in ChatGPT's terminal", [bundledCodex(["codex"]), chatGPT]),
+            ("Claude Code's Codex plugin", [bundledCodex(["codex", "app-server"]), pluginBroker]),
+            ("parent unreadable", [bundledCodex(desktopArguments)]),
+        ]
+        for (name, ancestry) in cases {
+            XCTAssertNil(CLIProcessResolver.codexDesktopTermBundle(ancestry: ancestry), name)
+        }
+    }
+
+    /// Under ChatGPT (`exec codex …` in its own terminal), `app-server` only
+    /// counts as the subcommand, after nothing but `-c key=value` overrides.
+    func testAppServerAnywhereElseInTheArgumentsIsNotDesktop() {
+        for arguments in [
+            ["codex", "exec", "app-server"],
+            ["codex", "--", "app-server"],
+            ["codex", "-m", "app-server"],
+            ["codex", "-c", "model=app-server"],
+            [],
+        ] {
+            XCTAssertNil(
+                CLIProcessResolver.codexDesktopTermBundle(ancestry: [bundledCodex(arguments), chatGPT]),
+                arguments.joined(separator: " ")
+            )
+        }
+    }
+
+    /// `exec -a '' codex exec app-server` gives Codex an empty argv[0], which
+    /// ProcArgsParser skips with the exec-path padding; the shifted arguments
+    /// must not read as Desktop's `app-server`.
+    func testEmptyArgvZeroDoesNotShiftIntoAppServer() {
+        var buffer: [UInt8] = []
+        withUnsafeBytes(of: Int32(3).littleEndian) { buffer.append(contentsOf: $0) }
+        func cString(_ s: String) { buffer.append(contentsOf: Array(s.utf8)); buffer.append(0) }
+        cString("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
+        buffer.append(contentsOf: [0, 0, 0])                // exec-path padding
+        cString(""); cString("exec"); cString("app-server")
+
+        let arguments = ProcArgsParser.parse(buffer)?.arguments ?? []
+        XCTAssertNil(CLIProcessResolver.codexDesktopTermBundle(ancestry: [bundledCodex(arguments), chatGPT]))
+    }
+
+    func testNoCodexProcessInAncestryIsNotDesktop() {
+        XCTAssertNil(CLIProcessResolver.codexDesktopTermBundle(ancestry: [zsh, chatGPT]))
+    }
+
     // MARK: - inferSource (#220 / #95)
 
     /// #220: Claude Code launched inside Cursor's integrated terminal fires the

@@ -229,6 +229,44 @@ public enum CLIProcessResolver {
         return immediateParentPID
     }
 
+    /// `_term_bundle` for a Codex hook that reached the bridge without one.
+    /// ChatGPT starts Codex Desktop's app-server
+    /// (`ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`)
+    /// without `__CFBundleIdentifier`, so its hooks were keyed as a CLI
+    /// thread next to the `codexapp:` card discovery makes for the same thread.
+    ///
+    /// The binary cannot tell: it also runs Codex CLI from a terminal (ChatGPT's
+    /// `codex-cli/bin/codex` launcher) and the app-server Claude Code's Codex
+    /// plugin starts (#368), and its own outermost `.app` is ChatGPT.app every
+    /// time. So the nearest Codex process must run the `app-server` subcommand,
+    /// and its direct parent must be the app itself; `exec codex` in ChatGPT's
+    /// own terminal also leaves ChatGPT as the parent.
+    public static func codexDesktopTermBundle(ancestry: [ProcessAncestor]) -> String? {
+        guard let codexIndex = ancestry.firstIndex(where: {
+            sourceMatchesExecutablePath($0.executablePath ?? "", source: "codex")
+        }), isCodexAppServerInvocation(ancestry[codexIndex].arguments),
+              codexIndex + 1 < ancestry.count,
+              ancestry[codexIndex + 1].bundleIdentifier == "com.openai.codex" else {
+            return nil
+        }
+        return "com.openai.codex"
+    }
+
+    /// Desktop runs `codex [-c key=value]… app-server …`. Anything else ahead
+    /// of `app-server` (`exec`, `--`, another option) means it is a prompt or
+    /// an option value, not the subcommand. argv[0] must be `codex` too: an
+    /// empty one is dropped by ProcArgsParser and shifts the rest left.
+    static func isCodexAppServerInvocation(_ arguments: [String]) -> Bool {
+        guard let program = arguments.first, (program as NSString).lastPathComponent == "codex" else {
+            return false
+        }
+        var index = 1
+        while index < arguments.count, arguments[index] == "-c" || arguments[index] == "--config" {
+            index += 2
+        }
+        return index < arguments.count && arguments[index] == "app-server"
+    }
+
     /// Walk the process ancestry and return the first known CLI source whose binary
     /// appears along the chain. Used when a hook event reaches the bridge without a
     /// `--source` tag (e.g. omo plugin firing Claude hooks from inside OpenCode), so

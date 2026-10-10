@@ -98,6 +98,20 @@ func buildAncestry(startingAt pid: pid_t, maxDepth: Int = 6) -> [(pid: pid_t, ex
     return result
 }
 
+func processArguments(for pid: pid_t) -> [String] {
+    var mib = [CTL_KERN, KERN_PROCARGS2, pid]
+    var size = 0
+    guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return [] }
+    var buffer = [UInt8](repeating: 0, count: size)
+    guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return [] }
+    return ProcArgsParser.parse(Array(buffer.prefix(size)))?.arguments ?? []
+}
+
+func bundleIdentifier(forExecutable path: String) -> String? {
+    guard let appPath = HostHarnessResolver.outermostAppBundlePath(forExecutable: path) else { return nil }
+    return Bundle(path: appPath)?.bundleIdentifier
+}
+
 func debugLog(_ message: String) {
     let ts = ISO8601DateFormatter().string(from: Date())
     let line = "[\(ts)] \(message)\n"
@@ -518,6 +532,22 @@ if let termApp = env["TERM_PROGRAM"], !termApp.isEmpty {
 }
 if let termBundle = env["__CFBundleIdentifier"], !termBundle.isEmpty {
     json["_term_bundle"] = termBundle
+}
+// ChatGPT starts Codex Desktop's app-server without __CFBundleIdentifier.
+// Without a bundle its hooks were keyed as a CLI thread, a second card next
+// to the `codexapp:` one discovery makes for the same Desktop thread.
+if nonEmptyString(json["_term_bundle"]) == nil, effectiveSource == "codex" {
+    let ancestors = ancestry.map {
+        ProcessAncestor(
+            pid: Int32($0.pid),
+            executablePath: $0.executablePath,
+            arguments: processArguments(for: $0.pid),
+            bundleIdentifier: $0.executablePath.flatMap(bundleIdentifier(forExecutable:))
+        )
+    }
+    if let desktopBundle = CLIProcessResolver.codexDesktopTermBundle(ancestry: ancestors) {
+        json["_term_bundle"] = desktopBundle
+    }
 }
 
 // iTerm2 session — extract GUID after "w0t0p0:" prefix for AppleScript matching
