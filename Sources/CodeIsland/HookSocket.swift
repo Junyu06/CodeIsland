@@ -40,15 +40,16 @@ final class HookSocketListener: @unchecked Sendable {
     /// Creates the socket file, readable by this user only, and starts
     /// accepting. False, logged, when the socket cannot be created.
     func start() -> Bool {
-        unlink(path)
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = Array(path.utf8)
+        // Before anything is removed: a path no socket can have is left alone.
         guard pathBytes.count < MemoryLayout.size(ofValue: address.sun_path) else {
             log.error("HookServer: socket path too long: \(self.path, privacy: .public)")
             return false
         }
         withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: pathBytes) }
+        unlink(path)
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
@@ -76,9 +77,12 @@ final class HookSocketListener: @unchecked Sendable {
         _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
 
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+        // Before the handlers, which read it (pause()): ThreadSanitizer orders
+        // what precedes setting a handler before the handler runs, and not
+        // what comes between that and resume().
+        self.source = source
         source.setEventHandler { [weak self] in self?.acceptPending(fd) }
         source.setCancelHandler { close(fd) }
-        self.source = source
         source.resume()
         return true
     }

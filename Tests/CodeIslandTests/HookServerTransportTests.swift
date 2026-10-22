@@ -296,6 +296,41 @@ final class HookServerTransportTests: XCTestCase {
         pump(until: { self.appState.permissionQueue.isEmpty }, timeout: 2, "the card outlived the replay's hook")
     }
 
+    /// Short of descriptors, accept() fails — and XNU drops that connection.
+    /// The listener backs off rather than spin, and accepts again once
+    /// descriptors are back.
+    func testTheListenerOutlivesRunningOutOfDescriptors() throws {
+        let clients = (0..<3).map { _ in socket(AF_UNIX, SOCK_STREAM, 0) }
+        defer { clients.forEach { Darwin.close($0) } }
+        var saved = rlimit()
+        XCTAssertEqual(getrlimit(RLIMIT_NOFILE, &saved), 0)
+        // The lowest free descriptor: a limit there leaves none to open.
+        var lowest: Int32 = 0
+        while fcntl(lowest, F_GETFD) != -1 { lowest += 1 }
+        var limited = saved
+        limited.rlim_cur = rlim_t(lowest)
+        XCTAssertEqual(setrlimit(RLIMIT_NOFILE, &limited), 0)
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: Array(socketPath.utf8)) }
+        for (index, client) in clients.enumerated() {
+            let connected = withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.connect(client, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            XCTAssertEqual(connected, 0, "connect: \(String(cString: strerror(errno)))")
+            let payload = remotePayload("UserPromptSubmit", session: "short-\(index)", extra: #","prompt":"p""#)
+            _ = payload.withCString { send(client, $0, strlen($0), MSG_NOSIGNAL) }
+            shutdown(client, SHUT_WR)
+        }
+        pump(for: 0.5)
+        XCTAssertEqual(setrlimit(RLIMIT_NOFILE, &saved), 0)
+
+        RawHook.sendAndClose(remotePayload("UserPromptSubmit", session: "after", extra: #","prompt":"p""#), to: socketPath)
+        pump(until: { self.appState.sessions["remote:host-1:after"] != nil }, "the listener stopped accepting")
+    }
+
     /// A server released while a request is on its way to the main actor
     /// drops the connection; its hook is let go, not left waiting.
     func testAServerReleasedMidRequestLetsItsHookGo() throws {
@@ -578,6 +613,18 @@ final class HookSocketListenerTests: XCTestCase {
         XCTAssertEqual(HookSocketListener.raisedDescriptorLimit(soft: 256, hard: 1_024), 1_024)
         XCTAssertNil(HookSocketListener.raisedDescriptorLimit(soft: 10_240, hard: .max))
         XCTAssertNil(HookSocketListener.raisedDescriptorLimit(soft: 256, hard: 256))
+    }
+
+    /// A path too long for a socket address is refused before anything is
+    /// done to it: whatever is there stays.
+    func testATooLongPathIsLeftAlone() throws {
+        let path = NSTemporaryDirectory() + String(repeating: "x", count: 110) + ".sock"
+        XCTAssertTrue(FileManager.default.createFile(atPath: path, contents: Data("kept".utf8)))
+        defer { unlink(path) }
+
+        let listener = HookSocketListener(path: path, queue: DispatchQueue(label: "too-long")) { _ in }
+        XCTAssertFalse(listener.start())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path), "start() removed what it could not listen on")
     }
 
     func testRaisingTheDescriptorLimitLiftsLaunchdsDefault() throws {
