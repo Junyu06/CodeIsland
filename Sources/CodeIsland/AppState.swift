@@ -223,6 +223,11 @@ final class AppState {
     /// SessionStart for the session means the user switched back to it.
     @ObservationIgnored
     var supersededGrokSessions: [String: ProcessIdentity] = [:]
+    /// Cursor gives its own hooks and the Claude Code hooks it imports one
+    /// payload per step, and CodeIsland is wired into both, so a `stop` or a
+    /// `beforeSubmitPrompt` arrives twice (#377). See ``CursorHookPayload``.
+    @ObservationIgnored
+    var cursorHookDeliveries = CursorHookDeliveryFilter()
 
     /// Per-agent AiWork/Agentix daemon watch clients (`sessions.watch`).
     /// Keyed by agent id (e.g. `"coder"`). See AppState+AiWorkWatch.
@@ -407,7 +412,8 @@ final class AppState {
     nonisolated(unsafe) private var codexDesktopDiscoveryScanTask: Task<Void, Never>?
     private var lastCodexDesktopDiscoveryPollAt: Date?
     /// Cursor Agent Task transcripts on disk, for rebranding default-Claude
-    /// Task cards. Built off the main actor; see `rebrandMisattributedCursorTaskCards`.
+    /// Task cards and folding Cursor-labelled ones. Built off the main actor;
+    /// see `rebrandMisattributedCursorTaskCards`.
     @ObservationIgnored
     private var cursorSubagentIndex: CursorSubagentTranscriptIndex?
     @ObservationIgnored
@@ -1708,6 +1714,13 @@ final class AppState {
     }
 
     func handleEvent(_ event: HookEvent) {
+        // Cursor ran both of CodeIsland's hooks for this step: the second copy
+        // is the same prompt or finished turn, not another one to chime for.
+        if let digest = event.rawJSON[CursorHookPayload.digestKey] as? String,
+           cursorHookDeliveries.isRepeat(digest: digest, now: Date()) {
+            return
+        }
+
         // Skip events from subagent worktrees — tracked via parent's SubagentStart/Stop
         if let cwd = event.rawJSON["cwd"] as? String,
            cwd.contains("/.claude/worktrees/agent-") || cwd.contains("/.git/worktrees/agent-") {
@@ -1793,11 +1806,9 @@ final class AppState {
 
         // Cursor Agent Tasks often fire Claude-format hooks without `--source`,
         // leaving ghost Claude cards. Rebrand + fold before the rest of the
-        // pipeline treats them as standalone Claude sessions.
-        if sessions.contains(where: {
-            let source = SessionSnapshot.normalizedSupportedSource($0.value.source)
-            return source == nil || source == "claude"
-        }) {
+        // pipeline treats them as standalone Claude sessions. A Task card the
+        // bridge already labelled Cursor still needs its transcript found.
+        if sessions.values.contains(where: Self.needsCursorTaskTranscriptLookup) {
             _ = applyCursorSubsessionModeToKnownSessions()
         }
 
@@ -4541,7 +4552,8 @@ final class AppState {
     }
 
     /// Rebrand default-Claude cards that are actually Cursor Agent Tasks
-    /// (`~/.cursor/.../agent-transcripts/.../subagents/<id>.jsonl`).
+    /// (`~/.cursor/.../agent-transcripts/.../subagents/<id>.jsonl`), and give
+    /// Cursor-labelled Task cards that transcript, which folds them.
     ///
     /// Runs on every hook event and discovery scan, so it never touches the
     /// disk: cards without a Cursor transcript path are looked up in
@@ -4553,8 +4565,7 @@ final class AppState {
     func rebrandMisattributedCursorTaskCards() -> Bool {
         var didMutate = false
         for (sessionId, snap) in sessions {
-            let normalized = SessionSnapshot.normalizedSupportedSource(snap.source)
-            guard normalized == nil || normalized == "claude" else { continue }
+            guard Self.needsCursorTaskTranscriptLookup(snap) else { continue }
 
             if let path = snap.transcriptPath,
                CursorSessionFolding.isCursorAgentTranscriptPath(path) {
@@ -4571,7 +4582,9 @@ final class AppState {
             ) else {
                 continue
             }
-            sessions[sessionId]?.source = "cursor"
+            if !CursorSubsessionRouter.isCursorFamilySource(snap.source) {
+                sessions[sessionId]?.source = "cursor"
+            }
             if sessions[sessionId]?.transcriptPath == nil {
                 sessions[sessionId]?.transcriptPath = found
             }
@@ -4579,6 +4592,23 @@ final class AppState {
         }
         scheduleCursorSubagentLookups()
         return didMutate
+    }
+
+    /// Cards the Task transcript index is consulted for: default-Claude cards,
+    /// and local Cursor cards with no transcript at all. A Task's own hooks
+    /// never carry one (Cursor resolves `transcript_path` only for a top-level
+    /// conversation), and since the bridge reads Cursor's payload (#377) the
+    /// Task hooks Cursor runs from Claude Code's config arrive labelled Cursor
+    /// rather than as the default Claude.
+    nonisolated static func needsCursorTaskTranscriptLookup(_ snap: SessionSnapshot) -> Bool {
+        switch SessionSnapshot.normalizedSupportedSource(snap.source) {
+        case nil, "claude":
+            return true
+        case "cursor", "cursor-cli":
+            return snap.transcriptPath == nil && !snap.isRemote
+        default:
+            return false
+        }
     }
 
     /// Give each card the index does not resolve a lookup schedule (kept
@@ -4673,11 +4703,11 @@ final class AppState {
         }
     }
 
-    /// Local default-Claude cards whose transcript path does not already say Cursor.
+    /// Local cards the index may resolve (``needsCursorTaskTranscriptLookup``)
+    /// whose transcript path does not already say Cursor.
     private func cursorRebrandCandidateIds() -> [String] {
         sessions.compactMap { sessionId, snap in
-            let normalized = SessionSnapshot.normalizedSupportedSource(snap.source)
-            guard normalized == nil || normalized == "claude", !snap.isRemote,
+            guard Self.needsCursorTaskTranscriptLookup(snap), !snap.isRemote,
                   !CursorSessionFolding.isCursorAgentTranscriptPath(snap.transcriptPath) else { return nil }
             return sessionId
         }
@@ -4699,7 +4729,7 @@ final class AppState {
 
         switch mode {
         case "separate":
-            // Back in merge or hide, every default-Claude card is looked up afresh.
+            // Back in merge or hide, every candidate card is looked up afresh.
             resetCursorSubagentLookups()
             didMutate = separateMergedCodexSubagents()
             didMutate = separateMergedCursorSubagents() || didMutate

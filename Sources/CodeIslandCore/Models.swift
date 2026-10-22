@@ -184,12 +184,21 @@ public enum CLIProcessResolver {
     /// inferred). When the ancestry says Claude, it is Claude's own hook, not
     /// a proxy: otherwise "hide" would auto-allow and hide every Claude Code
     /// session whose binary ends in `/claude` (Homebrew cask, Claude Desktop).
+    ///
+    /// Cursor runs that hook too, as one of the Claude Code hooks it imports,
+    /// and hands it its own payload (`cursorPayload`, see ``CursorHookPayload``).
+    /// That is Cursor's event, declared the way its `--source cursor` hooks
+    /// are: its processes are never inferred (#220), so it used to fall to the
+    /// app's default and show as Claude (#377).
     public static func bridgeSource(
         sourceTag: String?,
         payloadSource: String?,
+        cursorPayload: Bool = false,
         ancestry: [(pid: Int32, executablePath: String?)]
     ) -> (source: String?, viaPlugin: Bool) {
-        let declared = sourceTag ?? SessionSnapshot.normalizedSupportedSource(payloadSource)
+        let declared = sourceTag
+            ?? SessionSnapshot.normalizedSupportedSource(payloadSource)
+            ?? (cursorPayload ? CursorHookPayload.source : nil)
         let inferred = declared ?? inferSource(ancestry: ancestry)
         let effective = cliVariantOverride(declaredSource: inferred, ancestry: ancestry) ?? inferred
         let viaPlugin = declared == nil && effective != nil && effective != "claude"

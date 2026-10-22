@@ -64,11 +64,13 @@ public struct CursorSubagentTranscriptIndex: Sendable {
     }
 }
 
-/// When fresh walks look up a default-Claude card the index does not
-/// resolve: `delays` after the card first went unresolved, then never again.
+/// When fresh walks look up a card the index does not resolve (default-Claude,
+/// or Cursor with no transcript): `delays` after the card first went
+/// unresolved, then never again.
 ///
 /// A Cursor Task's transcript lands within seconds of its first hook, so a
-/// card still unresolved after the last lookup is a real Claude session.
+/// card still unresolved after the last lookup is not a Task: a real Claude
+/// session, or a Cursor chat.
 /// Walking on behalf of every such card for as long as it lives would re-read
 /// all of `~/.cursor/projects` every so often for as long as Claude Code runs.
 public struct CursorSubagentLookupSchedule: Sendable {

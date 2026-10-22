@@ -156,12 +156,18 @@ public enum CursorSubsessionRouter {
     /// True with Cursor family (including misbranded Claude-default + Cursor
     /// transcript path) + session id + positive `_ppid` and **no** parseable
     /// parent UUID in `transcript_path`.
+    ///
+    /// Never for `sessionStart` / `sessionEnd`: Cursor sends those for a
+    /// composer conversation, not a Task, and a new chat's `sessionStart`
+    /// comes before Cursor has a transcript for it — a lone sibling chat on
+    /// the same IDE pid would adopt the new chat as its Task.
     public static func shouldAttemptPpidParentFallback(raw: [String: Any]) -> Bool {
         let declared = (raw["_source"] as? String) ?? (raw["source"] as? String)
         let path = transcriptPath(from: raw)
         guard shouldTreatAsCursorFamily(declaredSource: declared, transcriptPath: path),
               sessionId(from: raw) != nil,
-              positivePpid(from: raw) != nil else {
+              positivePpid(from: raw) != nil,
+              !isConversationLifecycleEvent(raw) else {
             return false
         }
         if let path,
@@ -264,6 +270,14 @@ public enum CursorSubsessionRouter {
             return nil
         }
         return sorted[0].sessionId
+    }
+
+    private static func isConversationLifecycleEvent(_ raw: [String: Any]) -> Bool {
+        guard let name = nonEmptyString(raw["hook_event_name"]) ?? nonEmptyString(raw["hookEventName"]) else {
+            return false
+        }
+        let normalized = EventNormalizer.normalize(name)
+        return normalized == "SessionStart" || normalized == "SessionEnd"
     }
 
     public static func sessionId(from raw: [String: Any]) -> String? {

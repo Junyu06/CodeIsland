@@ -287,6 +287,15 @@ guard !input.isEmpty, var json = hermesInput ?? parsedInput else {
     exit(0)
 }
 
+// Cursor also runs CodeIsland's Claude Code hook (it imports Claude Code
+// hooks) with its own payload, so a source-less event may be Cursor's (#377).
+// A step CodeIsland is wired to in both configs reaches the bridge twice with
+// the same stdin; its digest lets the island keep one of the two.
+let isCursorPayload = CursorHookPayload.isCursorHook(json)
+if isCursorPayload {
+    json[CursorHookPayload.digestKey] = CursorHookPayload.deliveryDigest(of: input)
+}
+
 // Hermes runs each hook with the firing profile's HERMES_HOME; the island reads
 // that session's title and messages from the store there (`state.db`).
 if sourceTag == "hermes", let hermesHome = nonEmptyString(env["HERMES_HOME"]) {
@@ -443,10 +452,12 @@ let coreAncestry = ancestry.map { (pid: Int32($0.pid), executablePath: $0.execut
 // inferred a real source — e.g. the omo OpenCode plugin firing Claude hooks)
 // are marked `_via_plugin` so the host app can route them per
 // pluginSessionMode (#123). A direct plugin's own `_source` counts as declared,
-// and Claude Code firing its own (source-less) hook is not a proxy.
+// and Claude Code firing its own (source-less) hook is not a proxy. Neither is
+// Cursor firing it: Cursor's payload declares Cursor (#377).
 let bridgeSource = CLIProcessResolver.bridgeSource(
     sourceTag: sourceTag,
     payloadSource: json["_source"] as? String,
+    cursorPayload: isCursorPayload,
     ancestry: coreAncestry
 )
 let effectiveSource = bridgeSource.source
@@ -517,7 +528,12 @@ let isGeminiBasedSource = sourceTag == "google-antigravity" || sourceTag == "gem
 let isPermission = normalizedEventName == "PermissionRequest"
 let isQuestion = (normalizedEventName == "Notification" || eventName == "afterAgentThought")
     && json["question"] as? String != nil
-let isBlocking = isPermission || isQuestion
+// A hook Cursor runs never waits on the island. Cursor does not import Claude
+// Code's PermissionRequest or Notification hook, and it reads a hook's stdout
+// against its own schema for the step: an answer in the island's format is not
+// one it acts on, and on a permission step (`preToolUse` among them) an answer
+// it cannot use blocks the tool. Printing nothing leaves the call to Cursor.
+let isBlocking = (isPermission || isQuestion) && !isCursorPayload
 
 debugLog("event=\(eventName) normalized=\(normalizedEventName) session=\(sessionId) permission=\(isPermission) question=\(isQuestion)")
 

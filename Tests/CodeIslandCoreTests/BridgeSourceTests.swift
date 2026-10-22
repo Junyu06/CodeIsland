@@ -127,4 +127,105 @@ final class BridgeSourceTests: XCTestCase {
         XCTAssertNil(nothing.source)
         XCTAssertFalse(nothing.viaPlugin)
     }
+
+    // MARK: - Cursor running Claude Code's hooks (#377)
+
+    /// The hook as reported: Cursor's extension host runs it, straight under
+    /// Cursor.app — no Claude binary anywhere.
+    private let underCursorExtensionHost: [(pid: Int32, executablePath: String?)] = [
+        (900, "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper (Plugin).app/Contents/MacOS/Cursor Helper (Plugin)"),
+        (800, "/Applications/Cursor.app/Contents/MacOS/Cursor"),
+    ]
+
+    /// Cursor runs the Claude Code hooks in ~/.claude/settings.json, where
+    /// CodeIsland's hook has no `--source`. Its payload says Cursor, and that
+    /// is a declaration: marked as a proxy, "hide" would auto-allow and drop
+    /// it like a plugin's.
+    func testCursorRunningClaudeCodesHookIsCursor() {
+        let resolved = CLIProcessResolver.bridgeSource(
+            sourceTag: nil, payloadSource: nil, cursorPayload: true, ancestry: underCursorExtensionHost
+        )
+        XCTAssertEqual(resolved.source, "cursor")
+        XCTAssertFalse(resolved.viaPlugin)
+        // Same `_ppid` as the `--source cursor` hooks: the extension host.
+        XCTAssertEqual(
+            CLIProcessResolver.resolvedTrackedPID(
+                immediateParentPID: 950,
+                source: resolved.source,
+                ancestry: [(950, "/bin/sh")] + underCursorExtensionHost
+            ),
+            900
+        )
+    }
+
+    /// cursor-agent imports the same hooks; it is the CLI, as with `--source cursor`.
+    func testCursorAgentRunningClaudeCodesHookIsCursorCLI() {
+        let underCursorAgent: [(pid: Int32, executablePath: String?)] = [
+            (950, "/bin/zsh"),
+            (900, "/Users/u/.local/share/cursor-agent/versions/2026.09.26-dd393fe/cursor-agent"),
+            (800, "/bin/zsh"),
+        ]
+        let resolved = CLIProcessResolver.bridgeSource(
+            sourceTag: nil, payloadSource: nil, cursorPayload: true, ancestry: underCursorAgent
+        )
+        XCTAssertEqual(resolved.source, "cursor-cli")
+        XCTAssertFalse(resolved.viaPlugin)
+    }
+
+    /// Only Cursor's payload says Cursor. Claude Code inside Cursor — its
+    /// integrated terminal, or the Claude Code extension — sends Claude's own
+    /// payload and stays Claude.
+    func testClaudeCodeInsideCursorStaysClaude() {
+        let terminal: [(pid: Int32, executablePath: String?)] = [
+            (950, "/bin/sh"),
+            (900, "/Users/u/.local/share/claude/versions/2.1.294"),
+            (850, "/bin/zsh"),
+            (800, "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper.app/Contents/MacOS/Cursor Helper"),
+            (700, "/Applications/Cursor.app/Contents/MacOS/Cursor"),
+        ]
+        let extensionBinary: [(pid: Int32, executablePath: String?)] = [
+            (950, "/bin/sh"),
+            (900, "/Users/u/.cursor/extensions/anthropic.claude-code-2.1.294-darwin-arm64/resources/native-binary/claude"),
+        ] + underCursorExtensionHost
+        for ancestry in [terminal, extensionBinary] {
+            let resolved = CLIProcessResolver.bridgeSource(sourceTag: nil, payloadSource: nil, ancestry: ancestry)
+            XCTAssertEqual(resolved.source, "claude")
+            XCTAssertFalse(resolved.viaPlugin)
+        }
+    }
+
+    /// No ancestry rule stands in for the payload: Claude Code installed with
+    /// npm runs as `node`, so in Cursor's terminal its hook has Cursor's
+    /// processes above it and no Claude binary — the same shape as a hook
+    /// Cursor runs itself (#220).
+    func testCursorProcessesAloneNeverSayCursor() {
+        let npmClaudeInCursorTerminal: [(pid: Int32, executablePath: String?)] = [
+            (950, "/bin/sh"),
+            (900, "/opt/homebrew/Cellar/node/24.1.0/bin/node"),
+            (850, "/bin/zsh"),
+            (800, "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper.app/Contents/MacOS/Cursor Helper"),
+            (700, "/Applications/Cursor.app/Contents/MacOS/Cursor"),
+        ]
+        for ancestry in [npmClaudeInCursorTerminal, underCursorExtensionHost] {
+            let resolved = CLIProcessResolver.bridgeSource(sourceTag: nil, payloadSource: nil, ancestry: ancestry)
+            XCTAssertNil(resolved.source, "left to the app's default rather than guessed")
+            XCTAssertFalse(resolved.viaPlugin)
+        }
+    }
+
+    /// An explicit `--source` or plugin `_source` still outranks the payload.
+    func testDeclaredSourceOutranksCursorsPayload() {
+        XCTAssertEqual(
+            CLIProcessResolver.bridgeSource(
+                sourceTag: "traecli", payloadSource: nil, cursorPayload: true, ancestry: underCursorExtensionHost
+            ).source,
+            "traecli"
+        )
+        XCTAssertEqual(
+            CLIProcessResolver.bridgeSource(
+                sourceTag: nil, payloadSource: "opencode", cursorPayload: true, ancestry: underCursorExtensionHost
+            ).source,
+            "opencode"
+        )
+    }
 }
