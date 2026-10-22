@@ -66,7 +66,7 @@ enum SessionPersistence {
         environment: ProcessInfo.processInfo.environment,
         isRunningTests: RuntimeEnvironment.isRunningTests
     )
-    private static let filePath = filePath(in: dirPath)
+    static let filePath = filePath(in: dirPath)
 
     private static func filePath(in directory: String) -> String {
         directory + "/sessions.json"

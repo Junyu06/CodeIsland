@@ -2426,6 +2426,8 @@ private struct AboutPage: View {
                     )
                 }
                 .buttonStyle(.plain)
+                // What the zip holds, also on the save panel it opens.
+                .help(l10n["export_diagnostics_desc"])
                 .onHover { h in
                     if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
                 }
