@@ -36,11 +36,6 @@ private struct CodexSpawnEdgeRecord {
     let transcriptPath: String?
 }
 
-struct ProcessIdentity: Equatable {
-    let pid: pid_t
-    let startTime: Date?
-}
-
 struct CodexDiscoveryIdentity: Equatable, Sendable {
     let sessionId: String
     let providerSessionId: String?
@@ -392,13 +387,9 @@ final class AppState {
     }
     /// Auto-collapse timer fired but mouse is inside panel — defer collapse until mouse leaves
     var deferCollapseOnMouseLeave = false
-    /// `attachParentPid` is the monitored process's ppid captured when the monitor was
-    /// attached. Processes that already had ppid <= 1 at attach time are launchd-managed
-    /// daemons (e.g. a Hermes gateway with KeepAlive=true), NOT orphans of a closed
-    /// terminal — they must never be terminated by orphan cleanup (#243).
-    /// Cancelled from `deinit` off the main actor.
-    @ObservationIgnored
-    nonisolated(unsafe) private var processMonitors: [String: (source: DispatchSourceProcess, process: ProcessIdentity, attachParentPid: pid_t?)] = [:]
+    /// Exit watches on the sessions' local CLI processes.
+    let processMonitor = SessionProcessMonitor()
+    /// Sessions in the grace period after their process exited, with that process.
     private var exitingSessions: [String: ProcessIdentity] = [:]
     @ObservationIgnored
     nonisolated(unsafe) private var saveTimer: Timer?
@@ -583,26 +574,11 @@ final class AppState {
     private func cleanupIdleSessions() {
         // 1. Verify monitored PIDs are still alive (DispatchSource can silently miss exits)
         //    Also kill orphaned processes (ppid <= 1, terminal closed but process survived).
-        var deadMonitors: [(String, ProcessIdentity)] = []
-        var orphaned: [(String, pid_t)] = []
-        for (sessionId, monitor) in processMonitors {
-            let process = monitor.process
-            let pid = process.pid
-            // Check if the monitored process is still the same live process.
-            if !Self.isLiveProcess(process) {
-                deadMonitors.append((sessionId, process))
-                continue
-            }
-            // Check for orphaned processes: ppid <= 1 now, but only if the process had a
-            // real parent when we attached. A process whose ppid was already <= 1 at attach
-            // time is a launchd-managed daemon, not a terminal orphan — killing it puts
-            // KeepAlive daemons into a SIGTERM/restart loop (#243).
-            if Self.isReparentedOrphan(currentParentPid: Self.parentPid(of: pid), attachParentPid: monitor.attachParentPid)
-                && shouldTerminateOrphanedProcess(sessionId: sessionId, pid: pid) {
-                orphaned.append((sessionId, pid))
-            }
+        let sweep = processMonitor.sweep()
+        let orphaned = sweep.reparented.filter {
+            shouldTerminateOrphanedProcess(sessionId: $0.sessionId, pid: $0.pid)
         }
-        for (sessionId, process) in deadMonitors {
+        for (sessionId, process) in sweep.exited {
             // PID gone but monitor didn't fire — treat as process exit so session is removed
             // promptly (after 5s grace) instead of lingering for 10 minutes.
             handleProcessExit(sessionId: sessionId, exitedProcess: process)
@@ -629,7 +605,7 @@ final class AppState {
         //    clock right after: their session store stays silent through a long
         //    tool run and for as long as a permission card is left open.
         for (key, session) in sessions
-            where processMonitors[key] == nil
+            where !processMonitor.isWatching(key)
             && session.status != .idle
             && !session.isRemote
             && !key.hasPrefix(Self.coworkSessionPrefix) {
@@ -668,7 +644,7 @@ final class AppState {
                 }
                 continue
             }
-            guard processMonitors[key] != nil else { continue }
+            guard processMonitor.isWatching(key) else { continue }
             if session.isNativeAppMode,
                elapsed >= codexTerminalTurnSettleTime,
                let finishedAt = Self.nativeAppFinishedTurnTimestamp(sessionId: key, session: session),
@@ -690,9 +666,9 @@ final class AppState {
         // 3. Verify PID liveness for sessions without monitors but with a known PID.
         //    If the process died: idle sessions are removed directly (no grace needed),
         //    non-idle sessions go through handleProcessExit for the 5s grace period.
-        for (key, session) in sessions where processMonitors[key] == nil {
+        for (key, session) in sessions where !processMonitor.isWatching(key) {
             guard let process = resolvedSessionProcessIdentity(for: key) else { continue }
-            if !Self.isLiveProcess(process) {
+            if !ProcessTable.isLiveProcess(process) {
                 if exitingSessions[key] == process { continue }
                 if session.status == .idle {
                     removeSession(key)
@@ -750,7 +726,7 @@ final class AppState {
             if Self.isStaleIdleSession(
                 idleMinutes: idleMinutes,
                 userTimeoutMinutes: userTimeout,
-                hasMonitor: processMonitors[key] != nil,
+                hasMonitor: processMonitor.isWatching(key),
                 hermesChatElsewhere: session.hermesChatElsewhere
             ) {
                 removeSession(key)
@@ -802,14 +778,14 @@ final class AppState {
 
     private func resolvedSessionProcessIdentity(for sessionId: String) -> ProcessIdentity? {
         guard let process = currentSessionProcessIdentity(for: sessionId) else { return nil }
-        if let resolved = Self.trackedProcessIdentity(for: process.pid, source: sessions[sessionId]?.source) {
+        if let resolved = ProcessTable.trackedProcessIdentity(for: process.pid, source: sessions[sessionId]?.source) {
             if resolved != process {
                 setSessionProcessIdentity(resolved, for: sessionId)
             }
             return resolved
         }
         if process.startTime != nil { return process }
-        guard let refreshed = Self.liveProcessIdentity(for: process.pid) else { return process }
+        guard let refreshed = ProcessTable.liveProcessIdentity(for: process.pid) else { return process }
         setSessionProcessIdentity(refreshed, for: sessionId)
         return refreshed
     }
@@ -824,71 +800,6 @@ final class AppState {
         if session.isNativeAppMode { return false }
         guard let source = SessionSnapshot.normalizedSupportedSource(session.source) else { return true }
         return !Self.isNativeAppProcess(pid, source: source)
-    }
-
-    /// Current ppid of `pid`, or nil if the process is gone / info is unavailable.
-    nonisolated static func parentPid(of pid: pid_t) -> pid_t? {
-        var info = proc_bsdinfo()
-        let ret = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
-        guard ret > 0 else { return nil }
-        return pid_t(info.pbi_ppid)
-    }
-
-    /// A process counts as a terminal orphan only when it USED to have a real parent
-    /// (attachParentPid > 1) and has since been reparented to launchd/init (ppid <= 1).
-    /// Daemons started by launchd have ppid <= 1 from the beginning and are never
-    /// orphans, no matter how long they run (#243). Unknown attach ppid stays safe: no kill.
-    nonisolated static func isReparentedOrphan(currentParentPid: pid_t?, attachParentPid: pid_t?) -> Bool {
-        guard let currentParentPid, currentParentPid <= 1 else { return false }
-        guard let attachParentPid, attachParentPid > 1 else { return false }
-        return true
-    }
-
-    nonisolated static func liveProcessIdentity(for pid: pid_t) -> ProcessIdentity? {
-        guard pid > 0, kill(pid, 0) == 0 else { return nil }
-        return ProcessIdentity(pid: pid, startTime: getProcessStartTime(pid))
-    }
-
-    nonisolated static func isLiveProcess(_ process: ProcessIdentity) -> Bool {
-        guard process.pid > 0, kill(process.pid, 0) == 0 else { return false }
-        guard let expectedStart = process.startTime else { return true }
-        return getProcessStartTime(process.pid) == expectedStart
-    }
-
-    private nonisolated static func trackedProcessIdentity(for pid: pid_t, source: String?) -> ProcessIdentity? {
-        guard pid > 0 else { return nil }
-
-        var currentPid: pid_t? = pid
-        var visited = Set<pid_t>()
-        var firstLiveProcess: ProcessIdentity?
-
-        for _ in 0..<6 {
-            guard let candidatePid = currentPid,
-                  candidatePid > 0,
-                  !visited.contains(candidatePid),
-                  let process = liveProcessIdentity(for: candidatePid) else {
-                break
-            }
-
-            visited.insert(candidatePid)
-            if firstLiveProcess == nil {
-                firstLiveProcess = process
-            }
-            if let path = executablePath(for: candidatePid),
-               CLIProcessResolver.sourceMatchesExecutablePath(path, source: source) {
-                return process
-            }
-            currentPid = parentPID(for: candidatePid)
-        }
-
-        return firstLiveProcess
-    }
-
-    private nonisolated static func parentPID(for pid: pid_t) -> pid_t? {
-        var info = proc_bsdinfo()
-        let ret = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
-        guard ret > 0, info.pbi_ppid > 0 else { return nil }
-        return pid_t(info.pbi_ppid)
     }
 
     /// Both bundle names the Qoder IDE has shipped under, lowercased.
@@ -925,7 +836,7 @@ final class AppState {
     }
 
     private nonisolated static func isNativeAppProcess(_ pid: pid_t, source: String) -> Bool {
-        guard let executable = executablePath(for: pid) else { return false }
+        guard let executable = ProcessTable.executablePath(for: pid) else { return false }
         let path = executable.lowercased()
         switch source {
         case "cursor":     return path.contains("/cursor.app/contents/")
@@ -962,7 +873,7 @@ final class AppState {
     /// Watch a Claude process for exit — waits a grace period before removing, in case the
     /// process restarts (e.g. auto-update) or a new hook event re-activates the session.
     private func monitorProcess(sessionId: String, pid: pid_t) {
-        guard let process = Self.liveProcessIdentity(for: pid) else {
+        guard let process = ProcessTable.liveProcessIdentity(for: pid) else {
             handleProcessExit(sessionId: sessionId, exitedProcess: ProcessIdentity(pid: pid, startTime: nil))
             return
         }
@@ -970,22 +881,17 @@ final class AppState {
     }
 
     private func monitorProcess(sessionId: String, process: ProcessIdentity) {
-        guard processMonitors[sessionId] == nil else { return }
-        let source = DispatchSource.makeProcessSource(identifier: process.pid, eventMask: .exit, queue: .main)
-        source.setEventHandler { [weak self] in
-            Task { @MainActor in
-                guard let self = self, self.sessions[sessionId] != nil else { return }
-                self.handleProcessExit(sessionId: sessionId, exitedProcess: process)
-            }
+        let attached = processMonitor.watch(sessionId: sessionId, process: process) { [weak self] in
+            guard let self = self, self.sessions[sessionId] != nil else { return }
+            self.handleProcessExit(sessionId: sessionId, exitedProcess: process)
         }
-        source.resume()
-        processMonitors[sessionId] = (source: source, process: process, attachParentPid: Self.parentPid(of: process.pid))
+        guard attached else { return }
         exitingSessions.removeValue(forKey: sessionId)
 
         // Keep cliPid aligned with the monitored process unless we already have a different
         // live PID from a stronger source (hooks beat heuristic discovery).
         if let currentProcess = resolvedSessionProcessIdentity(for: sessionId) {
-            if !Self.isLiveProcess(currentProcess) || currentProcess.pid == process.pid {
+            if !ProcessTable.isLiveProcess(currentProcess) || currentProcess.pid == process.pid {
                 setSessionProcessIdentity(process, for: sessionId)
             }
         } else {
@@ -993,7 +899,7 @@ final class AppState {
         }
 
         // Safety: if process already exited before monitor started
-        if !Self.isLiveProcess(process) {
+        if !ProcessTable.isLiveProcess(process) {
             handleProcessExit(sessionId: sessionId, exitedProcess: process)
         }
     }
@@ -1007,7 +913,7 @@ final class AppState {
         // If the session already moved to a replacement live PID, reattach immediately and
         // avoid flashing idle because a stale/wrong monitor exited.
         if let currentProcess = resolvedSessionProcessIdentity(for: sessionId),
-           currentProcess != exitedProcess, Self.isLiveProcess(currentProcess) {
+           currentProcess != exitedProcess, ProcessTable.isLiveProcess(currentProcess) {
             monitorProcess(sessionId: sessionId, process: currentProcess)
             return
         }
@@ -1036,12 +942,12 @@ final class AppState {
             guard self.exitingSessions[sessionId] == exitedProcess else { return }
 
             // A new monitor was attached during the grace period (new process took over)
-            if self.processMonitors[sessionId] != nil { return }
+            if self.processMonitor.isWatching(sessionId) { return }
 
             // Session was taken over by a different process (e.g. auto-update/restart):
             // cliPid changed to a new PID that's still alive → attach monitor, don't remove.
             if let currentProcess = self.resolvedSessionProcessIdentity(for: sessionId),
-               currentProcess != exitedProcess, Self.isLiveProcess(currentProcess) {
+               currentProcess != exitedProcess, ProcessTable.isLiveProcess(currentProcess) {
                 self.monitorProcess(sessionId: sessionId, process: currentProcess)
                 return
             }
@@ -1049,7 +955,7 @@ final class AppState {
             // Original process confirmed dead — remove regardless of lastActivity.
             // This prevents a race where an in-flight hook event (e.g. "Stop") updates
             // lastActivity after exitTime, causing the session to linger for 10+ minutes.
-            if !Self.isLiveProcess(exitedProcess) {
+            if !ProcessTable.isLiveProcess(exitedProcess) {
                 self.removeSession(sessionId)
                 return
             }
@@ -1067,8 +973,7 @@ final class AppState {
     }
 
     private func stopMonitor(_ sessionId: String) {
-        processMonitors[sessionId]?.source.cancel()
-        processMonitors.removeValue(forKey: sessionId)
+        processMonitor.stop(sessionId)
     }
 
     /// Remove a session, clean up its monitor, and resume any pending continuations.
@@ -1141,11 +1046,11 @@ final class AppState {
             exitingSessions.removeValue(forKey: sessionId)
             return
         }
-        let currentMonitor = processMonitors[sessionId]?.process
+        let currentMonitor = processMonitor.watchedProcess(for: sessionId)
 
         // Primary: use PID from bridge (works for any CLI)
         if let sessionProcess = resolvedSessionProcessIdentity(for: sessionId),
-           Self.isLiveProcess(sessionProcess) {
+           ProcessTable.isLiveProcess(sessionProcess) {
             if backfillClaudeTerminalMetadata(sessionId: sessionId, process: sessionProcess) {
                 scheduleSave()
             }
@@ -1157,7 +1062,7 @@ final class AppState {
             return
         }
 
-        if let currentMonitor, Self.isLiveProcess(currentMonitor) {
+        if let currentMonitor, ProcessTable.isLiveProcess(currentMonitor) {
             setSessionProcessIdentity(currentMonitor, for: sessionId)
             if backfillClaudeTerminalMetadata(sessionId: sessionId, process: currentMonitor) {
                 scheduleSave()
@@ -1173,11 +1078,11 @@ final class AppState {
             await MainActor.run { [weak self] in
                 guard let self = self, let pid = pid,
                       self.sessions[sessionId] != nil else { return }
-                guard let discoveredProcess = Self.liveProcessIdentity(for: pid) else { return }
+                guard let discoveredProcess = ProcessTable.liveProcessIdentity(for: pid) else { return }
 
                 let preferredProcess: ProcessIdentity
                 if let currentProcess = self.resolvedSessionProcessIdentity(for: sessionId),
-                   Self.isLiveProcess(currentProcess) {
+                   ProcessTable.isLiveProcess(currentProcess) {
                     preferredProcess = currentProcess
                 } else {
                     preferredProcess = discoveredProcess
@@ -1187,12 +1092,12 @@ final class AppState {
                 if self.backfillClaudeTerminalMetadata(sessionId: sessionId, process: preferredProcess) {
                     self.scheduleSave()
                 }
-                if let monitorProcess = self.processMonitors[sessionId]?.process,
-                   monitorProcess == preferredProcess, Self.isLiveProcess(monitorProcess) {
+                if let monitorProcess = self.processMonitor.watchedProcess(for: sessionId),
+                   monitorProcess == preferredProcess, ProcessTable.isLiveProcess(monitorProcess) {
                     return
                 }
 
-                if self.processMonitors[sessionId] != nil {
+                if self.processMonitor.isWatching(sessionId) {
                     self.stopMonitor(sessionId)
                 }
                 self.monitorProcess(sessionId: sessionId, process: preferredProcess)
@@ -1207,7 +1112,7 @@ final class AppState {
         guard let normalizedSource = SessionSnapshot.normalizedSupportedSource(source) else { return nil }
         let pids = findPids(forSource: normalizedSource)
         for pid in pids {
-            if getCwd(for: pid) == cwd { return pid }
+            if ProcessTable.getCwd(for: pid) == cwd { return pid }
         }
         return nil
     }
@@ -1928,7 +1833,7 @@ final class AppState {
         guard let started = sessions[sessionId],
               started.source == "grok",
               let pid = started.cliPid else { return }
-        supersededGrokSessions = supersededGrokSessions.filter { Self.isLiveProcess($0.value) }
+        supersededGrokSessions = supersededGrokSessions.filter { ProcessTable.isLiveProcess($0.value) }
 
         let superseded = sessions.compactMap { key, candidate -> String? in
             guard Self.isGrokSessionSupersededBySessionStart(
@@ -1945,7 +1850,7 @@ final class AppState {
         }
         guard !superseded.isEmpty else { return }
 
-        let process = Self.liveProcessIdentity(for: pid) ?? ProcessIdentity(pid: pid, startTime: nil)
+        let process = ProcessTable.liveProcessIdentity(for: pid) ?? ProcessIdentity(pid: pid, startTime: nil)
         for key in superseded {
             log.info("retiring superseded grok session=\(key, privacy: .public) pid=\(pid, privacy: .public) new=\(sessionId, privacy: .public)")
             supersededGrokSessions[key] = process
@@ -1963,7 +1868,7 @@ final class AppState {
         guard let process = supersededGrokSessions[sessionId] else { return false }
         if normalizedEventName == "SessionStart"
             || normalizedEventName == "UserPromptSubmit"
-            || !Self.isLiveProcess(process) {
+            || !ProcessTable.isLiveProcess(process) {
             supersededGrokSessions.removeValue(forKey: sessionId)
             return false
         }
@@ -1972,7 +1877,7 @@ final class AppState {
 
     private func isSupersededGrokDiscovery(_ info: DiscoveredSession) -> Bool {
         guard let process = supersededGrokSessions[info.sessionId] else { return false }
-        if Self.isLiveProcess(process) { return true }
+        if ProcessTable.isLiveProcess(process) { return true }
         supersededGrokSessions.removeValue(forKey: info.sessionId)
         return false
     }
@@ -3157,7 +3062,7 @@ final class AppState {
 
     private nonisolated static func readModelForSession(sessionId: String, session: SessionSnapshot) -> String? {
         guard let source = SessionSnapshot.normalizedSupportedSource(session.source) else { return nil }
-        let processStart = session.cliStartTime ?? session.cliPid.flatMap { liveProcessIdentity(for: $0)?.startTime }
+        let processStart = session.cliStartTime ?? session.cliPid.flatMap { ProcessTable.liveProcessIdentity(for: $0)?.startTime }
 
         switch source {
         case "claude":
@@ -3251,7 +3156,7 @@ final class AppState {
         } else {
             effectiveSessionId = sessionId
         }
-        let processStart = session.cliStartTime ?? session.cliPid.flatMap { liveProcessIdentity(for: $0)?.startTime }
+        let processStart = session.cliStartTime ?? session.cliPid.flatMap { ProcessTable.liveProcessIdentity(for: $0)?.startTime }
 
         guard let transcriptPath = codexTranscriptPath(
             sessionId: effectiveSessionId,
@@ -3521,7 +3426,7 @@ final class AppState {
             // stale sessions reappearing briefly after the app or IDE restarts (#46).
             if let pid = p.cliPid, pid > 0 {
                 let identity = ProcessIdentity(pid: pid, startTime: p.cliStartTime)
-                if Self.isLiveProcess(identity) {
+                if ProcessTable.isLiveProcess(identity) {
                     snapshot.cliPid = pid
                     snapshot.cliStartTime = p.cliStartTime
                 }
@@ -3578,7 +3483,7 @@ final class AppState {
     }
 
     private nonisolated static func findDiscoveredSessions() -> [DiscoveredSession] {
-        let candidatePids = allProcessIds()
+        let candidatePids = ProcessTable.allProcessIds()
         var discovered: [DiscoveredSession] = []
         if ConfigInstaller.isEnabled(source: "claude") {
             discovered.append(contentsOf: findActiveClaudeSessions(candidatePids: candidatePids))
@@ -3914,12 +3819,12 @@ final class AppState {
                 if let pid = info.pid, pid > 0 {
                     let existingPid = sessions[info.sessionId]?.cliPid ?? 0
                     let existingProcess = resolvedSessionProcessIdentity(for: info.sessionId)
-                    let existingAlive = existingProcess.map(Self.isLiveProcess) ?? false
+                    let existingAlive = existingProcess.map(ProcessTable.isLiveProcess) ?? false
                     if existingAlive && existingPid != pid {
                         // Existing PID is alive and different — discovery PID is unreliable.
                     } else {
                         // No existing PID, or it's dead, or it matches — safe to use discovery PID.
-                        if !existingAlive, let process = Self.liveProcessIdentity(for: pid) {
+                        if !existingAlive, let process = ProcessTable.liveProcessIdentity(for: pid) {
                             setSessionProcessIdentity(process, for: info.sessionId)
                             didMutate = true
                         }
@@ -3972,7 +3877,7 @@ final class AppState {
                 // Dead persisted PIDs should not block dedup / reattachment.
                 if let discoveredPid = info.pid, let existingPid = existing.cliPid,
                    discoveredPid != existingPid,
-                   Self.isLiveProcess(ProcessIdentity(pid: existingPid, startTime: existing.cliStartTime)) { return false }
+                   ProcessTable.isLiveProcess(ProcessIdentity(pid: existingPid, startTime: existing.cliStartTime)) { return false }
                 return true
             })?.key
 
@@ -3985,10 +3890,10 @@ final class AppState {
                 if let pid = info.pid, pid > 0 {
                     let existingPid = sessions[existingKey]?.cliPid ?? 0
                     let existingProcess = resolvedSessionProcessIdentity(for: existingKey)
-                    let existingAlive = existingProcess.map(Self.isLiveProcess) ?? false
+                    let existingAlive = existingProcess.map(ProcessTable.isLiveProcess) ?? false
                     if existingAlive && existingPid != pid {
                     } else {
-                        if !existingAlive, let process = Self.liveProcessIdentity(for: pid) {
+                        if !existingAlive, let process = ProcessTable.liveProcessIdentity(for: pid) {
                             setSessionProcessIdentity(process, for: existingKey)
                             didMutate = true
                         }
@@ -4018,7 +3923,7 @@ final class AppState {
             session.status = info.status ?? .idle
             session.lastActivity = info.modifiedAt
             session.termBundleId = info.termBundleId
-            if let pid = info.pid, let process = Self.liveProcessIdentity(for: pid) {
+            if let pid = info.pid, let process = ProcessTable.liveProcessIdentity(for: pid) {
                 session.cliPid = process.pid
                 session.cliStartTime = process.startTime
             } else {
@@ -5077,7 +4982,7 @@ final class AppState {
         cursorSubagentIndexTask?.cancel()
         cursorSubagentIndexTask = nil
         cancelCursorSubagentIndexRecheck()
-        for key in Array(processMonitors.keys) { stopMonitor(key) }
+        processMonitor.stopAll()
     }
 
     /// Stops the FSEvents watcher on the main queue so Stop/Invalidate cannot
@@ -5121,9 +5026,7 @@ final class AppState {
         cursorSubagentIndexTask?.cancel()
         cursorSubagentIndexRecheck?.cancel()
         codexAppServerReconnectTask?.cancel()
-        for (_, monitor) in processMonitors {
-            monitor.source.cancel()
-        }
+        // The process monitor cancels its exit sources when it is released.
     }
 
     /// Invalidates main-run-loop Timers and the FSEvents watcher in one main-queue
@@ -5177,13 +5080,13 @@ final class AppState {
 
         let fm = FileManager.default
         let processes = claudePids.compactMap { pid -> ClaudeDiscoveryProcess? in
-            guard let cwd = getCwd(for: pid), !cwd.isEmpty else { return nil }
+            guard let cwd = ProcessTable.getCwd(for: pid), !cwd.isEmpty else { return nil }
             // Skip subagent worktrees — they are child tasks, not independent sessions
             if cwd.contains("/.claude/worktrees/agent-") || cwd.contains("/.git/worktrees/agent-") {
                 return nil
             }
             // Process start time filters stale transcript files
-            return ClaudeDiscoveryProcess(pid: pid, cwd: cwd, startTime: getProcessStartTime(pid))
+            return ClaudeDiscoveryProcess(pid: pid, cwd: cwd, startTime: ProcessTable.getProcessStartTime(pid))
         }
 
         // Each process is matched in the config dir it writes to (its
@@ -5300,22 +5203,6 @@ final class AppState {
         )
     }
 
-    private nonisolated static func allProcessIds() -> [pid_t] {
-        var bufferSize = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
-        guard bufferSize > 0 else { return [] }
-        var pids = [pid_t](repeating: 0, count: Int(bufferSize) / MemoryLayout<pid_t>.size + 10)
-        bufferSize = proc_listpids(UInt32(PROC_ALL_PIDS), 0, &pids, bufferSize)
-        let count = Int(bufferSize) / MemoryLayout<pid_t>.size
-        return Array(pids.prefix(count)).filter { $0 > 0 }
-    }
-
-    private nonisolated static func executablePath(for pid: pid_t) -> String? {
-        var pathBuffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-        let len = proc_pidpath(pid, &pathBuffer, UInt32(pathBuffer.count))
-        guard len > 0 else { return nil }
-        return String(cString: pathBuffer)
-    }
-
     private nonisolated static func findPids(
         matchingPathSubstrings pathSubstrings: [String],
         argSubstrings: [String] = [],
@@ -5326,14 +5213,14 @@ final class AppState {
         guard !loweredPaths.isEmpty || !loweredArgs.isEmpty else { return [] }
 
         var matched: [pid_t] = []
-        for pid in candidatePids ?? allProcessIds() {
-            guard let path = executablePath(for: pid)?.lowercased() else { continue }
+        for pid in candidatePids ?? ProcessTable.allProcessIds() {
+            guard let path = ProcessTable.executablePath(for: pid)?.lowercased() else { continue }
             if loweredPaths.contains(where: { path.contains($0) }) {
                 matched.append(pid)
                 continue
             }
             guard !loweredArgs.isEmpty,
-                  let args = getProcessArgs(pid)?.map({ $0.lowercased() }) else { continue }
+                  let args = ProcessTable.getProcessArgs(pid)?.map({ $0.lowercased() }) else { continue }
             if args.contains(where: { arg in loweredArgs.contains(where: { arg.contains($0) }) }) {
                 matched.append(pid)
             }
@@ -5349,8 +5236,8 @@ final class AppState {
 
         var claudePids: [pid_t] = []
 
-        for pid in candidatePids ?? allProcessIds() {
-            guard let path = executablePath(for: pid) else { continue }
+        for pid in candidatePids ?? ProcessTable.allProcessIds() {
+            guard let path = ProcessTable.executablePath(for: pid) else { continue }
             // Match processes whose executable is under claude's versions directory
             if path.hasPrefix(claudeVersionsDir) {
                 claudePids.append(pid)
@@ -5660,8 +5547,8 @@ final class AppState {
     }
 
     private nonisolated static func findGrokPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        (candidatePids ?? allProcessIds()).filter { pid in
-            guard let path = executablePath(for: pid) else { return false }
+        (candidatePids ?? ProcessTable.allProcessIds()).filter { pid in
+            guard let path = ProcessTable.executablePath(for: pid) else { return false }
             return CLIProcessResolver.sourceMatchesExecutablePath(path, source: "grok")
         }
     }
@@ -5674,8 +5561,8 @@ final class AppState {
         // (bundled ripgrep in .../@minimax-ai/code/node_modules/, the
         // `mcode-tools` bin), and binding the card to one of those would end
         // it when the helper exits.
-        (candidatePids ?? allProcessIds()).filter { pid in
-            getProcessArgs(pid).map(isMinimaxProcessArgs) ?? false
+        (candidatePids ?? ProcessTable.allProcessIds()).filter { pid in
+            ProcessTable.getProcessArgs(pid).map(isMinimaxProcessArgs) ?? false
         }
     }
 
@@ -5725,8 +5612,8 @@ final class AppState {
         var seenSessionIds: Set<String> = []
 
         for pid in kimiPids {
-            guard let cwd = getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { continue }
-            let processStart = getProcessStartTime(pid)
+            guard let cwd = ProcessTable.getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { continue }
+            let processStart = ProcessTable.getProcessStartTime(pid)
 
             // Prefer kimi-code session_index.jsonl (workDir → sessionDir mapping).
             if let indexed = discoverKimiCodeSessionFromIndex(
@@ -6293,8 +6180,8 @@ final class AppState {
 
         let fm = FileManager.default
         let liveProcesses = grokPids.compactMap { pid -> GrokDiscoveryProcess? in
-            guard let cwd = getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { return nil }
-            return GrokDiscoveryProcess(pid: pid, cwd: cwd, startedAt: getProcessStartTime(pid))
+            guard let cwd = ProcessTable.getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { return nil }
+            return GrokDiscoveryProcess(pid: pid, cwd: cwd, startedAt: ProcessTable.getProcessStartTime(pid))
         }
         // Processes compete for sessions only within one root (their
         // GROK_HOME, grouped by identity) and one cwd: two accounts working in
@@ -6419,7 +6306,7 @@ final class AppState {
             // land on it. It is not a session's process: it outlives the client
             // that spawned it, and once reparented to launchd the orphan sweep
             // would SIGTERM it — every session with it (#332).
-            guard let args = getProcessArgs(pid) else { return true }
+            guard let args = ProcessTable.getProcessArgs(pid) else { return true }
             return !isOpenCodeSharedService(arguments: args)
         }
     }
@@ -6429,8 +6316,8 @@ final class AppState {
     /// a cwd match could never pick one of its sessions — its plugin reports
     /// the process instead.
     private nonisolated static func findMimoPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        (candidatePids ?? allProcessIds()).filter { pid in
-            guard let path = executablePath(for: pid) else { return false }
+        (candidatePids ?? ProcessTable.allProcessIds()).filter { pid in
+            guard let path = ProcessTable.executablePath(for: pid) else { return false }
             return CLIProcessResolver.isMimoCLIPath(path)
         }
     }
@@ -6438,27 +6325,6 @@ final class AppState {
     /// `opencode serve --service` — OpenCode 2's per-user shared server.
     nonisolated static func isOpenCodeSharedService(arguments: [String]) -> Bool {
         arguments.contains("serve") && arguments.contains("--service")
-    }
-
-    /// Get the current working directory of a process using proc_pidinfo
-    private nonisolated static func getCwd(for pid: pid_t) -> String? {
-        var pathInfo = proc_vnodepathinfo()
-        let size = MemoryLayout<proc_vnodepathinfo>.size
-        let ret = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &pathInfo, Int32(size))
-        guard ret > 0 else { return nil }
-        return withUnsafePointer(to: pathInfo.pvi_cdir.vip_path) {
-            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
-                String(cString: $0)
-            }
-        }
-    }
-
-    /// Get the start time of a process using proc_pidinfo
-    private nonisolated static func getProcessStartTime(_ pid: pid_t) -> Date? {
-        var info = proc_bsdinfo()
-        let ret = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
-        guard ret > 0 else { return nil }
-        return Date(timeIntervalSince1970: TimeInterval(info.pbi_start_tvsec))
     }
 
     private nonisolated static func isSubagentWorktree(_ cwd: String) -> Bool {
@@ -6506,8 +6372,8 @@ final class AppState {
         var seenSessionIds: Set<String> = []
 
         for pid in pids {
-            guard let cwd = getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { continue }
-            let processStart = getProcessStartTime(pid)
+            guard let cwd = ProcessTable.getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { continue }
+            let processStart = ProcessTable.getProcessStartTime(pid)
             let projectPath = "\(basePath)/\(projectEncoder(cwd))"
             guard let best = findMostRecentJSONLFile(in: projectPath, after: processStart, fm: fm) else { continue }
             if best.modified.timeIntervalSinceNow < -300 { continue }
@@ -6546,12 +6412,12 @@ final class AppState {
         var seenSessionIds: Set<String> = []
 
         for pid in geminiPids {
-            guard let cwd = getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { continue }
+            guard let cwd = ProcessTable.getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { continue }
             guard let projectDir = findGeminiProjectDirectory(for: cwd, tmpBase: tmpBase, projects: projects, fm: fm) else {
                 continue
             }
 
-            let processStart = getProcessStartTime(pid)
+            let processStart = ProcessTable.getProcessStartTime(pid)
             let chatsBase = "\(tmpBase)/\(projectDir)/chats"
             guard let best = findMostRecentGeminiSession(in: chatsBase, after: processStart, fm: fm) else { continue }
             let geminiFreshnessLimit: TimeInterval = processStart != nil ? -300 : -30
@@ -6707,8 +6573,8 @@ final class AppState {
         var seenSessionIds: Set<String> = []
 
         for pid in cursorPids {
-            guard let cwd = getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { continue }
-            let processStart = getProcessStartTime(pid)
+            guard let cwd = ProcessTable.getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { continue }
+            let processStart = ProcessTable.getProcessStartTime(pid)
             let transcriptBase = "\(projectsBase)/\(cwd.appProjectDirEncoded())/agent-transcripts"
             guard let best = findMostRecentCursorTranscript(in: transcriptBase, after: processStart, fm: fm) else { continue }
             let cursorFreshnessLimit: TimeInterval = processStart != nil ? -300 : -30
@@ -6766,8 +6632,8 @@ final class AppState {
         var seenSessionIds: Set<String> = []
 
         for pid in copilotPids {
-            guard let cwd = getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { continue }
-            let processStart = getProcessStartTime(pid)
+            guard let cwd = ProcessTable.getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { continue }
+            let processStart = ProcessTable.getProcessStartTime(pid)
             guard let best = findRecentCopilotSession(base: sessionsBase, cwd: cwd, after: processStart, fm: fm) else {
                 continue
             }
@@ -6996,8 +6862,8 @@ final class AppState {
             var seenSessionIds: Set<String> = []
 
             for pid in pids {
-                guard let cwd = getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { continue }
-                let processStart = getProcessStartTime(pid)
+                guard let cwd = ProcessTable.getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { continue }
+                let processStart = ProcessTable.getProcessStartTime(pid)
                 guard let session = findRecentOpenCodeSession(
                     in: db, cwd: cwd, after: processStart, rootSessionsOnly: rootSessionsOnly
                 ) else { continue }
@@ -7342,8 +7208,8 @@ final class AppState {
     nonisolated static func findCodexProcesses(candidatePids: [pid_t]? = nil) -> [(pid: pid_t, isDesktop: Bool)] {
         var processes: [(pid: pid_t, isDesktop: Bool)] = []
 
-        for pid in candidatePids ?? allProcessIds() {
-            guard let path = executablePath(for: pid) else { continue }
+        for pid in candidatePids ?? ProcessTable.allProcessIds() {
+            guard let path = ProcessTable.executablePath(for: pid) else { continue }
             let pathLower = path.lowercased()
 
             // Match 1: Codex Desktop app (native binary). The executable may
@@ -7365,7 +7231,7 @@ final class AppState {
             // Match 3: npm/Homebrew install — node running @openai/codex script.
             // proc_pidpath returns the node binary, so check command-line args instead.
             if pathLower.hasSuffix("/node") {
-                if let args = getProcessArgs(pid),
+                if let args = ProcessTable.getProcessArgs(pid),
                    args.contains(where: { $0.contains("@openai/codex") || $0.contains("openai-codex") }) {
                     processes.append((pid, false))
                 }
@@ -7375,13 +7241,13 @@ final class AppState {
     }
 
     private nonisolated static func bundledCodexProcessRole(pid: pid_t, executablePath path: String) -> CodexProcessRole? {
-        let parent = parentPid(of: pid)
+        let parent = ProcessTable.parentPid(of: pid)
         // CodeIsland's own app-server client runs this binary too, from `/`;
         // as a session process it would claim every CLI rollout.
         if parent == getpid() { return nil }
 
-        var ancestry = [ProcessAncestor(pid: pid, executablePath: path, arguments: getProcessArgs(pid) ?? [])]
-        if let parent, let parentPath = executablePath(for: parent) {
+        var ancestry = [ProcessAncestor(pid: pid, executablePath: path, arguments: ProcessTable.getProcessArgs(pid) ?? [])]
+        if let parent, let parentPath = ProcessTable.executablePath(for: parent) {
             ancestry.append(ProcessAncestor(
                 pid: parent,
                 executablePath: parentPath,
@@ -7390,40 +7256,6 @@ final class AppState {
             ))
         }
         return CLIProcessResolver.codexBundledProcessRole(ancestry: ancestry)
-    }
-
-    /// Get command-line arguments for a process via sysctl KERN_PROCARGS2.
-    private nonisolated static func getProcessArgs(_ pid: pid_t) -> [String]? {
-        var mib = [CTL_KERN, KERN_PROCARGS2, pid]
-        var size = 0
-        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return nil }
-        var buffer = [UInt8](repeating: 0, count: size)
-        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return nil }
-
-        // First 4 bytes = argc (as int32)
-        guard size > MemoryLayout<Int32>.size else { return nil }
-        let argc = buffer.withUnsafeBytes { $0.load(as: Int32.self) }
-        guard argc > 0, argc < 256 else { return nil }
-
-        // Skip past argc + executable path + padding nulls to reach argv
-        var offset = MemoryLayout<Int32>.size
-        // Skip executable path
-        while offset < size && buffer[offset] != 0 { offset += 1 }
-        // Skip null padding
-        while offset < size && buffer[offset] == 0 { offset += 1 }
-
-        // Parse null-terminated argv strings
-        var args: [String] = []
-        var argStart = offset
-        for _ in 0..<argc {
-            while offset < size && buffer[offset] != 0 { offset += 1 }
-            if offset > argStart {
-                args.append(String(bytes: buffer[argStart..<offset], encoding: .utf8) ?? "")
-            }
-            offset += 1
-            argStart = offset
-        }
-        return args
     }
 
     /// Scan a rollout backwards in chunks until the latest lifecycle marker is
@@ -7628,8 +7460,8 @@ final class AppState {
         let processes = codexProcesses.map { process in
             CodexProcessDiscoveryCandidate(
                 pid: process.pid,
-                cwd: getCwd(for: process.pid),
-                startTime: getProcessStartTime(process.pid),
+                cwd: ProcessTable.getCwd(for: process.pid),
+                startTime: ProcessTable.getProcessStartTime(process.pid),
                 isDesktop: process.isDesktop
             )
         }

@@ -52,7 +52,7 @@ extension AppState {
         guard let app = NSRunningApplication
             .runningApplications(withBundleIdentifier: claudeDesktopBundleId)
             .first(where: { !$0.isTerminated }) else { return nil }
-        return liveProcessIdentity(for: app.processIdentifier)
+        return ProcessTable.liveProcessIdentity(for: app.processIdentifier)
     }
 
     static func isCoworkTrackingEnabled(_ defaults: UserDefaults = .standard) -> Bool {
@@ -192,7 +192,7 @@ extension AppState {
     func settleCoworkCards(now: Date = Date()) {
         for (key, session) in sessions
             where key.hasPrefix(Self.coworkSessionPrefix) && session.status != .idle {
-            let hostGone = coworkTurnHosts[key].map { !Self.isLiveProcess($0) } ?? false
+            let hostGone = coworkTurnHosts[key].map { !ProcessTable.isLiveProcess($0) } ?? false
             let timedOut = Self.coworkSilenceTimeout(status: session.status)
                 .map { now.timeIntervalSince(session.lastActivity) > $0 } ?? false
             if hostGone || timedOut {

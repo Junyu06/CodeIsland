@@ -10,7 +10,7 @@ final class ClaudeTerminalMetadataTests: XCTestCase {
 
     private func fixture() throws -> (AppState, ProcessIdentity) {
         let state = AppState()
-        let process = try XCTUnwrap(AppState.liveProcessIdentity(for: getpid()))
+        let process = try XCTUnwrap(ProcessTable.liveProcessIdentity(for: getpid()))
         var session = SessionSnapshot()
         session.source = "claude"
         session.cliPid = process.pid

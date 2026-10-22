@@ -20,13 +20,13 @@ extension AppState {
                 || session.tmuxPane == nil || session.tmuxEnv == nil,
               // Fixed at exec: a second read can't find what the first didn't.
               claudeTerminalProbes[sessionId] != process,
-              Self.isLiveProcess(process) else { return false }
+              ProcessTable.isLiveProcess(process) else { return false }
         let environment = readEnvironment(process.pid)
         claudeTerminalProbes[sessionId] = process
         guard let env = environment,
               let tmux = env["TMUX"], !tmux.isEmpty,
               let pane = env["TMUX_PANE"], !pane.isEmpty,
-              Self.isLiveProcess(process) else { return false }
+              ProcessTable.isLiveProcess(process) else { return false }
         var changed = false
         func fill(_ field: WritableKeyPath<SessionSnapshot, String?>, _ value: String?) {
             guard session[keyPath: field] == nil, let value, !value.isEmpty else { return }
