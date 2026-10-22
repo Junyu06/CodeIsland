@@ -271,7 +271,7 @@ public struct HookIntake {
         }
 
         // Generic compatibility: accept common camelCase aliases from third-party forks
-        if json["hook_event_name"] == nil {
+        if Self.namesNoEvent(json) {
             if let event = Self.nonEmptyString(json["hookEventName"]) {
                 json["hook_event_name"] = event
             } else if let event = Self.nonEmptyString(json["eventName"]) {
@@ -340,7 +340,7 @@ public struct HookIntake {
         // Copilot CLI adaptation: its stdin JSON lacks session_id and hook_event_name.
         // Normalize Copilot's camelCase payload and pass through sessionId when present.
         if sourceTag == "copilot" {
-            if json["hook_event_name"] == nil, let event = eventTag {
+            if Self.namesNoEvent(json), let event = eventTag {
                 json["hook_event_name"] = event
             }
             if json["session_id"] == nil, let sessionId = Self.nonEmptyString(json["sessionId"]) {
@@ -359,7 +359,7 @@ public struct HookIntake {
 
         // Cline adaptation: sends hookName and taskId instead of hook_event_name and session_id.
         if sourceTag == "cline" {
-            if json["hook_event_name"] == nil, let name = Self.nonEmptyString(json["hookName"]) {
+            if Self.namesNoEvent(json), let name = Self.nonEmptyString(json["hookName"]) {
                 json["hook_event_name"] = name
             }
             if json["session_id"] == nil, let taskId = Self.nonEmptyString(json["taskId"]) {
@@ -700,6 +700,13 @@ public struct HookIntake {
     }
 
     // MARK: - Helpers
+
+    /// Whether the payload names no event: no `hook_event_name`, or an empty
+    /// one — as the remote hook reads it when it decides to wait.
+    static func namesNoEvent(_ json: [String: Any]) -> Bool {
+        guard let name = json["hook_event_name"] else { return true }
+        return name as? String == ""
+    }
 
     static func nonEmptyString(_ value: Any?) -> String? {
         guard let raw = value as? String else { return nil }

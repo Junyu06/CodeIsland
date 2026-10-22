@@ -30,7 +30,7 @@ quirk is then fixed once, in HookIntake, for every edge.
 
 ## Payload
 
-The agent's stdin object, unchanged, at the top level — plus `_edge`:
+The agent's stdin object at the top level, plus `_edge`:
 
 ```json
 {
@@ -50,10 +50,38 @@ The agent's stdin object, unchanged, at the top level — plus `_edge`:
 }
 ```
 
-An edge may add what only it can read, under the keys the island already
-knows (the remote hook adds transcript fields such as `last_assistant_message`
-and `_hermes_store`). It does not add `_source`, `_ppid`, `_tty`, `_term_*`,
-`_remote_host_*` or other derived `_` fields: those are HookIntake's.
+An edge changes the stdin object only to:
+
+- add what only it can read, under the keys the island already knows (the
+  remote hook adds transcript fields such as `last_assistant_message`, and
+  `_hermes_store`);
+- name, for islands that predate `_edge` (see *Older islands*), the host
+  (`_remote_host_id`, `_remote_host_name`) and the agent the hook was
+  installed for (`_source`) — except under Claude Code's own hook, which
+  Cursor runs too, where the island decides the source — unless the stdin
+  names them already;
+- drop a `_ppid` / `_hook_ppid` it is given: a pid of its machine is no
+  process of the Mac's.
+
+It adds no other `_` field (`_tty`, `_term_*`, `_via_plugin`, …): those are
+HookIntake's.
+
+### `_` fields a remote payload carries
+
+The remote OpenCode plugin pipes its events through the remote hook with
+fields of its own (`_tty`, `_env`, `_server_port`, and before v6 `_ppid`).
+What the island does with an `_` field in a remote edge's payload:
+
+| Field | |
+|---|---|
+| `_remote_host_id`, `_remote_host_name` | Honoured: the session is filed under that host. `host` fills in what is missing. |
+| `_source` | Under Claude Code's hook (`source: claude`), a supported one names the agent; one the island does not support is left, and the island drops the event, as it does the bridge's. Under any other `source`, the declared source wins. |
+| `_tty` | Honoured as the session's terminal; the edge then sends no `tty`. |
+| `_env` | Kept: the island reads terminal and multiplexer ids from it, as from a local plugin's. |
+| `_hermes_store` | Honoured: the session's title and messages, read from the store on the remote host. |
+| `_ppid`, `_hook_ppid` | Dropped: no process of another machine is tracked. |
+| `_server_port` | Ignored: nothing reads it. |
+| anything else | Passed on as sent. |
 
 ### `_edge` fields
 
@@ -62,24 +90,26 @@ and `_hermes_store`). It does not add `_source`, `_ppid`, `_tty`, `_term_*`,
 | `v` | int | Facts version, `1`. Fields are added without changing it. |
 | `source` | string | The agent the hook was installed for (the bridge's `--source`). `claude` means Claude Code's own `settings.json` hook — which Cursor and other agents also run — so the payload decides, with Claude as the default. |
 | `event` | string | The bridge's `--event`, for agents whose stdin names no event. |
-| `cwd` | string | The hook process's working directory. Used when the payload has no `cwd`. |
+| `cwd` | string | The hook process's working directory. Used when the payload has no `cwd`, or a blank one (after Grok's workspace root). |
 | `tty` | string | The controlling terminal, if any. |
 | `stdin_sha256` | hex string | SHA-256 of the stdin bytes exactly as the agent wrote them. Cursor runs two hooks per step with one stdin; the digest lets the island keep one (#377). |
 | `waits` | bool | Whether this edge waits for the answer (see below). The island never holds a hook nobody waits on. |
-| `host` | `{id, name}` | Present when the edge runs on another machine. Its processes, files and home are not the Mac's: no pid is tracked, nothing is looked up locally. |
-| `env` | object | Only the variables in `HookIntake.environmentKeys` (terminal and multiplexer ids, `GROK_*`, `HERMES_HOME`, `CODEISLAND_SKIP`). Never anything else. Terminal ids of another machine are no use on the Mac: the remote hook sends none. |
-| `ppid` | int | The hook's parent process id. Local edges only. |
+| `host` | `{id, name}` | The machine the edge runs on: the id and name the island gave it (`CODEISLAND_REMOTE_HOST_ID` / `_NAME`). Every edge that sends facts runs on another machine — on the Mac, the bridge reads its own facts and the plugins send their own interpretation — so whatever `host` says, or if it is missing or malformed, HookIntake tracks no pid for the hook and reads no home or file of the Mac to interpret it. A host the edge does not name is left unnamed. |
+| `env` | object | Only the variables in `HookIntake.environmentKeys` (terminal and multiplexer ids, `GROK_*`, `HERMES_HOME`, `CODEISLAND_SKIP`). Never anything else. Terminal ids of another machine are no use on the Mac: the remote hook sends no `env`. |
 | `tmux_client_tty` | string | `tmux display-message -p -t $TMUX_PANE '#{client_tty}'`, if the edge ran it. |
 
-Never send the argv of ancestor processes or more environment than listed.
+Never send the argv of ancestor processes or more environment than listed,
+nor a process id: no pid of another machine is one the island can track, and
+`ppid` is not read.
 
 ## Waiting for the answer
 
 Decide locally, from the stdin, so that no other hook pays a round trip, and
 send the decision as `waits`. Wait if the event name (`hook_event_name`, else
-`event`) is one of `PermissionRequest`, `permission_request`, `BeforeTool`; or
-one of `Notification`, `notification`, `afterAgentThought`, `errorOccurred`
-**and** `question` is a string. Otherwise send and close.
+`event`; an empty name is no name) is one of `PermissionRequest`,
+`permission_request`, `BeforeTool`; or one of `Notification`, `notification`,
+`afterAgentThought`, `errorOccurred` **and** `question` is a string.
+Otherwise do not wait: read the reply for a short while only (*Transport*).
 
 The island has the last word: a hook HookIntake does not hold — one Cursor
 runs, whose stdout Cursor reads against its own schema — is answered at once
@@ -89,9 +119,12 @@ does send is already in the form the agent reads (Gemini CLI and Google
 Antigravity get `{"decision":"allow"|"deny"}`), so print it verbatim.
 
 One answer cannot wait for the island: Google Antigravity refuses a tool call
-whose `PreToolUse` hook prints nothing, so an edge serving it prints
+whose `PreToolUse` hook prints nothing, so the bridge prints
 `{"decision":"ask"}` first, before anything can make it exit
-(`HookIntake.immediateStdout`, #339).
+(`HookIntake.immediateStdout`, #339). The island cannot give that answer for
+an edge — it would come a round trip late — so an edge that serves
+Antigravity prints it itself. The remote hook does not: the remote installer
+wires no Antigravity hook.
 
 ## What the island derives
 
@@ -102,19 +135,25 @@ From the facts and the stdin, in this order (HookIntake is normative):
 2. A non-blank `cursor_version` marks a hook Cursor ran: source `cursor`
    (or `cursor-cli` under cursor-agent) unless a source is declared, never
    held for an answer, `stdin_sha256` kept as the delivery digest.
-3. Aliases: `hookEventName` / `eventName` / `event` / `--event` →
-   `hook_event_name`; `sessionId`, `payload.session_id`, `data.session_id`,
-   `conversationId` → `session_id`; `transcriptPath` → `transcript_path`.
-   Copilot and Cline payload shapes are mapped by source.
+3. Aliases, when `hook_event_name` is absent or empty: `hookEventName` /
+   `eventName` / `event` / `--event` → `hook_event_name`; `sessionId`,
+   `payload.session_id`, `data.session_id`, `conversationId` → `session_id`;
+   `transcriptPath` → `transcript_path`. Copilot and Cline payload shapes are
+   mapped by source.
 4. Source: the declared one, else a supported `_source` in the payload, else
    Cursor's payload, else (bridge only) the process ancestry, else the
-   default. A hook the ancestry attributes to an agent other than Claude
-   Code is another agent firing Claude Code's hook, marked `_via_plugin`.
-5. On the Mac only: `_ppid` (the long-lived agent process), and a
-   `<source>-ppid-<pid>` session id when the agent sends none. A hook still
-   without a session id is dropped.
-6. Terminal context from `env`, `tty`, `cwd`; `_remote_host_id` /
-   `_remote_host_name` from `host` unless the payload names its host.
+   default (an edge's `claude`: Claude) — unless the payload names a `_source`
+   the island does not support, which is left for the island to drop. A hook
+   the ancestry attributes to an agent other than Claude Code is another
+   agent firing Claude Code's hook, marked `_via_plugin`.
+5. Bridge only: `_ppid` (the long-lived agent process), and a
+   `<source>-ppid-<pid>` session id when the agent sends none. An edge's
+   payload loses any `_ppid` / `_hook_ppid`. A hook still without a session
+   id is dropped.
+6. Terminal context from `env`, `tty`, `cwd` (for an edge, a blank `cwd` is
+   none: Grok's workspace root, else `_edge.cwd`, stands in);
+   `_remote_host_id` / `_remote_host_name` from `host` unless the payload
+   names its host.
 
 ## Compatibility
 
@@ -123,6 +162,34 @@ From the facts and the stdin, in this order (HookIntake is normative):
 - An island reads another `v` for the fields it knows.
 - Do not pipe facts through `codeisland-bridge`: it observes its own and
   drops an `_edge` it finds in its stdin.
+
+## Older islands
+
+Several Macs can share one remote host, and not all of them run an island
+that reads `_edge`. An older island ignores `_edge` and takes the top level
+as the edge's own interpretation, as it took the 0.3.1 remote hook's:
+
+- It files the session under the host the top level names, with the source
+  the top level names. That is why the remote hook names both there: without
+  them, every remote session was a local Claude card. Under Claude Code's
+  hook the remote hook names no source, so an older island shows Claude —
+  also for a hook Cursor runs (the 0.3.1 hook named Cursor there).
+- It never sees a pid of the remote host: the remote hook drops one, and the
+  remote OpenCode plugin sends none since v6. (A v5 plugin's `_ppid` reached
+  an older island as a local process to monitor — and to SIGTERM as an
+  orphan.)
+- It reads the event and the session id only as HookEvent spells them
+  (`hook_event_name` and a few camelCase forms; `session_id`, `sessionId`),
+  none of HookIntake's other aliases, and a cwd only where the agent sent
+  one: a remote event with none is dropped on a host with a cwd allow-list
+  (#240). The 0.3.1 hook put its own directory in place of one.
+- It holds a permission or a question by its own reading, and answers in its
+  own form, which the remote hook prints verbatim: an agent that reads
+  `{"decision": …}` (Gemini CLI) gets Claude Code's `hookSpecificOutput`
+  instead.
+- It accepts connections on its main thread, so it lost the event of a hook
+  that had closed before it got there; the remote hook therefore reads its
+  reply even when nothing waits on it (*Transport*).
 
 ## For the Windows bridge
 

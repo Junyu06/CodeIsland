@@ -281,11 +281,16 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
             payloads.append(["hook_event_name": name, "session_id": "s", "question": ["not": "a string"]])
         }
         payloads.append(["event": "PermissionRequest", "session_id": "s"])
+        // An empty name is no name, on both sides.
+        payloads.append(["hook_event_name": "", "event": "PermissionRequest", "session_id": "s"])
+        payloads.append(["hook_event_name": "", "event": "Notification", "session_id": "s", "question": "Which one?"])
+        payloads.append(["hook_event_name": "", "event": "Stop", "session_id": "s"])
         // Spellings the remote hook does not read.
         let unread: [[String: Any]] = [
             ["hookEventName": "PermissionRequest", "sessionId": "s"],
             ["eventName": "PermissionRequest", "session_id": "s"],
             ["hookEventName": "Notification", "session_id": "s", "question": "Which one?"],
+            ["hook_event_name": "", "hookEventName": "PermissionRequest", "session_id": "s"],
         ]
         payloads += unread
 

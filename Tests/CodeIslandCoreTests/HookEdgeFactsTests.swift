@@ -241,6 +241,33 @@ final class HookEdgeFactsTests: XCTestCase {
         XCTAssertEqual(intake.payload["transcript_path"] as? String, "/home/dev/t.jsonl")
     }
 
+    /// An empty `hook_event_name` is no name — on the bridge and for an edge,
+    /// as the remote hook reads it when it decides to wait — so an alias, or
+    /// `--event`, names the event.
+    func testAnEmptyEventNameIsNoName() throws {
+        let bridge = try XCTUnwrap(HookIntake(
+            stdin: ["hook_event_name": "", "hookEventName": "Stop", "session_id": "s"],
+            facts: HookIntake.Facts(parentPID: 1234)
+        ))
+        XCTAssertEqual(bridge.eventName, "Stop")
+        let tagged = try XCTUnwrap(HookIntake(
+            stdin: ["hook_event_name": "", "session_id": "s"],
+            facts: HookIntake.Facts(sourceTag: "copilot", eventTag: "sessionStart", parentPID: 1234)
+        ))
+        XCTAssertEqual(tagged.eventName, "sessionStart")
+
+        let edge = try interpret([
+            "hook_event_name": "",
+            "event": "PermissionRequest",
+            "session_id": "s",
+            "_edge": remoteEdge(source: "claude", extra: ["waits": true]),
+        ])
+        XCTAssertTrue(edge.waitsForAnswer)
+        // With nothing else to name it, the event stays as it was sent.
+        let unnamed = try interpret(["hook_event_name": "", "session_id": "s", "_edge": remoteEdge(source: "claude")])
+        XCTAssertEqual(unnamed.payload["hook_event_name"] as? String, "")
+    }
+
     func testRemoteGeminiAnswerIsPutAsGeminiReadsIt() throws {
         let intake = try interpret([
             "hook_event_name": "BeforeTool",
