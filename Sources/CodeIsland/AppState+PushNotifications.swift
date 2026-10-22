@@ -1,9 +1,10 @@
 import Foundation
 import CodeIslandCore
 
-/// Push notifications, fed from the same places that drive the island:
-/// the permission / question queues and the completion effect. Content is
-/// built from what those queues hold, never re-guessed from raw hook JSON.
+/// Push notifications: the moments `AttentionPolicy` decides to push (a
+/// queued approval or question, a turn's end, a display-only wait) and the
+/// follow-up reminders that come due. Content is built from what the queues
+/// and the sessions hold, never re-guessed from raw hook JSON.
 extension AppState {
     /// Who a session's pushes are about — the labels its card shows.
     func pushSubject(for sessionId: String) -> PushSubject {
@@ -98,38 +99,31 @@ extension AppState {
         }
     }
 
-    /// Runs right after the reducer, before its side effects: a turn that
-    /// ended on an API error pushes the error; any other turn end the
-    /// reducer turned into a completion card pushes a completion.
-    func pushAfterReduce(_ event: HookEvent, sessionId: String, effects: [SideEffect]) {
+    /// A hook event's push, as `AttentionPolicy` decided it: the error a turn
+    /// stopped on, or the turn's completion. Runs once the event has settled
+    /// and before the completion card, with this turn's reply as the summary.
+    func pushHookEvent(_ push: AttentionDecision.Push?, facts: HookEventFacts, sessionId: String) {
+        guard let push else { return }
         let notifier = PushNotifier.shared
-        guard notifier.isEnabled else { return }
-        let session = sessions[sessionId]
-        // A child reports to the agent that spawned it, and that agent to the
-        // user: a child's turn ending or failing is not news on its own (#378).
-        // (Its completion never reaches here: the reducer drops it.)
-        guard session?.parentSessionId == nil else { return }
-        if let failure = PushEventClassifier.sessionError(eventName: event.eventName, raw: event.rawJSON) {
+        switch push.kind {
+        case .error:
             notifier.notify(
-                .error(type: failure.type, detail: failure.detail),
+                .error(type: facts.turnError?.type, detail: facts.turnError?.detail),
                 subject: pushSubject(for: sessionId),
-                smartSuppressed: !self.shouldAutoOpenPendingSurface(for: sessionId)
+                smartSuppressed: push.smartSuppressed
             )
-            return
+        case .completion(let isSubagent, let interrupted):
+            notifier.notify(
+                .completion(summary: Self.pushCompletionSummary(sessions[sessionId])),
+                subject: pushSubject(for: sessionId),
+                smartSuppressed: push.smartSuppressed,
+                isSubagent: isSubagent,
+                interrupted: interrupted
+            )
+        case .approval, .question, .displayOnlyWait:
+            // Requests and waits push from where they are queued or noticed.
+            assertionFailure("a hook event pushes its turn's end only")
         }
-        guard effects.contains(.enqueueCompletion(sessionId: sessionId)) else { return }
-        notifier.notify(
-            .completion(summary: Self.pushCompletionSummary(session)),
-            subject: pushSubject(for: sessionId),
-            smartSuppressed: !self.shouldAutoOpenPendingSurface(for: sessionId),
-            isSubagent: PushEventClassifier.isSubagentCompletion(
-                agentId: event.agentId,
-                raw: event.rawJSON,
-                sessionId: sessionId,
-                session: session
-            ),
-            interrupted: session?.interrupted == true
-        )
     }
 
     /// AiWork daemon turn boundary (its streams bypass the hook reducer).

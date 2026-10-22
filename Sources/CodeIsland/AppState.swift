@@ -1324,34 +1324,44 @@ final class AppState {
     /// `turnFailed`: the turn ended on an error (StopFailure, a failed AiWork
     /// stream or Cowork turn) — its follow-up says so.
     func enqueueCompletion(_ sessionId: String, turnFailed: Bool = false) {
+        let decision = AttentionPolicy.settle(
+            AttentionIntents(
+                completion: .init(turnFailed: turnFailed),
+                followUp: .trackCompletion(turnFailed: turnFailed)
+            ),
+            context: attentionContext(for: sessionId)
+        )
+        announceCompletion(decision, sessionId: sessionId)
+    }
+
+    /// Announce a finished turn the way `AttentionPolicy` decided: the card's
+    /// ERROR mark, the follow-up, then the completion card or the glance dot.
+    func announceCompletion(_ decision: AttentionDecision, sessionId: String) {
+        guard let completion = decision.completion else { return }
         // The session card reads ERROR until the next prompt.
-        sessions[sessionId]?.lastTurnFailed = turnFailed
-        let style = Self.completionStyle()
-        // Follow-ups only chase completions the user asked to hear about.
-        if style != .off {
+        sessions[sessionId]?.lastTurnFailed = completion.turnFailed
+        if case .trackCompletion(let turnFailed)? = decision.followUp {
             followUps.trackCompletion(sessionId: sessionId, turnFailed: turnFailed)
         }
-        switch style {
-        case .off:
+        switch completion.presentation {
+        case .statusOnly:
             // Panel stays compact — status indicators still update, but no
             // completion card pops down (#146).
             return
         case .glance:
             flashGlanceCompletionIndicator()
             return
-        case .expand:
-            break
-        }
+        case .card(let unlessTabVisible):
+            // Don't queue duplicates
+            if completionQueue.contains(sessionId) || justCompletedSessionId == sessionId { return }
 
-        // Don't queue duplicates
-        if completionQueue.contains(sessionId) || justCompletedSessionId == sessionId { return }
-
-        if isShowingCompletion || isShowingInteractive {
-            // Already showing one — queue this for later
-            completionQueue.append(sessionId)
-        } else {
-            // Show immediately
-            showCompletion(sessionId)
+            if isShowingCompletion || isShowingInteractive {
+                // Already showing one — queue this for later
+                completionQueue.append(sessionId)
+            } else {
+                // Show immediately
+                showCompletion(sessionId, unlessTabVisible: unlessTabVisible)
+            }
         }
     }
 
@@ -1463,11 +1473,6 @@ final class AppState {
         }
     }
 
-    /// Fast app-level suppress check (main-thread safe, no blocking).
-    private func shouldSuppressAppLevel(for sessionId: String) -> Bool {
-        !shouldAutoOpenPendingSurface(for: sessionId)
-    }
-
     /// Notification kinds that describe the *account*, not the conversation.
     /// CodeBuddy's documented `notification_type` set is `permission_prompt`,
     /// `idle_prompt`, `auth_success`; only the last is boot-time auth chatter,
@@ -1556,9 +1561,12 @@ final class AppState {
         )
     }
 
-    private func showCompletion(_ sessionId: String) {
+    /// - `unlessTabVisible`: Smart Suppress found the session's terminal in
+    ///   front (`CompletionPresentation.card`); the card waits on a look at
+    ///   the session's own tab.
+    private func showCompletion(_ sessionId: String, unlessTabVisible: Bool) {
         // Fast path: terminal not even frontmost — show immediately
-        guard shouldSuppressAppLevel(for: sessionId) else {
+        guard unlessTabVisible else {
             doShowCompletion(sessionId)
             return
         }
@@ -1799,8 +1807,11 @@ final class AppState {
         // approved in the terminal — resume those (and only those) as approved.
         resolveOrphanPermissionsOnActivity(event)
 
-        let effects = reduceEvent(sessions: &sessions, event: event, maxHistory: maxHistory,
-                                  replyCompletePlaceholder: L10n.shared["reply_complete_placeholder"])
+        let reduction = reduceHookEvent(sessions: &sessions, event: event, maxHistory: maxHistory,
+                                        replyCompletePlaceholder: L10n.shared["reply_complete_placeholder"])
+        // Whose turn this was is read off the session as the event left it,
+        // before the Cursor fold below can rebrand, fold or drop the card.
+        let attentionSubject = AttentionSubject(sessions[sessionId])
 
         // Cursor Agent Tasks often fire Claude-format hooks without `--source`,
         // leaving ghost Claude cards. Rebrand + fold before the rest of the
@@ -1877,15 +1888,20 @@ final class AppState {
             sessions[sessionId]?.isYoloMode = Self.detectCursorYoloMode()
         }
 
-        pushAfterReduce(event, sessionId: sessionId, effects: effects)
-        // The normalizer folds StopFailure onto Stop; only the raw name says
-        // the turn died (same rule as its sound).
-        let turnFailed = EventSoundRouting.soundEvent(
-            rawEventName: event.eventName, normalizedEventName: normalizedEventName
-        ) == EventSoundRouting.turnFailed
-        for effect in effects {
-            executeEffect(effect, sessionId: sessionId, turnFailed: turnFailed)
+        // Now that the event has settled: does the user hear about it, and
+        // how. One decision, carried out in the order the outlets always ran
+        // in — the push, the completion, then the sound.
+        let attention = AttentionPolicy.decide(
+            .hookEvent(reduction.facts),
+            subject: attentionSubject,
+            context: attentionContext(for: sessionId)
+        )
+        pushHookEvent(attention.push, facts: reduction.facts, sessionId: sessionId)
+        announceCompletion(attention, sessionId: sessionId)
+        for effect in reduction.effects {
+            executeEffect(effect, sessionId: sessionId)
         }
+        playAttentionSound(attention, sessionId: sessionId)
 
         if normalizedEventName == "SessionStart" {
             retireGrokSessionsSuperseded(bySessionStartOf: sessionId)
@@ -2016,20 +2032,20 @@ final class AppState {
         refreshDerivedState()
     }
 
-    private func executeEffect(_ effect: SideEffect, sessionId: String, turnFailed: Bool = false) {
+    private func executeEffect(_ effect: SideEffect, sessionId: String) {
         switch effect {
-        case .playSound(let eventName):
-            SoundManager.shared.handleEvent(eventName, sessionId: sessionId)
         case .tryMonitorSession(let sid):
             tryMonitorSession(sid)
         case .stopMonitor(let sid):
             stopMonitor(sid)
         case .removeSession(let sid):
             removeSession(sid)
-        case .enqueueCompletion(let sid):
-            enqueueCompletion(sid, turnFailed: turnFailed)
         case .setActiveSession(let sid):
             activeSessionId = sid
+        case .playSound, .enqueueCompletion:
+            // Attention is AttentionPolicy's to decide; `reduceHookEvent`
+            // never emits these (only the `reduceEvent` composition does).
+            break
         }
     }
 
