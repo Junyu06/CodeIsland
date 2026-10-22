@@ -27,25 +27,35 @@ final class MarkdownReplyViewTests: XCTestCase {
         XCTAssertEqual(ordered[0], MarkdownListMarker(label: "1.", checkbox: .checked))
     }
 
-    // MARK: - Links in a remote reply
+    // MARK: - Links in a reply
 
-    /// A reply's links survive its Markdown whatever they point at. In a
-    /// remote session's reply — written on another machine — only web and
-    /// mail links open: a `file:` link or an app's scheme would open, and so
-    /// launch, something on this Mac.
-    func testRemoteReplyLinksOpenOnlyOnTheWeb() throws {
+    /// A reply's links survive its Markdown whatever they point at. In any
+    /// session's reply, local or remote — the model's text, which what it
+    /// read can steer — only web and mail links open: a `file:` link or an
+    /// app's scheme would open, and so launch, something on this Mac.
+    func testReplyLinksOpenOnlyOnTheWeb() throws {
         let reply = ChatMessageTextFormatter.inlineSpans("[notes](file:///Applications/Calculator.app)")
         XCTAssertEqual(reply.runs.compactMap(\.link).map(\.scheme), ["file"])
 
-        for link in ["https://example.com/a", "http://example.com", "mailto:me@example.com"] {
-            XCTAssertTrue(RemoteReplyLinks.opens(try XCTUnwrap(URL(string: link))), link)
+        for link in ["https://example.com/a", "http://example.com", "HTTPS://EXAMPLE.COM", "mailto:me@example.com"] {
+            XCTAssertTrue(ReplyLinks.opens(try XCTUnwrap(URL(string: link))), link)
         }
         for link in [
-            "file:///Applications/Calculator.app", "file:///tmp/run.command", "vscode://file/etc/hosts",
-            "x-apple.systempreferences:", "ssh://host", "/relative",
+            "file:///Applications/Calculator.app", "file:///tmp/run.command", "file:///Users/me/x.terminal",
+            "vscode://file/etc/hosts", "x-apple.systempreferences:", "ssh://host", "smb://host/share",
+            "javascript:alert(1)", "data:text/html,hi", "/relative", "relative/path",
         ] {
-            XCTAssertFalse(RemoteReplyLinks.opens(try XCTUnwrap(URL(string: link))), link)
+            XCTAssertFalse(ReplyLinks.opens(try XCTUnwrap(URL(string: link))), link)
         }
+    }
+
+    /// Wherever a reply is shown (a card, the completion card, Settings'
+    /// preview), its links go through that policy: the reply view applies it
+    /// itself rather than leaving it to whoever places it.
+    @MainActor
+    func testAReplyAppliesTheLinkPolicyItself() {
+        let reply = AssistantReplyText(text: "[run](file:///tmp/run.command)", fontSize: 12, lineLimit: nil)
+        XCTAssertTrue(String(describing: type(of: reply.body)).contains("ReplyLinks"), "\(type(of: reply.body))")
     }
 
     // MARK: - Code blocks

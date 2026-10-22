@@ -22,38 +22,39 @@ struct AssistantReplyText: View {
     var isCompletionReply = false
 
     var body: some View {
-        if isCompletionReply {
-            CompletionReplyView(text: text, fontSize: fontSize)
-        } else if let lineLimit {
-            Text(IslandMarkdownInline.preview(text, singleLine: lineLimit == 1))
-                .font(IslandMarkdownStyle.font(fontSize))
-                .foregroundStyle(IslandMarkdownStyle.body)
-                .lineLimit(lineLimit)
-                .truncationMode(.tail)
-                .tint(IslandMarkdownStyle.link)
-        } else {
-            MarkdownBlocksView(blocks: ChatMessageTextFormatter.markdownBlocks(text), fontSize: fontSize)
-                .tint(IslandMarkdownStyle.link)
+        Group {
+            if isCompletionReply {
+                CompletionReplyView(text: text, fontSize: fontSize)
+            } else if let lineLimit {
+                Text(IslandMarkdownInline.preview(text, singleLine: lineLimit == 1))
+                    .font(IslandMarkdownStyle.font(fontSize))
+                    .foregroundStyle(IslandMarkdownStyle.body)
+                    .lineLimit(lineLimit)
+                    .truncationMode(.tail)
+                    .tint(IslandMarkdownStyle.link)
+            } else {
+                MarkdownBlocksView(blocks: ChatMessageTextFormatter.markdownBlocks(text), fontSize: fontSize)
+                    .tint(IslandMarkdownStyle.link)
+            }
         }
+        .modifier(ReplyLinks())
     }
 }
 
-/// Where a link in a remote session's reply may go. The reply was written
-/// on another machine, and a `file:` link or an app's URL scheme opens
-/// something on this Mac — an app bundle or a script there is launched — so
-/// only web and mail links open; the rest do nothing. A local session's
-/// links are left alone.
-struct RemoteReplyLinks: ViewModifier {
-    let isRemote: Bool
-
+/// Where a link in a reply may go. A reply is the model's text, and what
+/// the model read can put a link in it, a local session's as much as a
+/// remote one's: a `file:` link to a `.command` or an app bundle launches
+/// it, an app's URL scheme drives that app. So only web and mail links
+/// open, in every session; any other link does nothing when clicked.
+struct ReplyLinks: ViewModifier {
     func body(content: Content) -> some View {
-        if isRemote {
-            content.environment(\.openURL, OpenURLAction { url in
-                Self.opens(url) ? .systemAction : .discarded
-            })
-        } else {
-            content
-        }
+        content.environment(\.openURL, OpenURLAction { url in
+            guard Self.opens(url) else {
+                log.notice("reply link not opened: \(url.scheme ?? "no scheme", privacy: .public) is not a web or mail link")
+                return .discarded
+            }
+            return .systemAction
+        })
     }
 
     static func opens(_ url: URL) -> Bool {
