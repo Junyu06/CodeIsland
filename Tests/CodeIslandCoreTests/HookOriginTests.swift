@@ -22,7 +22,7 @@ final class HookOriginTests: XCTestCase {
                                "the parsed payload handed on is the request itself")
             }
             return parsed
-        case .refusedRemoteClaim, .refusedUnreadable:
+        case .refusedRemoteClaim, .refusedUnreadable, .refusedBlankHost:
             return nil
         }
     }
@@ -72,6 +72,25 @@ final class HookOriginTests: XCTestCase {
         }
         XCTAssertEqual(intake.payload["_remote_host_id"] as? String, "devbox")
         XCTAssertEqual(intake.payload["_remote_host_name"] as? String, "Dev Box")
+    }
+
+    /// A host with a blank id is stamped with nothing: every reader takes a
+    /// blank `_remote_host_id` for this Mac, so its socket takes nothing at
+    /// all — however the request names itself.
+    func testTheSocketOfAHostWithoutAnIdTakesNothing() throws {
+        for id in ["", " ", "\n\t "] {
+            let nameless = HookOrigin.remoteHost(id: id, name: "Dev Box")
+            XCTAssertTrue(HookOrigin.isBlankHostId(id))
+            for payload in [
+                try json(["hook_event_name": "Stop", "session_id": "s1"]),
+                try json(["hook_event_name": "Stop", "session_id": "s1", "_remote_host_id": "devbox"]),
+            ] {
+                guard case .refusedBlankHost = nameless.admit(payload) else {
+                    return XCTFail("a request on the socket of a host with id \(id.debugDescription) was taken")
+                }
+            }
+        }
+        XCTAssertFalse(HookOrigin.isBlankHostId(" devbox "))
     }
 
     func testAHostsSocketTakesOnlyAJSONObject() {

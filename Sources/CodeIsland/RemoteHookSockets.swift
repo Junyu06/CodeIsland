@@ -163,6 +163,12 @@ final class RemoteHookSockets: RemoteHookSocketProviding {
         // Bound afresh on every connect: a socket file removed from under a
         // live listener would otherwise leave the host unreachable for good.
         close(hostId: host.id)
+        // A host without an id names nobody: its requests would pass for
+        // this Mac's.
+        guard !HookOrigin.isBlankHostId(host.id) else {
+            log.error("A remote host without an id gets no socket")
+            return .failure(.cannotListen(path: directory))
+        }
         guard Self.preparePrivateFolder(directory) else {
             return .failure(.folderNotPrivate(path: directory))
         }

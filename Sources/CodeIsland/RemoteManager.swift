@@ -168,6 +168,15 @@ final class RemoteManager: ObservableObject {
             reconnectPolicy.forget(id)
             return
         }
+        // A host without an id would get a socket that names no host: its
+        // hooks' requests would pass for this Mac's.
+        guard !HookOrigin.isBlankHostId(host.id) else {
+            reconnectPolicy.connectAborted(id)
+            let message = L10n.shared["remote_host_id_blank"]
+            connectionStatus[id] = .failed(message)
+            lastMessage[id] = message
+            return
+        }
         guard !host.sshTarget.isEmpty else {
             reconnectPolicy.connectAborted(id)
             connectionStatus[id] = .failed("invalid host")

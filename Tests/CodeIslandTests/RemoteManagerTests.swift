@@ -485,6 +485,27 @@ final class RemoteManagerTests: XCTestCase {
         await waitUntil { tunnels.connects == 2 }
     }
 
+    /// A host saved without an id (an old or hand-edited setting) does not
+    /// connect: a socket for it would name no host, and its hooks' requests
+    /// would pass for this Mac's.
+    func testAHostWithoutAnIdDoesNotConnect() async {
+        let sockets = FakeHookSockets()
+        let (manager, gate, tunnels) = makeManager(sockets: sockets)
+        defer { manager.shutdown() }
+        let host = RemoteHost(id: "  ", name: "devbox", host: "devbox.invalid", user: "me", autoConnect: true)
+        manager.addHost(host)
+
+        manager.connect(id: host.id)
+        await settle()
+
+        let message = L10n.shared["remote_host_id_blank"]
+        XCTAssertEqual(manager.connectionStatus[host.id], .failed(message))
+        XCTAssertEqual(manager.lastMessage[host.id], message)
+        XCTAssertFalse(sockets.log.contains { $0.hasPrefix("open") }, "a socket was bound for it")
+        XCTAssertEqual(gate.started, 0)
+        XCTAssertEqual(tunnels.connects, 0)
+    }
+
     // MARK: - The island's socket on the host
 
     /// The folder for the island's socket on the host is not the SSH

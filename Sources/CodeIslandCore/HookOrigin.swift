@@ -41,6 +41,15 @@ public enum HookOrigin: Equatable, Sendable {
         /// A host's socket got something other than a JSON object: nothing
         /// can be stamped with the host, so nothing goes on.
         case refusedUnreadable
+        /// The socket is a host's with a blank id: stamped with it, a
+        /// request would name no host at all, and pass for this Mac's.
+        case refusedBlankHost
+    }
+
+    /// Whether `id` names no host: empty, or nothing but whitespace — what
+    /// every reader of `_remote_host_id` takes for this Mac.
+    public static func isBlankHostId(_ id: String) -> Bool {
+        id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// What becomes of a request that arrived on this origin's socket.
@@ -55,6 +64,7 @@ public enum HookOrigin: Equatable, Sendable {
             }
             return Self.claimsRemoteHost(payload) ? .refusedRemoteClaim : .admitted(data, payload: payload)
         case .remoteHost(let id, let name):
+            guard !Self.isBlankHostId(id) else { return .refusedBlankHost }
             guard let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 return .refusedUnreadable
             }

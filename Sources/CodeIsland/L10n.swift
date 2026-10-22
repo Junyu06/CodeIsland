@@ -476,6 +476,7 @@ final class L10n: ObservableObject {
         "remote_socket_unavailable": "CodeIsland can't listen at %@ for this host's hooks, so it doesn't connect.",
         "remote_host_socket_folder_unsafe": "CodeIsland's folder on the host, %@, can't be made the SSH user's alone (%@), so nothing is forwarded there.",
         "remote_host_socket_unverified": "CodeIsland's socket on the host, %@, couldn't be verified (%@), so its tunnel was closed.",
+        "remote_host_id_blank": "This host has no ID, so its hooks couldn't be told apart from this Mac's. Remove it and add it again.",
 
         // Buddy
         "buddy": "Buddy",
@@ -1068,6 +1069,7 @@ final class L10n: ObservableObject {
         "remote_socket_unavailable": "CodeIsland kann unter %@ nicht auf die Hooks dieses Hosts lauschen und verbindet ihn daher nicht.",
         "remote_host_socket_folder_unsafe": "Der Ordner von CodeIsland auf dem Host, %@, kann nicht allein dem SSH-Benutzer gehören (%@) – daher wird nichts dorthin weitergeleitet.",
         "remote_host_socket_unverified": "Der Socket von CodeIsland auf dem Host, %@, konnte nicht überprüft werden (%@) – daher wurde sein Tunnel geschlossen.",
+        "remote_host_id_blank": "Dieser Host hat keine ID – seine Hooks wären nicht von denen dieses Macs zu unterscheiden. Entferne ihn und füge ihn erneut hinzu.",
 
         // Buddy
         "buddy": "Buddy",
@@ -1660,6 +1662,7 @@ final class L10n: ObservableObject {
         "remote_socket_unavailable": "CodeIsland 无法在 %@ 监听此主机的 hooks，因此不会连接。",
         "remote_host_socket_folder_unsafe": "主机上 CodeIsland 的文件夹 %@ 无法设为仅 SSH 用户可用（%@），因此不会向它转发任何内容。",
         "remote_host_socket_unverified": "无法验证主机上 CodeIsland 的 socket %@（%@），因此已关闭它的隧道。",
+        "remote_host_id_blank": "此主机没有 ID，它的 hooks 无法与本机的区分开。请删除后重新添加。",
 
         // Buddy
         "buddy": "Buddy",
@@ -2252,6 +2255,7 @@ final class L10n: ObservableObject {
         "remote_socket_unavailable": "CodeIsland 無法在 %@ 監聽此主機的 hooks，因此不會連線。",
         "remote_host_socket_folder_unsafe": "主機上 CodeIsland 的資料夾 %@ 無法設為僅 SSH 使用者可用（%@），因此不會轉送任何內容到那裡。",
         "remote_host_socket_unverified": "無法驗證主機上 CodeIsland 的 socket %@（%@），因此已關閉它的通道。",
+        "remote_host_id_blank": "此主機沒有 ID，它的 hooks 無法與本機的區分開。請刪除後重新加入。",
 
         // Buddy
         "buddy": "Buddy",
@@ -2844,6 +2848,7 @@ final class L10n: ObservableObject {
         "remote_socket_unavailable": "CodeIsland は %@ でこのホストのフックを待ち受けできないため、接続しません。",
         "remote_host_socket_folder_unsafe": "ホスト上の CodeIsland のフォルダ %@ を SSH ユーザー専用にできないため（%@）、そこへは何も転送しません。",
         "remote_host_socket_unverified": "ホスト上の CodeIsland のソケット %@ を確認できなかったため（%@）、トンネルを閉じました。",
+        "remote_host_id_blank": "このホストには ID がないため、そのフックをこの Mac のものと区別できません。削除してから追加し直してください。",
 
         // Buddy
         "buddy": "Buddy",
@@ -3436,6 +3441,7 @@ final class L10n: ObservableObject {
         "remote_socket_unavailable": "CodeIsland가 %@에서 이 호스트의 훅을 수신할 수 없어 연결하지 않습니다.",
         "remote_host_socket_folder_unsafe": "호스트의 CodeIsland 폴더 %@을(를) SSH 사용자 전용으로 만들 수 없어(%@) 그곳으로 아무것도 전달하지 않습니다.",
         "remote_host_socket_unverified": "호스트의 CodeIsland 소켓 %@을(를) 확인할 수 없어(%@) 터널을 닫았습니다.",
+        "remote_host_id_blank": "이 호스트에는 ID가 없어 훅을 이 Mac의 훅과 구분할 수 없습니다. 삭제한 뒤 다시 추가하세요.",
 
         // Buddy
         "buddy": "Buddy",
@@ -4028,6 +4034,7 @@ final class L10n: ObservableObject {
         "remote_socket_unavailable": "CodeIsland, bu sunucunun kancalarını %@ üzerinde dinleyemiyor; bu yüzden bağlanmıyor.",
         "remote_host_socket_folder_unsafe": "CodeIsland'in sunucudaki klasörü %@ yalnızca SSH kullanıcısına ait yapılamıyor (%@); bu yüzden oraya hiçbir şey iletilmiyor.",
         "remote_host_socket_unverified": "CodeIsland'in sunucudaki soketi %@ doğrulanamadı (%@); bu yüzden tüneli kapatıldı.",
+        "remote_host_id_blank": "Bu sunucunun kimliği yok; kancaları bu Mac'inkilerden ayırt edilemez. Kaldırıp yeniden ekleyin.",
 
         // Buddy
         "buddy": "Buddy",

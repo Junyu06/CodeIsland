@@ -499,6 +499,9 @@ class HookServer {
         case .refusedUnreadable:
             log.warning("HookServer: refused a request on a remote host's socket that is not a JSON object")
             return .answerNothing
+        case .refusedBlankHost:
+            log.error("HookServer: refused a request on the socket of a remote host without an id")
+            return .answerNothing
         }
         let payload = parsed ?? (HookEdgeFacts.mayCarryFacts(data)
             ? try? JSONSerialization.jsonObject(with: data) as? [String: Any]

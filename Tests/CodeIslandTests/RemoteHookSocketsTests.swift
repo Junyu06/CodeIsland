@@ -213,6 +213,17 @@ final class RemoteHookSocketsTests: XCTestCase {
         XCTAssertNil(sockets.openPath(forHostId: "host-a"))
     }
 
+    /// A host without an id gets no socket: one would name no host, and its
+    /// requests pass for this Mac's.
+    func testAHostWithoutAnIdGetsNoSocket() throws {
+        let sockets = makeSockets()
+        for id in ["", "   "] {
+            XCTAssertEqual(sockets.open(for: host(id)), .failure(.cannotListen(path: folder)))
+            XCTAssertNil(sockets.openPath(forHostId: id))
+            XCTAssertNil(SocketPath.lstat(sockets.path(forHostId: id)))
+        }
+    }
+
     // MARK: - Stale sockets
 
     /// A crash leaves its hosts' sockets behind; the next launch removes
