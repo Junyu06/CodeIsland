@@ -699,6 +699,25 @@ final class SubsessionRoutingTests: XCTestCase {
         XCTAssertNil(appState.sessions[cursorChat]?.parentSessionId)
     }
 
+    /// The split's link is on the card, not in the thread's hooks: a
+    /// SessionStart the router cannot resolve (its rollout not readable)
+    /// rebuilt the card without it, and the thread rang like a root again.
+    func testSplitChildKeepsItsLinkThroughAnUnresolvedSessionStart() throws {
+        let appState = AppState()
+        var parent = SessionSnapshot()
+        parent.source = "codex"
+        parent.status = .running
+        parent.subagents[childThread] = SubagentState(agentId: childThread, agentType: "worker")
+        appState.sessions[parentThread] = parent
+        appState.applyCurrentPluginSessionMode(persist: false)
+        XCTAssertEqual(appState.sessions[childThread]?.parentSessionId, parentThread, "precondition: the split linked it")
+
+        let missing = rolloutDir.appendingPathComponent("not-yet-written.jsonl").path
+        try deliver(codex("SessionStart", thread: childThread, transcript: missing), to: appState, server: HookServer(appState: appState))
+        XCTAssertEqual(appState.sessions[childThread]?.parentSessionId, parentThread)
+        XCTAssertEqual(played, [], "still quiet")
+    }
+
     func testDiscoveredCodexChildShownSeparatelyIsLinked() {
         let appState = AppState()
         appState.integrateDiscovered([AppState.DiscoveredSession(

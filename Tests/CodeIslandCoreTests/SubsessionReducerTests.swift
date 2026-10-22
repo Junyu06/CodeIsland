@@ -53,16 +53,23 @@ final class SubsessionReducerTests: XCTestCase {
         }
     }
 
-    func testLinkSurvivesTheSessionStartRebuildOnlyWhenTheHookCarriesIt() throws {
+    func testLinkSurvivesTheSessionStartRebuild() throws {
         var sessions: [String: SessionSnapshot] = [:]
         try apply(linked("UserPromptSubmit", source: "codex", ["prompt": "task"]), to: &sessions)
         try apply(linked("SessionStart", source: "codex"), to: &sessions)
         XCTAssertEqual(sessions[child]?.parentSessionId, parent)
-        // Every other hook keeps it; a new session on the card without one does not.
+        // A hook that says nothing never unlinks it: an AppState pass may
+        // have made the link, which the child's hooks do not carry.
         try apply(["hook_event_name": "PreToolUse", "session_id": child, "_source": "codex"], to: &sessions)
         XCTAssertEqual(sessions[child]?.parentSessionId, parent)
         try apply(["hook_event_name": "SessionStart", "session_id": child, "_source": "codex"], to: &sessions)
-        XCTAssertNil(sessions[child]?.parentSessionId)
+        XCTAssertEqual(sessions[child]?.parentSessionId, parent)
+        // One that names a parent wins.
+        try apply(linked("SessionStart", source: "codex", [SubsessionRouter.linkedParentKey: "other-parent"]), to: &sessions)
+        XCTAssertEqual(sessions[child]?.parentSessionId, "other-parent")
+        // A card nobody linked stays unlinked.
+        try apply(["hook_event_name": "SessionStart", "session_id": parent, "_source": "codex"], to: &sessions)
+        XCTAssertNil(sessions[parent]?.parentSessionId)
     }
 
     /// A `_ppid` past pid_t's range comes only from a malformed payload. The

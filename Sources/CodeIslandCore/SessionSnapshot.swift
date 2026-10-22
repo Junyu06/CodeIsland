@@ -1532,6 +1532,10 @@ private func applyHookEvent(
             slots.completion = effects.count
         }
     case "SessionStart":
+        // A link an AppState pass made (the split on switching to Show
+        // separately, discovery) is on the card, not in the child's hooks:
+        // the rebuild keeps it unless the hook names a parent itself.
+        let linkedParentId = sessions[sessionId]?.parentSessionId
         effects.append(.stopMonitor(sessionId: sessionId))
         sessions[sessionId] = SessionSnapshot(startTime: Date())
         // Re-apply metadata from this event (common extraction above wrote to the old session)
@@ -1619,7 +1623,7 @@ private func applyHookEvent(
            !sessionTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             sessions[sessionId]?.sessionTitle = sessionTitle
         }
-        sessions[sessionId]?.parentSessionId = SubsessionRouter.parentCardId(in: event.rawJSON)
+        sessions[sessionId]?.parentSessionId = SubsessionRouter.parentCardId(in: event.rawJSON) ?? linkedParentId
         if !isRemote {
             effects.append(.tryMonitorSession(sessionId: sessionId))
         }
