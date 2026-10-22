@@ -69,7 +69,14 @@ struct DiagnosticsExporter {
         // 4. Socket status
         let socketPath = SocketPath.path
         let socketExists = fm.fileExists(atPath: socketPath)
-        let socketInfo = "path: \(socketPath)\nexists: \(socketExists)\n"
+        let holder: String
+        switch SocketPath.holder(of: socketPath) {
+        case .thisUser: holder = "a socket of this user's"
+        case .nobody: holder = "nothing"
+        case .notASocket: holder = "not a socket"
+        case .otherUser(let uid): holder = "another user's, uid \(uid): hooks send nothing to it"
+        }
+        let socketInfo = "path: \(socketPath)\nexists: \(socketExists)\nholder: \(holder)\n"
         try? socketInfo.write(to: root.appendingPathComponent("state/socket.txt"), atomically: true, encoding: .utf8)
 
         // 5. Unified system logs (last 2 hours)

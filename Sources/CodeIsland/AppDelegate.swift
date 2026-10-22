@@ -29,8 +29,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // If we write settings.json first, Claude Code picks up the new hooks
         // immediately but the socket isn't listening yet — PermissionRequest
         // hooks get no response and Claude Code denies them.
-        hookServer = HookServer(appState: appState)
-        hookServer?.start()
+        // A path another user took first fails it: HookSocketHealth logs who
+        // holds it, shows it in Settings and tries again later.
+        let server = HookServer(appState: appState)
+        hookServer = server
+        HookSocketHealth.shared.start(server)
         RemoteManager.shared.onDisconnect = { [weak appState] hostId in
             appState?.removeRemoteSessions(hostId: hostId)
         }
@@ -282,6 +285,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func checkAndRepairHooks() {
         guard Date().timeIntervalSince(lastHookCheck) > 60 else { return }
         lastHookCheck = Date()
+        // A socket that could not start (its path taken) may start now.
+        HookSocketHealth.shared.retryIfDown()
         // verifyAndRepair walks every enabled CLI and rewrites settings on
         // disk — keep it off the main thread so the activation observer (fires
         // on every app switch) can't stutter the UI. See #139.

@@ -685,6 +685,7 @@ private struct BehaviorPage: View {
 private struct HooksPage: View {
     var appState: AppState?
     @ObservedObject private var l10n = L10n.shared
+    @ObservedObject private var socketHealth = HookSocketHealth.shared
     @State private var cliStatuses: [String: Bool] = [:]
     @State private var statusMessage = ""
     @State private var statusIsError = false
@@ -786,6 +787,11 @@ private struct HooksPage: View {
 
     var body: some View {
         Form {
+            if let problem = socketHealth.problem {
+                Section {
+                    HookSocketProblemRow(problem: problem) { socketHealth.retryIfDown() }
+                }
+            }
             Section(l10n["cli_status"]) {
                 ForEach(ConfigInstaller.allCLIs, id: \.source) { cli in
                     let installed = cliStatuses[cli.source] ?? false

@@ -430,6 +430,10 @@ final class L10n: ObservableObject {
         "auto_mute_when_away_desc": "Silence event sounds while the screen is locked or the screen saver is running. A display that has only gone to sleep still hears them — you are often nearby, waiting on the agent. Sound previews in Settings still play.",
 
         // Hooks
+        "hook_socket_problem_title": "Hooks can't reach CodeIsland",
+        "hook_socket_taken_detail": "%1$@ belongs to another user (%2$@). CodeIsland can't listen there, and hooks send nothing to a socket that isn't yours. Once an administrator removes it, CodeIsland tries again on its own.",
+        "hook_socket_unavailable_detail": "CodeIsland can't listen at %@, so hooks can't reach it. It tries again on its own.",
+        "hook_socket_retry": "Try Again",
         "cli_status": "CLI Status",
         "activated": "Activated",
         "not_installed": "Not Installed",
@@ -1010,6 +1014,10 @@ final class L10n: ObservableObject {
         "auto_mute_when_away_desc": "Ereignistöne stummschalten, solange der Bildschirm gesperrt ist oder der Bildschirmschoner läuft. Ruht nur der Monitor, bleiben sie hörbar – oft wartest du ganz in der Nähe auf den Agenten. Hörproben in den Einstellungen spielen weiterhin.",
 
         // Hooks
+        "hook_socket_problem_title": "Hooks erreichen CodeIsland nicht",
+        "hook_socket_taken_detail": "%1$@ gehört einem anderen Benutzer (%2$@). CodeIsland kann dort nicht lauschen, und Hooks senden nichts an einen Socket, der nicht dir gehört. Sobald ein Administrator ihn entfernt, versucht CodeIsland es selbst erneut.",
+        "hook_socket_unavailable_detail": "CodeIsland kann unter %@ nicht lauschen, daher erreichen Hooks es nicht. Es versucht es selbst erneut.",
+        "hook_socket_retry": "Erneut versuchen",
         "cli_status": "CLI-Status",
         "activated": "Aktiviert",
         "not_installed": "Nicht installiert",
@@ -1590,6 +1598,10 @@ final class L10n: ObservableObject {
         "auto_mute_when_away_desc": "屏幕锁定或屏保运行期间不播放事件音效。只是显示器休眠时照常播放——你往往就在旁边等 agent。设置里的试听不受影响。",
 
         // Hooks
+        "hook_socket_problem_title": "Hooks 无法连接 CodeIsland",
+        "hook_socket_taken_detail": "%1$@ 属于另一个用户（%2$@）。CodeIsland 无法在此监听，hooks 也不会向不属于你的 socket 发送任何内容。管理员删除它后，CodeIsland 会自动重试。",
+        "hook_socket_unavailable_detail": "CodeIsland 无法在 %@ 监听，hooks 无法连接到它。它会自动重试。",
+        "hook_socket_retry": "重试",
         "cli_status": "CLI 状态",
         "activated": "已激活",
         "not_installed": "未安装",
@@ -2170,6 +2182,10 @@ final class L10n: ObservableObject {
         "auto_mute_when_away_desc": "螢幕鎖定或螢幕保護程式執行期間不播放事件音效。只是顯示器睡眠時照常播放——你往往就在旁邊等 agent。設定裡的試聽不受影響。",
 
         // Hooks
+        "hook_socket_problem_title": "Hooks 無法連線 CodeIsland",
+        "hook_socket_taken_detail": "%1$@ 屬於另一位使用者（%2$@）。CodeIsland 無法在此監聽，hooks 也不會向不屬於你的 socket 傳送任何內容。管理員刪除它後，CodeIsland 會自動重試。",
+        "hook_socket_unavailable_detail": "CodeIsland 無法在 %@ 監聽，hooks 無法連線到它。它會自動重試。",
+        "hook_socket_retry": "重試",
         "cli_status": "CLI 狀態",
         "activated": "已啟用",
         "not_installed": "未安裝",
@@ -2750,6 +2766,10 @@ final class L10n: ObservableObject {
         "auto_mute_when_away_desc": "画面ロック中やスクリーンセーバー実行中はイベント音を鳴らしません。ディスプレイがスリープしただけなら鳴ります（エージェントを待ってすぐそばにいることが多いため）。設定画面の試聴は引き続き再生されます。",
 
         // Hooks
+        "hook_socket_problem_title": "フックが CodeIsland に届きません",
+        "hook_socket_taken_detail": "%1$@ は別のユーザー（%2$@）が所有しています。CodeIsland はそこで待ち受けできず、フックは自分のものではないソケットには何も送信しません。管理者が削除すると、CodeIsland は自動的に再試行します。",
+        "hook_socket_unavailable_detail": "CodeIsland は %@ で待ち受けできないため、フックが届きません。自動的に再試行します。",
+        "hook_socket_retry": "再試行",
         "cli_status": "CLI 状態",
         "activated": "有効",
         "not_installed": "未インストール",
@@ -3330,6 +3350,10 @@ final class L10n: ObservableObject {
         "auto_mute_when_away_desc": "화면이 잠겨 있거나 화면 보호기가 실행 중일 때 이벤트 효과음을 끕니다. 디스플레이만 잠자기 상태일 때는 그대로 재생합니다(에이전트를 기다리며 근처에 있는 경우가 많으니까요). 설정의 미리 듣기는 계속 재생됩니다.",
 
         // Hooks
+        "hook_socket_problem_title": "훅이 CodeIsland에 연결되지 않습니다",
+        "hook_socket_taken_detail": "%1$@은(는) 다른 사용자(%2$@)의 소유입니다. CodeIsland는 그곳에서 수신할 수 없고, 훅은 내 소유가 아닌 소켓에는 아무것도 보내지 않습니다. 관리자가 삭제하면 CodeIsland가 자동으로 다시 시도합니다.",
+        "hook_socket_unavailable_detail": "CodeIsland가 %@에서 수신할 수 없어 훅이 연결되지 않습니다. 자동으로 다시 시도합니다.",
+        "hook_socket_retry": "다시 시도",
         "cli_status": "CLI 상태",
         "activated": "활성화됨",
         "not_installed": "설치되지 않음",
@@ -3910,6 +3934,10 @@ final class L10n: ObservableObject {
         "auto_mute_when_away_desc": "Ekran kilitliyken veya ekran koruyucu çalışırken olay seslerini kapatır. Yalnızca ekran uykuya geçtiyse sesler çalmaya devam eder; çoğu zaman ajanı bekleyerek yakındasınızdır. Ayarlardaki ses önizlemeleri çalmaya devam eder.",
 
         // Hooks
+        "hook_socket_problem_title": "Kancalar CodeIsland'a ulaşamıyor",
+        "hook_socket_taken_detail": "%1$@ başka bir kullanıcıya (%2$@) ait. CodeIsland orada dinleyemiyor ve kancalar size ait olmayan bir sokete hiçbir şey göndermiyor. Bir yönetici onu kaldırdığında CodeIsland kendiliğinden yeniden dener.",
+        "hook_socket_unavailable_detail": "CodeIsland %@ üzerinde dinleyemiyor, bu yüzden kancalar ona ulaşamıyor. Kendiliğinden yeniden dener.",
+        "hook_socket_retry": "Yeniden Dene",
         "cli_status": "CLI Durumu",
         "activated": "Etkinleştirildi",
         "not_installed": "Yüklenmemiş",
