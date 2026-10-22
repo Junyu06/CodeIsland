@@ -1556,8 +1556,8 @@ final class AppState {
         cachePreToolUseIfApplicable(event)
         resolveToolUseIfCompleted(event)
         // #216: permission requests with no correlatable tool_use_id can't be drained by
-        // resolveToolUseIfCompleted. A follow-up activity event means the user already
-        // approved in the terminal — resume those (and only those) as approved.
+        // resolveToolUseIfCompleted. A later step of the agent that asked means it was
+        // answered in the terminal: its card goes, answered with no decision — never allow.
         resolveOrphanPermissionsOnActivity(event)
 
         let reduction = reduceHookEvent(sessions: &sessions, event: event, maxHistory: maxHistory,

@@ -175,7 +175,8 @@ final class AppStateToolUseCacheTests: XCTestCase {
     /// Repro for #216: a PermissionRequest carrying NO tool_use_id can never be
     /// correlated by resolveToolUseIfCompleted, so approving in the terminal left
     /// the card up until the user closed it manually. After the fix, a follow-up
-    /// same-session activity event resolves the orphan as approved-in-terminal.
+    /// step of the same agent takes the card down — answered with no decision,
+    /// never allow: the island does not know what the user chose there.
     func testOrphanPermissionResolvedByFollowUpActivity() async throws {
         let appState = AppState()
         let orphan = try makeHookEvent(
@@ -200,7 +201,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
         ))
 
         let response = try await awaitValue(of: responseTask)
-        XCTAssertEqual(try behavior(response), "allow")
+        XCTAssertEqual(response, AppState.noDecisionAnswer)
         XCTAssertEqual(appState.permissionQueue.count, 0)
     }
 
