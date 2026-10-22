@@ -63,7 +63,15 @@ public enum HookEdgeFacts {
         guard HookIntake.admits(sourceTag: facts.sourceTag, environment: facts.environment) else {
             return .dropped
         }
-        guard var intake = HookIntake(stdin: payload, facts: facts) else { return .dropped }
+        // A blank cwd is no cwd: the edge's own (or Grok's workspace) stands
+        // in for it, as the remote hook put its own in place of one before it
+        // sent facts. An event without a cwd is dropped on a host with a cwd
+        // allow-list (#240).
+        var stdin = payload
+        if let cwd = stdin["cwd"] as? String, cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            stdin.removeValue(forKey: "cwd")
+        }
+        guard var intake = HookIntake(stdin: stdin, facts: facts) else { return .dropped }
         intake.addTerminalContext()
         return .interpreted(intake)
     }

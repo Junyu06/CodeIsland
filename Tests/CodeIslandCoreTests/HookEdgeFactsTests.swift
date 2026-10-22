@@ -279,6 +279,27 @@ final class HookEdgeFactsTests: XCTestCase {
         XCTAssertEqual(intake.payload["_source"] as? String, "grok")
     }
 
+    /// A blank cwd is no cwd: Grok's workspace, else the directory the hook
+    /// ran in, stands in for it; with neither, the event has none.
+    func testABlankCwdIsNoCwd() throws {
+        let grok = try interpret([
+            "hookEventName": "Stop",
+            "sessionId": "grok-2",
+            "cwd": "",
+            "workspaceRoot": "/home/dev/grok-project",
+            "_edge": remoteEdge(source: "grok", extra: ["env": ["GROK_SESSION_ID": "grok-2"]]),
+        ])
+        XCTAssertEqual(grok.payload["cwd"] as? String, "/home/dev/grok-project")
+
+        let hooks = try interpret(["hook_event_name": "Stop", "session_id": "s", "cwd": "", "_edge": remoteEdge(source: "codex")])
+        XCTAssertEqual(hooks.payload["cwd"] as? String, "/home/dev/project")
+
+        var noCwd = remoteEdge(source: "codex")
+        noCwd.removeValue(forKey: "cwd")
+        let none = try interpret(["hook_event_name": "Stop", "session_id": "s", "cwd": " ", "_edge": noCwd])
+        XCTAssertNil(none.payload["cwd"])
+    }
+
     // MARK: - Local edges and the facts themselves
 
     func testLocalEdgeGetsTheBridgesProcessAndTerminalReading() throws {

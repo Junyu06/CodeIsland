@@ -367,6 +367,34 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
         XCTAssertEqual(named["_source"] as? String, "codex")
     }
 
+    /// A blank cwd meets the per-host cwd allow-list (#240), which drops a
+    /// remote event without one: the v4 OpenCode plugin, still loaded in a
+    /// running OpenCode, sends `"cwd": ""` when PWD is unset. The directory the
+    /// hook ran in stands in for it, as the remote hook put it in its place
+    /// before facts.
+    func testBlankRemoteCwdStillPassesTheHostsCwdFilter() throws {
+        for blank in ["", "  "] {
+            let payload: [String: Any] = [
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "ses_1",
+                "cwd": blank,
+                "prompt": "hi",
+                "_edge": ["v": 1, "source": "opencode", "cwd": "/home/dev/proj",
+                          "host": ["id": "host-1", "name": "Build Box"], "waits": false] as [String: Any],
+            ]
+            guard case .route(let routed, _) = HookServer.intake(try JSONSerialization.data(withJSONObject: payload)) else {
+                return XCTFail("not routed")
+            }
+            let event = try XCTUnwrap(JSONSerialization.jsonObject(with: routed) as? [String: Any])
+            XCTAssertEqual(event["cwd"] as? String, "/home/dev/proj", "cwd \"\(blank)\"")
+            XCTAssertTrue(HookServer.remoteEventPassesCwdFilter(
+                cwd: event["cwd"] as? String,
+                workspaceRoots: event["workspace_roots"] as? [String],
+                filterCSV: "/home/dev/proj"
+            ))
+        }
+    }
+
     /// Remote hooks installed before facts existed (0.3.1) keep interpreting
     /// their hooks themselves; the island takes their payload byte for byte.
     func testPayloadsFromOlderRemoteHooksPassUntouched() throws {
