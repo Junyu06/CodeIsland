@@ -1067,8 +1067,8 @@ struct ConfigInstaller {
     static func install() -> Bool {
         let fm = FileManager.default
 
-        // Ensure ~/.codeisland directory
-        try? fm.createDirectory(atPath: codeislandDir, withIntermediateDirectories: true)
+        // Ensure ~/.codeisland, a folder of this user's alone
+        prepareCodeislandDir()
 
         // Clean up legacy paths at ~/.claude/hooks/ (#32)
         try? fm.removeItem(atPath: legacyBridgePath)
@@ -3366,10 +3366,23 @@ struct ConfigInstaller {
 
     // MARK: - Bridge & Hook Script
 
-    private static func installHookScript(fm: FileManager) {
+    /// `~/.codeisland` is this user's alone (PrivateFiles): sessions.json
+    /// there holds every local session's last prompt and reply. Made 0700,
+    /// or narrowed to it where an older build left it 0755, along with what
+    /// that build put inside. `dir` is for tests.
+    static func prepareCodeislandDir(_ dir: String = codeislandDir) {
+        PrivateFiles.prepareFolder(dir)
+        for name in ["codeisland-hook.sh", "codeisland-bridge", "sessions.json"] {
+            PrivateFiles.closeToOthers(dir + "/" + name)
+        }
+    }
+
+    /// The hook script, written 0700: only this user's agents run it. `path`
+    /// is for tests.
+    static func installHookScript(fm: FileManager, path: String = hookScriptPath) {
         let needsUpdate: Bool
-        if fm.fileExists(atPath: hookScriptPath) {
-            if let existing = fm.contents(atPath: hookScriptPath),
+        if fm.fileExists(atPath: path) {
+            if let existing = fm.contents(atPath: path),
                let str = String(data: existing, encoding: .utf8) {
                 // Update if script doesn't contain bridge dispatcher OR version is outdated
                 let hasCurrentVersion = str.contains("# CodeIsland hook v\(hookScriptVersion)")
@@ -3381,8 +3394,9 @@ struct ConfigInstaller {
             needsUpdate = true
         }
         if needsUpdate {
-            fm.createFile(atPath: hookScriptPath, contents: Data(hookScript.utf8))
-            chmod(hookScriptPath, 0o755)
+            try? PrivateFiles.write(Data(hookScript.utf8), to: path, mode: 0o700)
+        } else {
+            PrivateFiles.closeToOthers(path)
         }
     }
 
@@ -3399,15 +3413,17 @@ struct ConfigInstaller {
         do {
             try? fm.removeItem(atPath: tmpPath)
             try fm.copyItem(atPath: srcPath, toPath: tmpPath)
-            chmod(tmpPath, 0o755)
+            chmod(tmpPath, 0o700)
             // Strip quarantine xattr so Gatekeeper won't block the binary
             stripQuarantine(tmpPath)
             _ = try fm.replaceItemAt(URL(fileURLWithPath: bridgePath), withItemAt: URL(fileURLWithPath: tmpPath))
         } catch {
             // replaceItemAt fails if destination doesn't exist yet — fall back to rename
             try? fm.moveItem(atPath: tmpPath, toPath: bridgePath)
-            chmod(bridgePath, 0o755)
         }
+        // 0700 whichever way it got there: replaceItemAt keeps the replaced
+        // binary's permissions, which an older build made 0755.
+        PrivateFiles.closeToOthers(bridgePath)
         // Ensure final binary is free of quarantine (covers both paths above)
         stripQuarantine(bridgePath)
     }
@@ -4225,7 +4241,7 @@ extension ConfigInstaller {
         // The primary itself under another spelling: its own entry installs.
         if ExtraConfigDirs.isSameDirectory(dir.path, as: primary) { return .shared(with: primary) }
         let fm = FileManager.default
-        try? fm.createDirectory(atPath: codeislandDir, withIntermediateDirectories: true)
+        prepareCodeislandDir()
         installHookScript(fm: fm)
         installBridgeBinary(fm: fm)
         return installHooks(
