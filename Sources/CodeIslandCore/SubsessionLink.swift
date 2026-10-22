@@ -37,6 +37,18 @@ public struct SubsessionLink: Equatable, Sendable {
             }
         }
 
+        /// Whether every hook of such a child says it is one
+        /// (`_parent_session_id`, `_via_plugin`), so any card of its own is
+        /// one the router left it on. A Codex thread's rollout or a Cursor
+        /// Task's IDE process can name a parent only after the child's first
+        /// hooks built a card that is nobody's child.
+        public var isAnnouncedByEveryHook: Bool {
+            switch self {
+            case .declared, .pluginProxy: return true
+            case .cursorTask, .codexThread: return false
+            }
+        }
+
         /// Whether Merge may fold the child into a parent card the island
         /// does not show yet, which the fold then creates. Only a Cursor
         /// transcript names the parent conversation's own session id, so the

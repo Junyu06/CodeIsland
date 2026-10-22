@@ -29,10 +29,11 @@ public enum SubsessionPlacement: Equatable, Sendable {
 ///   (#165): a request the child is blocked on surfaces on a card of its own
 ///   (a plugin proxy's goes back to its agent undecided).
 ///
-/// A child stays where it is until it ends — on its card, or as a row of the
-/// card it is folded into — whatever the setting says now. AppState's passes
-/// over known cards (`applyCurrentPluginSessionMode`) move Codex and Cursor
-/// children when the setting changes; the router then follows them.
+/// A child stays where the router put it until it ends — on its linked card,
+/// or as a row of the card it is folded into — whatever the setting says
+/// now. AppState's passes over known cards (`applyCurrentPluginSessionMode`)
+/// move Codex and Cursor children when the setting changes; the router then
+/// follows them.
 public enum SubsessionRouter {
     /// The card a child that lands on a card of its own works for, stamped by
     /// the router: the reducer reads it into ``SessionSnapshot/parentSessionId``.
@@ -126,10 +127,17 @@ public enum SubsessionRouter {
             return .hidden
         }
 
-        // A child stays where it is until it ends. Folding or hiding it
-        // mid-flight — Agent Sub-Sessions changed under it, or its parent's
-        // card turned up late — would strand the card or row it already has.
-        if cards[link.childCardId] != nil {
+        // A child stays where the router put it until it ends: on a card of
+        // its own linked to its parent, or as the row it is folded into.
+        // Folding or hiding it mid-flight — Agent Sub-Sessions changed under
+        // it, or its parent's card turned up late — would strand that card
+        // or row. A card the child's hooks built before it was known to be a
+        // child (a Codex rollout written after the thread's first hook, a
+        // Cursor Task's Claude-format hook) is not linked and holds nothing:
+        // Merge folds and Hide hides what follows, and the passes over known
+        // cards move the card.
+        if let card = cards[link.childCardId],
+           card.parentSessionId != nil || link.kind.isAnnouncedByEveryHook {
             return ownCard(link, mode: mode)
         }
         if let host = SubsessionCards.cardHosting(foldedSubsession: link.agentId, in: cards),

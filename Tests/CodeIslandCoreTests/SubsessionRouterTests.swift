@@ -161,9 +161,11 @@ final class SubsessionRouterTests: XCTestCase {
         for context in [alone, withAgent] {
             XCTAssertEqual(try placement(pluginProxy("PermissionRequest"), .hide, context, blocking: true), .hidden)
         }
-        // A card of its own does not bring it back in Hide.
+        // A card of its own does not bring it back in Hide. In Merge a proxy
+        // whose hooks built one before its agent's card keeps it, linked.
         withAgent.cards[child] = subsessionCard(source: "opencode")
         XCTAssertEqual(try placement(pluginProxy(), .hide, withAgent), .hidden)
+        XCTAssertEqual(try placement(pluginProxy(), .merge, withAgent), .ownCard(linkedTo: "opencode-main"))
     }
 
     func testHookOfASessionNobodySpawnedHasNoLink() {
@@ -178,17 +180,41 @@ final class SubsessionRouterTests: XCTestCase {
     // MARK: - A child stays where it is
 
     func testChildWithACardOfItsOwnKeepsItWhateverTheMode() throws {
+        var linked = subsessionCard(source: "codex")
+        linked.parentSessionId = parent
         let context = StubSubsessionContext(
-            cards: [parent: subsessionCard(source: "codex"), child: subsessionCard(source: "codex")],
+            cards: [parent: subsessionCard(source: "codex"), child: linked],
             rollouts: ["/rollouts/child.jsonl": childRollout]
         )
         for mode in [SubsessionMode.merge, .hide] {
             XCTAssertEqual(try placement(codexThread(), mode, context), .ownCard(linkedTo: parent), "\(mode)")
         }
+        // Every hook of a declared child says it is one: any card of its own
+        // is one the router left it on.
         context.cards[child] = subsessionCard(source: "pi")
         for mode in [SubsessionMode.merge, .hide] {
             XCTAssertEqual(try placement(declared(), mode, context), .ownCard(linkedTo: parent), "\(mode)")
         }
+    }
+
+    func testCardBuiltBeforeTheChildWasKnownHoldsNothing() throws {
+        // A Codex thread's first hook came before its rollout was readable:
+        // the card it built is nobody's child.
+        let codex = StubSubsessionContext(
+            cards: [parent: subsessionCard(source: "codex"), child: subsessionCard(source: "codex")],
+            rollouts: ["/rollouts/child.jsonl": childRollout]
+        )
+        XCTAssertEqual(try placement(codexThread(), .merge, codex), .fold(into: parent))
+        XCTAssertEqual(try placement(codexThread(), .hide, codex), .hidden)
+        XCTAssertEqual(try placement(codexThread(), .separate, codex), .ownCard(linkedTo: parent), "linked from now on")
+
+        // A Cursor Task's Claude-format hook built a default card before its
+        // IDE process named its chat.
+        var chat = subsessionCard(source: "cursor", status: .running, transcriptPath: cursorTranscript, cliPid: 4242)
+        chat.providerSessionId = cursorChat
+        let cursor = StubSubsessionContext(cards: [cursorChat: chat, cursorTask: subsessionCard(source: "claude")])
+        XCTAssertEqual(try placement(cursorByProcess(), .merge, cursor), .fold(into: cursorChat))
+        XCTAssertEqual(try placement(cursorByProcess(), .hide, cursor), .hidden)
     }
 
     func testFoldedChildFollowsItsRowWhateverTheModeOrEvidence() throws {

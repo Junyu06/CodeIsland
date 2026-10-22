@@ -246,6 +246,43 @@ final class SubsessionRoutingTests: XCTestCase {
         XCTAssertEqual(next.raw["agent_id"] as? String, childThread)
     }
 
+    /// A Codex Desktop thread's first hook can come before its rollout is
+    /// written: nothing says it is a child yet, so it builds a card of its
+    /// own. That card is no placement of the router's, so once the rollout
+    /// is readable Merge folds the thread's hooks into its parent and Hide
+    /// hides them, as before; it did not keep the thread's first turn.
+    func testDesktopThreadWhoseRolloutLagsItsFirstHookIsPlacedOnceItIsReadable() throws {
+        let desktop: [String: Any] = ["_term_bundle": "com.openai.codex"]
+        func with(_ extra: [String: Any]) -> [String: Any] {
+            desktop.merging(extra) { _, new in new }
+        }
+        for mode in ["merge", "hide"] {
+            setMode(mode)
+            let parentPath = try writeRollout("parent-\(mode).jsonl", sessionMeta: rootRollout(parentThread))
+            let childPath = rolloutDir.appendingPathComponent("child-\(mode).jsonl").path
+            let appState = AppState()
+            let server = HookServer(appState: appState)
+            try deliver(codex("UserPromptSubmit", thread: parentThread, transcript: parentPath, with(["prompt": "fan out"])), to: appState, server: server)
+            try deliver(codex("SessionStart", thread: childThread, transcript: childPath, desktop), to: appState, server: server)
+            XCTAssertNotNil(appState.sessions["codexapp:" + childThread], "\(mode): precondition, a card of its own")
+
+            // The rollout is written, and its next read falls due.
+            _ = try writeRollout("child-\(mode).jsonl", sessionMeta: childRollout(childThread, parent: parentThread))
+            _ = appState.codexRollouts.inspection(transcriptPath: childPath, now: Date().addingTimeInterval(2))
+
+            let later = try deliver(
+                codex("PreToolUse", thread: childThread, transcript: childPath, with(["tool_name": "exec_command"])),
+                to: appState, server: server
+            )
+            if mode == "merge" {
+                XCTAssertEqual(later.sessionId, "codexapp:" + parentThread)
+                XCTAssertEqual(later.raw["agent_id"] as? String, childThread)
+            } else {
+                XCTAssertNotNil(later.response, "hidden")
+            }
+        }
+    }
+
     // MARK: - Codex: a request waiting on a child's card
 
     /// Hide shows a hidden thread's request on a card of its own. The passes
@@ -436,6 +473,39 @@ final class SubsessionRoutingTests: XCTestCase {
         try deliver(cursor("stop", cursorChat), to: appState, server: server)
         XCTAssertEqual(played, ["8bit_complete"])
         XCTAssertEqual(appState.justCompletedSessionId, cursorChat)
+    }
+
+    /// A Cursor Task's Claude-format hook (no `_source`, no transcript) can
+    /// build a default "claude" card before its Cursor hooks show it is a
+    /// Task of the chat on its IDE process. That card holds nothing: Merge
+    /// folds the Task's hooks into its chat and Hide hides them, as before.
+    func testCursorTaskWithAGhostClaudeCardIsStillFoldedOrHidden() throws {
+        for mode in ["merge", "hide"] {
+            setMode(mode)
+            let appState = AppState()
+            let server = HookServer(appState: appState)
+            try deliver([
+                "hook_event_name": "beforeSubmitPrompt", "session_id": cursorChat, "_source": "cursor",
+                "cwd": "/cursor-repo", "_ppid": 61_101, "prompt": "run",
+                "transcript_path": "/Users/u/.cursor/projects/x/agent-transcripts/\(cursorChat)/\(cursorChat).jsonl",
+            ], to: appState, server: server)
+            try deliver(
+                ["hook_event_name": "PreToolUse", "session_id": cursorTask, "cwd": "/cursor-repo", "tool_name": "Read"],
+                to: appState, server: server
+            )
+            XCTAssertEqual(appState.sessions[cursorTask]?.source, "claude", "\(mode): precondition, the ghost card")
+
+            let shell = try deliver([
+                "hook_event_name": "beforeShellExecution", "session_id": cursorTask, "_source": "cursor",
+                "cwd": "/cursor-repo", "_ppid": 61_101, "command": "ls",
+            ], to: appState, server: server)
+            if mode == "merge" {
+                XCTAssertEqual(shell.sessionId, cursorChat)
+                XCTAssertEqual(shell.raw["agent_id"] as? String, cursorTask)
+            } else {
+                XCTAssertNotNil(shell.response, "hidden")
+            }
+        }
     }
 
     /// A Task folded in by its IDE process stays folded when a second chat on
