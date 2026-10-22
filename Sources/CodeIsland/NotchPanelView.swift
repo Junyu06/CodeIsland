@@ -4136,6 +4136,7 @@ private struct SessionCard: View {
                 comfortableBody
             }
         }
+        .modifier(RemoteReplyLinks(isRemote: session.isRemote))
         .offset(x: failureShakeOffset)
         .contentShape(Rectangle())
         .onTapGesture { handleSessionClick() }

@@ -27,6 +27,27 @@ final class MarkdownReplyViewTests: XCTestCase {
         XCTAssertEqual(ordered[0], MarkdownListMarker(label: "1.", checkbox: .checked))
     }
 
+    // MARK: - Links in a remote reply
+
+    /// A reply's links survive its Markdown whatever they point at. In a
+    /// remote session's reply — written on another machine — only web and
+    /// mail links open: a `file:` link or an app's scheme would open, and so
+    /// launch, something on this Mac.
+    func testRemoteReplyLinksOpenOnlyOnTheWeb() throws {
+        let reply = ChatMessageTextFormatter.inlineSpans("[notes](file:///Applications/Calculator.app)")
+        XCTAssertEqual(reply.runs.compactMap(\.link).map(\.scheme), ["file"])
+
+        for link in ["https://example.com/a", "http://example.com", "mailto:me@example.com"] {
+            XCTAssertTrue(RemoteReplyLinks.opens(try XCTUnwrap(URL(string: link))), link)
+        }
+        for link in [
+            "file:///Applications/Calculator.app", "file:///tmp/run.command", "vscode://file/etc/hosts",
+            "x-apple.systempreferences:", "ssh://host", "/relative",
+        ] {
+            XCTAssertFalse(RemoteReplyLinks.opens(try XCTUnwrap(URL(string: link))), link)
+        }
+    }
+
     // MARK: - Code blocks
 
     func testShortCodeScrollsOnlyHorizontally() {

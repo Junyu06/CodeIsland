@@ -38,6 +38,30 @@ struct AssistantReplyText: View {
     }
 }
 
+/// Where a link in a remote session's reply may go. The reply was written
+/// on another machine, and a `file:` link or an app's URL scheme opens
+/// something on this Mac — an app bundle or a script there is launched — so
+/// only web and mail links open; the rest do nothing. A local session's
+/// links are left alone.
+struct RemoteReplyLinks: ViewModifier {
+    let isRemote: Bool
+
+    func body(content: Content) -> some View {
+        if isRemote {
+            content.environment(\.openURL, OpenURLAction { url in
+                Self.opens(url) ? .systemAction : .discarded
+            })
+        } else {
+            content
+        }
+    }
+
+    static func opens(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https" || scheme == "mailto"
+    }
+}
+
 // MARK: - Completion card
 
 /// The finished reply on the completion card: the moment someone actually
