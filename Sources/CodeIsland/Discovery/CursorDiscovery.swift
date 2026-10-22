@@ -4,6 +4,21 @@ import CodeIslandCore
 /// Cursor agent sessions: running processes matched to the agent
 /// transcripts under `~/.cursor/projects/<encoded cwd>/agent-transcripts`.
 enum CursorDiscovery {
+    /// Check if Cursor is in YOLO mode by reading its settings
+    static func detectCursorYoloMode() -> Bool {
+        let settingsPath = NSHomeDirectory() + "/Library/Application Support/Cursor/User/settings.json"
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: settingsPath),
+              let data = fm.contents(atPath: settingsPath),
+              let str = String(data: data, encoding: .utf8) else { return false }
+        let stripped = ConfigInstaller.stripJSONComments(str)
+        guard let strippedData = stripped.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: strippedData) as? [String: Any] else { return false }
+        if json["cursor.general.yoloMode"] as? Bool == true { return true }
+        if json["cursor.agent.enableYoloMode"] as? Bool == true { return true }
+        return false
+    }
+
     static func readModelFromCursorStore(cwd: String?, processStart: Date?) -> String? {
         guard let cwd else { return nil }
         let home = FileManager.default.homeDirectoryForCurrentUser.path

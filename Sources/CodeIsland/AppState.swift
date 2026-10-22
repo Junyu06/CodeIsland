@@ -367,6 +367,18 @@ final class AppState {
         }
     }
     private var modelReadRetryAt: [String: Date] = [:]
+    /// Cards whose model (`maybeBackfillModel`), YOLO setting or native-app
+    /// turn end is being read off the main actor.
+    @ObservationIgnored
+    private(set) var modelReadsInFlight: Set<String> = []
+    @ObservationIgnored
+    private(set) var cursorYoloReadsInFlight: Set<String> = []
+    @ObservationIgnored
+    private(set) var nativeAppTurnReadsInFlight: Set<String> = []
+    /// The reads of the agents' own stores made for a known card, run off
+    /// the main actor (see `SessionStoreReaders`). Tests install their own.
+    @ObservationIgnored
+    var storeReaders = SessionStoreReaders.live
     /// Per parent session → subagent id: the subagent's own model/effort once
     /// read from its transcript, and the reads still trying to find it.
     @ObservationIgnored
@@ -574,17 +586,16 @@ final class AppState {
                 continue
             }
             guard processMonitor.isWatching(key) else { continue }
-            if session.isNativeAppMode,
-               elapsed >= codexTerminalTurnSettleTime,
-               let finishedAt = SessionDiscovery.nativeAppFinishedTurnTimestamp(sessionId: key, session: session),
-               finishedAt >= session.lastActivity.addingTimeInterval(-1) {
-                sessions[key]?.status = .idle
-                continue
-            }
-            // Native apps write transcripts synchronously — if the transcript check above
+            // Native apps write transcripts synchronously — if the transcript check below
             // didn't find a stop marker after 30s, the session is almost certainly idle.
             if session.isNativeAppMode, elapsed > nativeAppThinkingTimeout {
                 sessions[key]?.status = .idle
+                continue
+            }
+            // Before that, the turn's end in its transcript settles it: read
+            // off the main actor, applied when the read lands.
+            if session.isNativeAppMode, elapsed >= codexTerminalTurnSettleTime {
+                checkNativeAppTurnEnded(sessionId: key, session: session, settleTime: codexTerminalTurnSettleTime)
                 continue
             }
             if elapsed > monitoredThinkingTimeout {
@@ -674,6 +685,36 @@ final class AppState {
         prunePendingToolUses()
 
         refreshDerivedState()
+    }
+
+    /// Settle a native app's thinking card idle once its transcript shows
+    /// the turn ended after the card's last activity. The cleanup tick asks
+    /// every 3 s while the card thinks, and the read opens the state database
+    /// and reads the transcript's tail, so it runs off the main actor; the
+    /// card is settled when it lands if it is still the same quiet,
+    /// monitored, thinking card.
+    func checkNativeAppTurnEnded(sessionId: String, session: SessionSnapshot, settleTime: TimeInterval) {
+        guard nativeAppTurnReadsInFlight.insert(sessionId).inserted else { return }
+        let read = storeReaders.nativeAppFinishedTurn
+        Task.detached(priority: .utility) {
+            let finishedAt = read(sessionId, session)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.nativeAppTurnReadsInFlight.remove(sessionId)
+                guard let finishedAt,
+                      let current = self.sessions[sessionId],
+                      current.status == .processing,
+                      current.currentTool == nil,
+                      current.toolDescription == nil,
+                      current.isNativeAppMode,
+                      !Self.isDaemonBackedSource(current.source),
+                      self.processMonitor.isWatching(sessionId),
+                      -current.lastActivity.timeIntervalSinceNow >= settleTime,
+                      finishedAt >= current.lastActivity.addingTimeInterval(-1) else { return }
+                self.sessions[sessionId]?.status = .idle
+                self.refreshDerivedState()
+            }
+        }
     }
 
     /// Agent Sub-Sessions as set now; an unknown setting reads as Show
@@ -1352,12 +1393,47 @@ final class AppState {
 
         guard SessionTitleStore.supports(provider: session.source) else { return }
 
-        if let resolved = SessionTitleStore.title(for: lookupSessionId, provider: session.source, cwd: session.cwd) {
-            sessions[trackedSessionId]?.sessionTitle = resolved.title
-            sessions[trackedSessionId]?.sessionTitleSource = resolved.source
-        } else {
-            sessions[trackedSessionId]?.sessionTitle = nil
-            sessions[trackedSessionId]?.sessionTitleSource = nil
+        readProviderTitle(
+            ProviderTitleLookup(sessionId: lookupSessionId, provider: session.source, cwd: session.cwd),
+            for: trackedSessionId
+        )
+    }
+
+    /// A card's title read in flight, and the newest lookup asked for while
+    /// it ran.
+    private struct ProviderTitleRead {
+        var next: ProviderTitleLookup?
+    }
+
+    @ObservationIgnored
+    private var providerTitleReads: [String: ProviderTitleRead] = [:]
+
+    /// Look a card's title up in its provider's store, off the main actor:
+    /// every Claude and Codex hook asks, and the lookup reads a file (Codex's
+    /// whole thread index, the head and tail of a Claude transcript). One read
+    /// per card at a time; a lookup asked for meanwhile runs once it lands,
+    /// and only the newest lookup's title is applied.
+    private func readProviderTitle(_ lookup: ProviderTitleLookup, for cardId: String) {
+        if providerTitleReads[cardId] != nil {
+            providerTitleReads[cardId] = ProviderTitleRead(next: lookup)
+            return
+        }
+        providerTitleReads[cardId] = ProviderTitleRead()
+        let read = storeReaders.title
+        Task.detached(priority: .userInitiated) {
+            let resolved = read(lookup)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if let next = self.providerTitleReads.removeValue(forKey: cardId)?.next {
+                    self.readProviderTitle(next, for: cardId)
+                    return
+                }
+                guard let session = self.sessions[cardId],
+                      session.sessionTitle != resolved?.title
+                        || session.sessionTitleSource != resolved?.source else { return }
+                self.sessions[cardId]?.sessionTitle = resolved?.title
+                self.sessions[cardId]?.sessionTitleSource = resolved?.source
+            }
         }
     }
 
@@ -1527,7 +1603,7 @@ final class AppState {
         if let source = event.rawJSON["_source"] as? String,
            (source == "cursor" || source == "cursor-cli"),
            sessions[sessionId]?.isYoloMode == nil {
-            sessions[sessionId]?.isYoloMode = Self.detectCursorYoloMode()
+            readCursorYoloMode(for: sessionId)
         }
 
         // Now that the event has settled: does the user hear about it, and
@@ -1710,18 +1786,49 @@ final class AppState {
         }
     }
 
+    /// The read walks the card's transcript or session store (a Codex
+    /// rollout search, OpenCode's database), so it runs off the main actor,
+    /// one at a time per card. A model a hook supplies meanwhile wins.
     private func maybeBackfillModel(for sessionId: String) {
         guard let session = sessions[sessionId], session.model == nil else { return }
         let now = Date()
         if let retryAt = modelReadRetryAt[sessionId], retryAt > now {
             return
         }
+        guard modelReadsInFlight.insert(sessionId).inserted else { return }
 
-        if let model = SessionDiscovery.readModelForSession(sessionId: sessionId, session: session) {
-            sessions[sessionId]?.model = model
-            modelReadRetryAt.removeValue(forKey: sessionId)
-        } else {
-            modelReadRetryAt[sessionId] = now.addingTimeInterval(5)
+        let read = storeReaders.model
+        Task.detached(priority: .utility) {
+            let model = read(sessionId, session)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.modelReadsInFlight.remove(sessionId)
+                guard self.sessions[sessionId] != nil else { return }
+                if let model {
+                    if self.sessions[sessionId]?.model == nil {
+                        self.sessions[sessionId]?.model = model
+                    }
+                    self.modelReadRetryAt.removeValue(forKey: sessionId)
+                } else {
+                    self.modelReadRetryAt[sessionId] = now.addingTimeInterval(5)
+                }
+            }
+        }
+    }
+
+    /// Read Cursor's settings for the card's YOLO badge, off the main actor;
+    /// once per card (nil = unchecked).
+    private func readCursorYoloMode(for sessionId: String) {
+        guard cursorYoloReadsInFlight.insert(sessionId).inserted else { return }
+        let read = storeReaders.cursorYoloMode
+        Task.detached(priority: .utility) {
+            let yolo = read()
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.cursorYoloReadsInFlight.remove(sessionId)
+                guard self.sessions[sessionId] != nil, self.sessions[sessionId]?.isYoloMode == nil else { return }
+                self.sessions[sessionId]?.isYoloMode = yolo
+            }
         }
     }
 
@@ -2822,21 +2929,6 @@ final class AppState {
             if pa != pb { return pa < pb }
             return a.value.lastActivity < b.value.lastActivity
         }?.key
-    }
-
-    /// Check if Cursor is in YOLO mode by reading its settings
-    private static func detectCursorYoloMode() -> Bool {
-        let settingsPath = NSHomeDirectory() + "/Library/Application Support/Cursor/User/settings.json"
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: settingsPath),
-              let data = fm.contents(atPath: settingsPath),
-              let str = String(data: data, encoding: .utf8) else { return false }
-        let stripped = ConfigInstaller.stripJSONComments(str)
-        guard let strippedData = stripped.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: strippedData) as? [String: Any] else { return false }
-        if json["cursor.general.yoloMode"] as? Bool == true { return true }
-        if json["cursor.agent.enableYoloMode"] as? Bool == true { return true }
-        return false
     }
 
     // MARK: - Session Discovery (FSEventStream + process scan)
