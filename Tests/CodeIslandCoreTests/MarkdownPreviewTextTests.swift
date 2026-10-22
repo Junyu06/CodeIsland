@@ -125,9 +125,14 @@ final class MarkdownPreviewTextTests: XCTestCase {
         let reply = hugeReply(bytes: 300_000)
         let start = Date()
         let preview = String(ChatMessageTextFormatter.markdownPreview(reply, singleLine: true).characters)
-        XCTAssertLessThan(Date().timeIntervalSince(start) * 1000, 80)
+        let previewTime = Date().timeIntervalSince(start)
 
+        let fullStart = Date()
         let full = MarkdownPreviewText.plain(reply, singleLine: true)
+        let fullTime = Date().timeIntervalSince(fullStart)
+        // Against flattening the whole reply rather than a fixed budget: a
+        // machine busy with other test runs slows both alike.
+        XCTAssertLessThan(previewTime, fullTime / 2, "preview \(previewTime * 1000) ms, whole reply \(fullTime * 1000) ms")
         XCTAssertEqual(String(preview.prefix(2_000)), String(full.prefix(2_000)), "the visible head is unchanged")
         XCTAssertLessThan(preview.utf8.count, 16 * 1024)
     }
