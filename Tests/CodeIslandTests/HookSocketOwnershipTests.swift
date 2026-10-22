@@ -178,8 +178,10 @@ final class HookSocketOwnershipTests: XCTestCase {
 
     /// Runs the shipped remote hook's `main()` against a stand-in island at a
     /// path of the driver's; `mode` is how the hook finds it: "direct", through
-    /// a "link", or "foreign" (its lstat reporting another owner). Returns what
-    /// the island received, nil for nothing.
+    /// a "link", "foreign" (another owner, by its lstat and by the kernel's
+    /// word on who listens), or "impostor" (a file of its own user's, with
+    /// another user listening behind it). Returns what the island received,
+    /// nil for nothing.
     private func runRemoteHook(_ mode: String, socketOwnerUID: String? = nil) throws -> String? {
         // The stand-in island of an earlier run in this test left its socket.
         unlink(scratch + "/island.sock")
@@ -226,6 +228,9 @@ final class HookSocketOwnershipTests: XCTestCase {
                                        info.st_uid + 1, info.st_gid, info.st_size,
                                        int(info.st_atime), int(info.st_mtime), int(info.st_ctime)))
             hook.os.lstat = foreign_lstat
+        if mode in ("foreign", "impostor"):
+            real_peer_uid = hook._peer_uid
+            hook._peer_uid = lambda sock: real_peer_uid(sock) + 1
         hook._get_tty = lambda: "/dev/pts/7"
         sys.stdin = io.TextIOWrapper(io.BytesIO(b'{"hook_event_name":"Stop","session_id":"sown-3"}'), encoding="utf-8")
         printed = io.StringIO()
@@ -290,5 +295,41 @@ final class HookSocketOwnershipTests: XCTestCase {
     func testRemoteHookTakesAMalformedOwnerForItsOwnUser() throws {
         XCTAssertTrue(try XCTUnwrap(runRemoteHook("direct", socketOwnerUID: "1x")).contains("sown-3"))
         XCTAssertNil(try runRemoteHook("foreign", socketOwnerUID: "1x"))
+    }
+
+    /// The file says the socket is the island's user's, but the kernel says
+    /// another user listens behind it: the hook, which has to connect to ask,
+    /// sends nothing.
+    func testRemoteHookSendsNothingWhenAnotherUserListensBehindItsSocket() throws {
+        XCTAssertEqual(try runRemoteHook("impostor") ?? "", "", "the payload reached a listener of another user's")
+    }
+
+    /// The hook asks the kernel who listens (LOCAL_PEERCRED here, as on
+    /// macOS hosts; SO_PEERCRED on Linux): the island's stand-in, this user.
+    func testRemoteHookAsksTheKernelWhoListens() throws {
+        let hookURL = URL(fileURLWithPath: scratch + "/codeisland-remote-hook.py")
+        try Data(XCTUnwrap(RemoteInstaller.remoteHookSource()).utf8).write(to: hookURL)
+        let driver = """
+        import importlib.util, os, socket, sys
+        spec = importlib.util.spec_from_file_location("hook", sys.argv[1])
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        path = os.path.join(sys.argv[2], "peer.sock")
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(path)
+        server.listen(1)
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(path)
+        print(hook._peer_uid(client), hook._peer_is_island(client))
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-c", driver, hookURL.path, scratch]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        try process.run()
+        let out = String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        XCTAssertEqual(out.trimmingCharacters(in: .whitespacesAndNewlines), "\(getuid()) True")
     }
 }

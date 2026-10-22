@@ -11,10 +11,11 @@ import json
 import os
 import socket
 import stat
+import struct
 import subprocess
 import sys
 
-VERSION = "0.4.3"
+VERSION = "0.4.4"
 # The `_edge` facts version (HookEdgeFacts.version on the island).
 EDGE_FACTS_VERSION = 1
 # Per-user socket path (#193): CodeIsland injects CODEISLAND_SOCKET_PATH via the hook
@@ -454,20 +455,52 @@ def _socket_is_ours(path):
     return stat.S_ISSOCK(info.st_mode) and info.st_uid == SOCKET_OWNER_UID
 
 
+def _peer_uid(sock):
+    """The uid of whoever listens at the other end of the connected socket
+    `sock`, as the kernel tells it — the credentials it had when it called
+    listen(), which no file at the socket's path can change: Linux's
+    SO_PEERCRED, the LOCAL_PEERCRED of macOS and FreeBSD (a struct xucred,
+    cr_uid after cr_version). None where the platform has no way to ask;
+    -1, which is nobody's, when asking failed."""
+    try:
+        if hasattr(socket, "SO_PEERCRED"):
+            creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("iII"))
+            return struct.unpack("iII", creds)[1]
+        if sys.platform == "darwin" or sys.platform.startswith("freebsd"):
+            level = getattr(socket, "SOL_LOCAL", 0)
+            option = getattr(socket, "LOCAL_PEERCRED", 0x001)
+            creds = sock.getsockopt(level, option, 256)
+            return struct.unpack_from("=II", creds)[1]
+    except (OSError, struct.error):
+        return -1
+    return None
+
+
+def _peer_is_island(sock):
+    """Whether the island's user here (SOCKET_OWNER_UID) listens at the other
+    end of `sock`: sshd's forward, which listens as the SSH user. The lstat
+    before connect() looked at a file; this is who answers through it. Where
+    the platform cannot say, the lstat stands alone."""
+    uid = _peer_uid(sock)
+    return uid is None or uid == SOCKET_OWNER_UID
+
+
 def _send_event(payload, expects_response, stays_for_reply=True):
     """Sends the event and reads the island's reply to EOF; returns the reply
     when the hook waits for one. A hook nobody waits on reads it too, for a
     short while, unless it is a tool step (`stays_for_reply`, see
     _TOOL_STEP_EVENTS): an older island, which accepted connections on its main
     thread, lost the event of a hook that had closed before it got there.
-    Nothing is sent to a socket the island's user does not own: as if the
-    island were not there."""
+    Nothing is sent to a socket the island's user does not own, nor to one
+    whose listener is not that user: as if the island were not there."""
     if not _socket_is_ours(SOCKET_PATH):
         return None
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(BLOCKING_TIMEOUT_SECONDS if expects_response else TIMEOUT_SECONDS)
     try:
         sock.connect(SOCKET_PATH)
+        if not _peer_is_island(sock):
+            return None
         sock.sendall(json.dumps(payload).encode("utf-8"))
         sock.shutdown(socket.SHUT_WR)
         if not expects_response:

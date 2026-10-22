@@ -32,7 +32,13 @@ quirk is then fixed once, in HookIntake, for every edge.
   remote host the island's socket is sshd's, made as the SSH user; a host
   whose agents run as other users (containers, sudo) has the installer set
   `CODEISLAND_SOCKET_OWNER_UID` to the SSH user's uid in each hook command,
-  and an edge then uses a socket that user owns instead.
+  and an edge then uses a socket that user owns instead. Once connected, the
+  remote hook also asks the kernel who listens behind the socket
+  (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS and FreeBSD) and sends
+  nothing unless it is that same user: sshd's forward listens as the SSH
+  user. Where the platform has no way to ask, the `lstat` stands alone. The
+  remote OpenCode plugin sends every event through the remote hook (Node
+  gives a Unix socket's peer credentials no API).
 - **The socket names the host, not the payload.** On the Mac, each remote
   host's forward ends at a socket the island bound for that host alone
   (`codeisland-hosts/h-<digest>.sock` in the user's own temporary folder,
