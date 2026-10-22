@@ -47,8 +47,25 @@ final class TestIsolationTests: XCTestCase {
         XCTAssertFalse(TerminalVisibilityDetector.isTerminalFrontmostForSession(iterm))
     }
 
+    @MainActor
     func testDiscoveryScansNoRealProcessesOrSessionStores() {
-        XCTAssertEqual(SessionDiscoveryCoordinator.Scanners.current.sessions().count, 0)
+        // An AppState's discovery gets the inert scanners in a test process.
+        let scanners = AppState().discovery.scanners
+        XCTAssertEqual(scanners.sessions().count, 0)
+        XCTAssertEqual(scanners.codexDesktopSessions().count, 0)
+        XCTAssertEqual(scanners.watchRoots(), [], "no watcher on the real session stores")
+    }
+
+    @MainActor
+    func testAppStateReadsNoRealSessionStores() {
+        // Nor does it read the agents' stores for its cards.
+        let readers = AppState().storeReaders
+        var card = SessionSnapshot()
+        card.cwd = FileManager.default.homeDirectoryForCurrentUser.path
+        XCTAssertNil(readers.title(ProviderTitleLookup(sessionId: "s", provider: "claude", cwd: card.cwd)))
+        XCTAssertNil(readers.model("s", card))
+        XCTAssertNil(readers.nativeAppFinishedTurn("s", card))
+        XCTAssertFalse(readers.cursorYoloMode())
     }
 
     func testHookInstallsNeverStartTheUsersClaude() {

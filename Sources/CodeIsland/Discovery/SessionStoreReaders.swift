@@ -13,8 +13,8 @@ struct ProviderTitleLookup: Sendable {
 /// shows: its provider title, its model, whether a native app finished its
 /// turn, Cursor's YOLO setting. Each reads a file or a database, and hooks
 /// and the cleanup tick ask for them, so AppState runs them off the main
-/// actor. `live` reads the machine; a test installs its own
-/// (`AppState.storeReaders`).
+/// actor. `live` reads the machine; a test process reads nothing (`inert`)
+/// unless a test installs readers (`AppState.storeReaders`).
 struct SessionStoreReaders: Sendable {
     /// The card's title in its provider's store (Codex's thread index, a
     /// Claude transcript's custom / AI title).
@@ -32,4 +32,15 @@ struct SessionStoreReaders: Sendable {
         nativeAppFinishedTurn: { SessionDiscovery.nativeAppFinishedTurnTimestamp(sessionId: $0, session: $1) },
         cursorYoloMode: { CursorDiscovery.detectCursorYoloMode() }
     )
+
+    /// Finds nothing: no title, no model, no turn end, YOLO off.
+    static let inert = SessionStoreReaders(
+        title: { _ in nil },
+        model: { _, _ in nil },
+        nativeAppFinishedTurn: { _, _ in nil },
+        cursorYoloMode: { false }
+    )
+
+    /// `inert` in a test process, `live` otherwise.
+    static var current: SessionStoreReaders { RuntimeEnvironment.isRunningTests ? .inert : .live }
 }

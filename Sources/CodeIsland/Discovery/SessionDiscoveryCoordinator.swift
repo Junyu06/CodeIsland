@@ -48,6 +48,8 @@ final class SessionDiscoveryCoordinator {
         var codexDesktopSessions: @Sendable () -> [DiscoveredSession]
         /// The Cursor Agent Task index: a walk of `~/.cursor/projects`.
         var cursorSubagentIndex: @Sendable () -> CursorSubagentTranscriptIndex
+        /// The session stores the watcher follows (none: no watcher).
+        var watchRoots: @Sendable () -> [String]
 
         static let live = Scanners(
             sessions: { SessionDiscovery.findDiscoveredSessions() },
@@ -58,13 +60,15 @@ final class SessionDiscoveryCoordinator {
             },
             cursorSubagentIndex: {
                 CursorSubagentTranscriptIndex.scan(home: FileManager.default.homeDirectoryForCurrentUser.path)
-            }
+            },
+            watchRoots: { SessionDiscovery.discoveryWatchRoots() }
         )
 
         static let inert = Scanners(
             sessions: { [] },
             codexDesktopSessions: { [] },
-            cursorSubagentIndex: { CursorSubagentTranscriptIndex(pathsBySessionId: [:], builtAt: Date()) }
+            cursorSubagentIndex: { CursorSubagentTranscriptIndex(pathsBySessionId: [:], builtAt: Date()) },
+            watchRoots: { [] }
         )
 
         /// `inert` in a test process, `live` otherwise.
@@ -182,7 +186,7 @@ final class SessionDiscoveryCoordinator {
     /// FSEventStream on known session-store roots — fires when transcript/event files change.
     func startProjectsWatcher() {
         guard fsEventStream == nil else { return }
-        let watchRoots = SessionDiscovery.discoveryWatchRoots()
+        let watchRoots = scanners.watchRoots()
         guard !watchRoots.isEmpty else { return }
 
         let box = ProjectsWatcherBox()

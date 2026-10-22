@@ -23,12 +23,7 @@ final class AppStateStoreReadsTests: XCTestCase {
     /// Readers that find nothing, so a test only exercises the one it installs.
     private func appStateReadingNothing() -> AppState {
         let appState = AppState()
-        appState.storeReaders = SessionStoreReaders(
-            title: { _ in nil },
-            model: { _, _ in nil },
-            nativeAppFinishedTurn: { _, _ in nil },
-            cursorYoloMode: { false }
-        )
+        appState.storeReaders = .inert
         return appState
     }
 

@@ -383,9 +383,10 @@ final class AppState {
     @ObservationIgnored
     private(set) var nativeAppTurnReadsInFlight: Set<String> = []
     /// The reads of the agents' own stores made for a known card, run off
-    /// the main actor (see `SessionStoreReaders`). Tests install their own.
+    /// the main actor (see `SessionStoreReaders`). Inert in a test process;
+    /// tests install their own.
     @ObservationIgnored
-    var storeReaders = SessionStoreReaders.live
+    var storeReaders = SessionStoreReaders.current
     /// Per parent session → subagent id: the subagent's own model/effort once
     /// read from its transcript, and the reads still trying to find it.
     @ObservationIgnored
