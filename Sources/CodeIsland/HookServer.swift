@@ -1,5 +1,4 @@
 import Foundation
-import Network
 import os.log
 import CodeIslandCore
 
@@ -14,112 +13,78 @@ class HookServer {
     }
 
     private let appState: AppState
+    /// Where hooks connect (``SocketPath``).
     nonisolated static var socketPath: String { SocketPath.path }
-    private var listener: NWListener?
+    /// Where this server listens: ``socketPath``, or a test's own socket.
+    let socketPath: String
+    /// The tools a test approves without a card; nil reads the user's settings.
+    private let pinnedAutoApproveTools: Set<String>?
+    private var listener: HookSocketListener?
+    /// Hook connections are accepted and read here, off the main thread; only
+    /// a complete request is handed to the main actor (``HookSocketListener``).
+    private let connectionQueue = DispatchQueue(label: "com.codeisland.hook-server", qos: .userInitiated)
 
-    init(appState: AppState) {
+    /// `socketPath` and `autoApproveTools` are for tests: a socket of their
+    /// own, and the tools approved without a card, not read from the settings.
+    init(appState: AppState, socketPath: String = HookServer.socketPath, autoApproveTools: Set<String>? = nil) {
         self.appState = appState
+        self.socketPath = socketPath
+        self.pinnedAutoApproveTools = autoApproveTools
     }
 
-    func start() {
-        // Clean up stale socket
-        unlink(HookServer.socketPath)
-
-        // Set umask to 0o077 BEFORE the listener creates the socket file,
-        // ensuring it is never world-readable even briefly (closes TOCTOU window).
-        let previousUmask = umask(0o077)
-
-        let params = NWParameters()
-        params.defaultProtocolStack.transportProtocol = NWProtocolTCP.Options()
-        params.requiredLocalEndpoint = NWEndpoint.unix(path: HookServer.socketPath)
-
-        do {
-            listener = try NWListener(using: params)
-        } catch {
-            umask(previousUmask)
-            log.error("Failed to create NWListener: \(error.localizedDescription)")
-            return
-        }
-
-        listener?.newConnectionHandler = { [weak self] connection in
-            Task { @MainActor in
-                self?.handleConnection(connection)
+    /// Starts listening. False, logged, when the socket cannot be created.
+    @discardableResult
+    func start() -> Bool {
+        let listener = HookSocketListener(path: socketPath, queue: connectionQueue) { [weak self] connection in
+            connection.readRequest(limit: Self.maxPayloadSize) { request in
+                switch request {
+                case .failed:
+                    connection.cancel()
+                case .tooLarge:
+                    log.warning("Payload too large (over \(Self.maxPayloadSize) bytes), dropping connection")
+                    connection.respond(Self.oversizedPayloadAnswer)
+                case .received(let data):
+                    // An edge's facts are parsed and interpreted here too, off
+                    // the main thread.
+                    let intake = Self.intake(data)
+                    if case .answerNothing = intake {
+                        connection.respond(Data())
+                        return
+                    }
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            self?.processRequest(intake, connection: connection)
+                        }
+                    }
+                }
             }
         }
-
-        listener?.stateUpdateHandler = { [previousUmask] state in
-            switch state {
-            case .ready:
-                // Restore previous umask now that the socket file exists with safe permissions
-                umask(previousUmask)
-                // Belt-and-suspenders: explicitly set 0o700 in case umask didn't take effect
-                chmod(HookServer.socketPath, 0o700)
-                log.info("HookServer listening on \(HookServer.socketPath)")
-            case .failed(let error):
-                umask(previousUmask)
-                log.error("HookServer failed: \(error.localizedDescription)")
-            default:
-                break
-            }
-        }
-
-        listener?.start(queue: .main)
+        guard listener.start() else { return false }
+        self.listener = listener
+        log.info("HookServer listening on \(self.socketPath)")
+        return true
     }
 
     func stop() {
-        listener?.cancel()
+        listener?.stop()
         listener = nil
         // Delay socket removal so in-flight hooks can finish sending their payload
         // before the file disappears — prevents intermittent errors on session end (#45).
-        let path = HookServer.socketPath
+        let path = socketPath
         DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
             unlink(path)
         }
     }
 
-    private func handleConnection(_ connection: NWConnection) {
-        connection.start(queue: .main)
-        receiveAll(connection: connection, accumulated: Data())
-    }
-
-    private static let maxPayloadSize = 10_485_760  // 10MB safety limit
-
-    /// Recursively receive all data until EOF, then process
-    private func receiveAll(connection: NWConnection, accumulated: Data) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
-            Task { @MainActor in
-                guard let self = self else { return }
-
-                // On error with no data, just drop the connection
-                if error != nil && accumulated.isEmpty && content == nil {
-                    connection.cancel()
-                    return
-                }
-
-                var data = accumulated
-                if let content { data.append(content) }
-
-                // Safety: reject oversized payloads
-                if data.count > Self.maxPayloadSize {
-                    log.warning("Payload too large (\(data.count) bytes), dropping connection")
-                    let denyResponse = Data(#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8)
-                    self.sendResponse(connection: connection, data: denyResponse)
-                    return
-                }
-
-                if isComplete || error != nil {
-                    self.processRequest(data: data, connection: connection)
-                } else {
-                    self.receiveAll(connection: connection, accumulated: data)
-                }
-            }
-        }
-    }
+    nonisolated private static let maxPayloadSize = 10_485_760  // 10MB safety limit
+    nonisolated private static let oversizedPayloadAnswer = Data(
+        #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8
+    )
 
     /// Internal tools that are safe to auto-approve without user confirmation.
     /// Read from user settings; defaults to all known internal tools.
-    private static var autoApproveTools: Set<String> {
-        SettingsManager.shared.autoApproveTools
+    private var autoApproveTools: Set<String> {
+        pinnedAutoApproveTools ?? SettingsManager.shared.autoApproveTools
     }
 
     /// Whether this event's agent is on the user's always-proceed list (#283).
@@ -268,7 +233,7 @@ class HookServer {
         }.resume()
     }
 
-    static func routeKind(for event: HookEvent) -> RouteKind {
+    nonisolated static func routeKind(for event: HookEvent) -> RouteKind {
         let normalizedEventName = EventNormalizer.normalize(event.eventName)
         // Google Antigravity's PreToolUse stays a plain activity event. Its hook
         // cannot approve a call (an `allow` is ignored and Antigravity prompts
@@ -436,8 +401,9 @@ class HookServer {
     /// An edge that cannot interpret its hook sends what it observed in
     /// `_edge` instead (``HookEdgeFacts``); HookIntake reads it here, as
     /// codeisland-bridge does on its own side. A payload without facts is its
-    /// edge's own interpretation and passes as it is.
-    static func intake(_ data: Data) -> Intake {
+    /// edge's own interpretation and passes as it is. Runs on the connection
+    /// queue, off the main thread.
+    nonisolated static func intake(_ data: Data) -> Intake {
         guard HookEdgeFacts.mayCarryFacts(data),
               let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let delivery = HookEdgeFacts.delivery(in: payload) else {
@@ -464,11 +430,11 @@ class HookServer {
         return .route(interpreted, edge: intake)
     }
 
-    private func processRequest(data received: Data, connection: NWConnection) {
+    private func processRequest(_ intake: Intake, connection: HookConnection) {
         let connectionId = ObjectIdentifier(connection)
         edgeIntakes[connectionId] = nil
         let data: Data
-        switch Self.intake(received) {
+        switch intake {
         case .answerNothing:
             sendResponse(connection: connection, data: Data())
             return
@@ -565,7 +531,7 @@ class HookServer {
             let sessionId = event.sessionId ?? "default"
 
             // Auto-approve safe internal tools without showing UI
-            if let toolName = event.toolName, Self.autoApproveTools.contains(toolName) {
+            if let toolName = event.toolName, autoApproveTools.contains(toolName) {
                 let response = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
                 sendResponse(connection: connection, data: Data(response.utf8))
                 return
@@ -625,7 +591,7 @@ class HookServer {
 
     /// Per-connection state used by the disconnect monitor.
     /// `responded` flips to true once we've sent the response, so our own
-    /// `connection.cancel()` inside `sendResponse` does not masquerade as a
+    /// closing of the connection after `sendResponse` does not masquerade as a
     /// peer disconnect.
     private final class ConnectionContext {
         var responded: Bool = false
@@ -636,34 +602,35 @@ class HookServer {
     /// Watch for bridge process disconnect — indicates the bridge process actually died
     /// (e.g. user Ctrl-C'd Claude Code), NOT a normal half-close.
     ///
-    /// Previously this used `connection.receive(min:1, max:1)` which triggered on EOF.
-    /// But the bridge always does `shutdown(SHUT_WR)` after sending the request (see
-    /// CodeIslandBridge/main.swift), which produces an immediate EOF on the read side.
-    /// That caused every PermissionRequest to be auto-drained as `deny` before the UI
-    /// card was even visible. We now rely on `stateUpdateHandler` transitioning to
-    /// `cancelled`/`failed` — which only happens on real socket teardown, not half-close.
-    private func monitorPeerDisconnect(connection: NWConnection, sessionId: String, agentId: String?) {
+    /// The bridge always does `shutdown(SHUT_WR)` after sending the request (see
+    /// CodeIslandBridge/main.swift), which produces an immediate EOF on the read side:
+    /// taken for a disconnect, every PermissionRequest was auto-drained as `deny`
+    /// before its card was even visible. ``HookConnection/closeWhenPeerLeaves()``
+    /// closes the connection only on real teardown, and a connection that closes
+    /// without an answer — its hook gone, or the safety net below — drops its card.
+    private func monitorPeerDisconnect(connection: HookConnection, sessionId: String, agentId: String?) {
         let context = ConnectionContext()
         let connId = ObjectIdentifier(connection)
         connectionContexts[connId] = context
 
-        connection.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
-                guard let self = self else { return }
-                switch state {
-                case .cancelled, .failed:
+        // Holding `connection` until this runs keeps its identifier from being reused.
+        connection.onClose { [weak self, connection] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
                     if !context.responded {
                         self.appState.handlePeerDisconnect(sessionId: sessionId, agentId: agentId)
                     }
-                    self.connectionContexts.removeValue(forKey: connId)
-                default:
-                    break
+                    if self.connectionContexts[ObjectIdentifier(connection)] === context {
+                        self.connectionContexts.removeValue(forKey: connId)
+                    }
                 }
             }
         }
+        connection.closeWhenPeerLeaves()
 
         // Safety net: if the connection context is still around after 5 minutes
-        // (e.g. stuck continuation, NWConnection never transitions), clean it up.
+        // (e.g. stuck continuation, the connection never closes), clean it up.
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 300_000_000_000)  // 5 minutes
             guard let self = self else { return }
@@ -676,8 +643,9 @@ class HookServer {
         }
     }
 
-    private func sendResponse(connection: NWConnection, data: Data) {
-        // Mark as responded BEFORE cancel() so the disconnect monitor ignores our own teardown.
+    private func sendResponse(connection: HookConnection, data: Data) {
+        // Mark as responded BEFORE the connection closes so the disconnect monitor
+        // ignores our own teardown.
         if let context = connectionContexts[ObjectIdentifier(connection)] {
             context.responded = true
         }
@@ -686,12 +654,6 @@ class HookServer {
         if let intake = edgeIntakes.removeValue(forKey: ObjectIdentifier(connection)) {
             data = intake.stdout(forAnswer: data) ?? Data()
         }
-        guard !data.isEmpty else {
-            connection.cancel()
-            return
-        }
-        connection.send(content: data, completion: .contentProcessed { _ in
-            connection.cancel()
-        })
+        connection.respond(data)
     }
 }
