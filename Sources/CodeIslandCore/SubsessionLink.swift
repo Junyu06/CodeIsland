@@ -117,6 +117,10 @@ public enum SubsessionMode: String, Sendable {
 public protocol SubsessionContext {
     /// The cards on the island, by key (`AppState.sessions`).
     var cards: [String: SessionSnapshot] { get }
+    /// What the Codex rollout at `transcriptPath` says (`session_meta`) about
+    /// its thread's parent. The app reads each rollout once
+    /// (``CodexRolloutCache``): this runs for every Codex hook.
+    func codexRolloutInspection(transcriptPath: String) -> CodexTranscriptSubagentInspection
 }
 
 /// Lookups over the island's cards that resolving a child's parent needs.
@@ -178,6 +182,28 @@ public enum SubsessionCards {
                 return lhs.value.startTime < rhs.value.startTime
             }
             .first?.key
+    }
+
+    /// A Codex parent in the same Desktop/CLI namespace as its child. Raw
+    /// and `codexapp:` cards may legitimately share a provider thread id
+    /// when a user resumes the same thread in both surfaces.
+    public static func codexParentCard(
+        threadId: String,
+        childTermBundleId: String?,
+        in cards: [String: SessionSnapshot]
+    ) -> String? {
+        let childIsDesktop = childTermBundleId == "com.openai.codex"
+        let canonicalId = childIsDesktop ? "codexapp:" + threadId : threadId
+        if let session = cards[canonicalId],
+           session.source == "codex",
+           session.isNativeAppMode == childIsDesktop {
+            return canonicalId
+        }
+        return cards.first(where: { _, snapshot in
+            snapshot.source == "codex"
+                && snapshot.providerSessionId == threadId
+                && snapshot.isNativeAppMode == childIsDesktop
+        })?.key
     }
 
     /// The card a child session with this subagent id is folded into, if

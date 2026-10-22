@@ -286,18 +286,17 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         appState.sessions["codexapp:parent-thread"] = desktopParent
         appState.sessions["parent-thread"] = cliParent
 
-        let server = HookServer(appState: appState)
-        XCTAssertEqual(server.codexNativeSubsessionParentId(from: [
+        XCTAssertEqual(CodexThreadSubsession.link(in: [
             "session_id": "child",
             "_source": "codex",
             "_term_bundle": AppState.codexAppBundleId,
             "transcript_path": transcript.path,
-        ]), "codexapp:parent-thread")
-        XCTAssertEqual(server.codexNativeSubsessionParentId(from: [
+        ], context: appState.subsessionContext)?.parentCardId, "codexapp:parent-thread")
+        XCTAssertEqual(CodexThreadSubsession.link(in: [
             "session_id": "child",
             "_source": "codex",
             "transcript_path": transcript.path,
-        ]), "parent-thread")
+        ], context: appState.subsessionContext)?.parentCardId, "parent-thread")
     }
 
     /// Every Desktop thread runs in Codex's one shared app-server. After a
@@ -886,7 +885,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         appState.sessions["child"] = child
 
         XCTAssertEqual(
-            appState.findSessionId(forSource: "codex", ppid: 1234, excluding: "child", requireActive: true),
+            SubsessionCards.samePidCard(source: "codex", ppid: 1234, excluding: "child", requireActive: true, in: appState.sessions),
             "parent"
         )
     }
@@ -903,7 +902,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         appState.sessions["idle"] = idle
 
         XCTAssertNil(
-            appState.findSessionId(forSource: "codex", ppid: 1234, excluding: "new-thread", requireActive: true)
+            SubsessionCards.samePidCard(source: "codex", ppid: 1234, excluding: "new-thread", requireActive: true, in: appState.sessions)
         )
     }
 

@@ -268,40 +268,6 @@ class HookServer {
         }.resume()
     }
 
-    private static func hiddenPluginResponse(for raw: [String: Any]) -> Data {
-        // Hidden PermissionRequest must allow so the plugin's tool execution
-        // doesn't block waiting on a UI prompt the user said to suppress.
-        let eventName = (raw["hook_event_name"] as? String
-            ?? raw["hookEventName"] as? String
-            ?? raw["event_name"] as? String
-            ?? "").lowercased()
-        if eventName.contains("permission") {
-            return Data(#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#.utf8)
-        }
-        return Data("{}".utf8)
-    }
-
-    private static func pluginPpid(from raw: [String: Any]) -> Int? {
-        SubsessionRouter.positivePpid(in: raw)
-    }
-
-    private static func nonEmptyString(_ value: Any?) -> String? {
-        guard let string = value as? String else { return nil }
-        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    private static func rawSessionId(from raw: [String: Any]) -> String? {
-        SubsessionRouter.sessionId(in: raw)
-    }
-
-    private static func rawEventName(from raw: [String: Any]) -> String? {
-        nonEmptyString(raw["hook_event_name"])
-            ?? nonEmptyString(raw["hookEventName"])
-            ?? nonEmptyString(raw["event_name"])
-            ?? nonEmptyString(raw["eventName"])
-    }
-
     static func routeKind(for event: HookEvent) -> RouteKind {
         let normalizedEventName = EventNormalizer.normalize(event.eventName)
         // Google Antigravity's PreToolUse stays a plain activity event. Its hook
@@ -376,177 +342,98 @@ class HookServer {
         return CursorSubsessionRouter.isCursorFamilySource(source)
     }
 
-    private static func codexSubagentMetadata(from raw: [String: Any]) -> CodexSubagentMetadata? {
-        guard let path = nonEmptyString(raw["transcript_path"]) else { return nil }
-        return AppState.codexSubagentMetadata(inTranscriptPath: path)
+    /// Whether a hook may be a child session's, worth a JSON parse for Agent
+    /// Sub-Sessions. Cheap byte probes first; avoid JSONSerialization on every
+    /// PostToolUse.
+    internal static func mayNeedSubsessionRouting(data: Data, mode: SubsessionMode) -> Bool {
+        // A child that names its parent (#378), a plugin proxy (#123) or a
+        // Codex thread: in every mode. Show separately keeps such a child on a
+        // quiet card of its own, and a child folded before Agent Sub-Sessions
+        // changed must still end where it started.
+        if data.range(of: declaredParentMarkerBytes) != nil
+            || data.range(of: pluginMarkerBytes) != nil
+            || (data.range(of: sourceMarkerBytes) != nil && data.range(of: codexMarkerBytes) != nil) {
+            return true
+        }
+        // A Cursor Task whose transcript path names its chat, in every mode.
+        if mayNeedCursorSubsessionRouting(data: data) { return true }
+        // One without: Merge and Hide fall back to its IDE process (`_ppid`).
+        // Show separately does not act on that guess, so it needs no parse.
+        return mode != .separate
+            && mayBeCursorHookSource(data: data)
+            && data.range(of: ppidKeyBytes) != nil
     }
 
-    func codexNativeSubsessionParentId(from raw: [String: Any]) -> String? {
-        guard (raw["_via_plugin"] as? Bool) != true,
-              SessionSnapshot.normalizedSupportedSource(raw["_source"] as? String) == "codex",
-              let childSessionId = Self.rawSessionId(from: raw) else {
-            return nil
-        }
-
-        if let metadata = Self.codexSubagentMetadata(from: raw),
-           let parentSessionId = appState.findCodexParentSessionId(
-               providerSessionId: metadata.parentThreadId,
-               childTermBundleId: raw["_term_bundle"] as? String
-           ) {
-            return parentSessionId
-        }
-
-        // Every Codex Desktop thread runs in the one shared app-server, so a
-        // same-PID card says nothing about parentage there (it can even be the
-        // thread's own card). Desktop children are found by metadata above.
-        guard raw["_term_bundle"] as? String != AppState.codexAppBundleId,
-              let ppid = Self.pluginPpid(from: raw) else { return nil }
-
-        // Current Codex hook payloads do not expose parent session metadata for
-        // native subagents, but child sessions run inside the same Codex CLI
-        // process as their parent. Require an already-active same-PID Codex
-        // session so a normal follow-up thread in an idle process stays separate.
-        let hasExplicitSubagentMarker = Self.nonEmptyString(raw["agent_id"]) != nil
-        return appState.findSessionId(
-            forSource: "codex",
-            ppid: ppid,
-            excluding: childSessionId,
-            requireActive: !hasExplicitSubagentMarker
-        )
+    /// A hook after Agent Sub-Sessions: `json` is its parsed payload when
+    /// routing had to parse it (HookEvent is built from that, not reparsed).
+    private struct RoutedHook {
+        var data: Data
+        var json: [String: Any]?
+        var rewritten = false
+        var response: Data?
     }
 
-    /// Place one hook of `link`'s child (``SubsessionRouter``): on its own
-    /// card, linked to its parent; folded into its parent's card; or hidden.
-    private func routeLinkedChild(
-        _ link: SubsessionLink,
-        data: Data,
-        raw: [String: Any],
-        mode: String,
-        cards: [String: SessionSnapshot]
+    /// Test seam for Agent Sub-Sessions pre-routing.
+    internal func routeSubsessionPayloadIfNeededForTesting(
+        data: Data
     ) -> (processedData: Data, responseData: Data?) {
-        var rewritten = raw
+        let routed = routeSubsessionPayloadIfNeeded(data: data)
+        guard routed.rewritten,
+              let json = routed.json,
+              let rewritten = try? JSONSerialization.data(withJSONObject: json) else {
+            return (routed.data, routed.response)
+        }
+        return (rewritten, routed.response)
+    }
+
+    /// Agent Sub-Sessions (#123, #151, #262, #378): find whose child the hook
+    /// is (``SubsessionRouter/link(in:context:now:)``) and place it — on the
+    /// child's own card, linked to its parent; folded into the parent's card;
+    /// or hidden.
+    private func routeSubsessionPayloadIfNeeded(data: Data) -> RoutedHook {
+        let mode = SubsessionMode(
+            setting: UserDefaults.standard.string(forKey: SettingsKey.pluginSessionMode)
+                ?? SettingsDefaults.pluginSessionMode
+        )
+        guard Self.mayNeedSubsessionRouting(data: data, mode: mode),
+              var raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return RoutedHook(data: data)
+        }
+        let context = appState.subsessionContext
+        guard let link = SubsessionRouter.link(in: raw, context: context) else {
+            return RoutedHook(data: data, json: raw)
+        }
+        let original = raw
         let outcome = SubsessionRouter.route(
-            &rewritten,
+            &raw,
             link: link,
-            mode: SubsessionMode(setting: mode),
-            cards: cards,
+            mode: mode,
+            cards: context.cards,
             isBlockingRequest: {
-                HookEvent(json: raw).map { Self.routeKind(for: $0) != .event } ?? false
+                HookEvent(json: original).map { Self.routeKind(for: $0) != .event } ?? false
             }
         )
         switch outcome {
         case .unchanged:
-            return (data, nil)
-        case .hidden:
-            return (data, Data("{}".utf8))
+            return RoutedHook(data: data, json: raw)
         case .rewritten:
-            guard let newData = try? JSONSerialization.data(withJSONObject: rewritten) else {
-                return (data, nil)
-            }
-            return (newData, nil)
+            return RoutedHook(data: data, json: raw, rewritten: true)
+        case .hidden:
+            return RoutedHook(data: data, json: raw, response: Data("{}".utf8))
         }
-    }
-
-    /// Test seam for Agent Sub-Sessions pre-routing (Cursor / Codex / plugin).
-    internal func routeSubsessionPayloadIfNeededForTesting(
-        data: Data
-    ) -> (processedData: Data, responseData: Data?) {
-        routeSubsessionPayloadIfNeeded(data: data)
-    }
-
-    private func routeSubsessionPayloadIfNeeded(data: Data) -> (processedData: Data, responseData: Data?) {
-        let mayNeedCodex = data.range(of: Self.sourceMarkerBytes) != nil && data.range(of: Self.codexMarkerBytes) != nil
-
-        let mode = UserDefaults.standard.string(forKey: SettingsKey.pluginSessionMode)
-            ?? SettingsDefaults.pluginSessionMode
-        let isMergeOrHide = mode == "hide" || mode == "merge"
-
-        // A child that names its parent (#378), a plugin proxy (#123), or a
-        // Cursor Task its transcript path names: in every mode. Show
-        // separately keeps such a child on a quiet card of its own, and one
-        // folded before Agent Sub-Sessions changed must still end where it
-        // started.
-        let mayBeLinkedChild = data.range(of: Self.declaredParentMarkerBytes) != nil
-            || data.range(of: Self.pluginMarkerBytes) != nil
-            || Self.mayNeedCursorSubsessionRouting(data: data)
-            // A Cursor Task without one: Merge and Hide fall back to its IDE
-            // process (`_ppid`). Show separately does not act on that guess,
-            // so it needs no parse.
-            || (isMergeOrHide
-                && Self.mayBeCursorHookSource(data: data)
-                && data.range(of: Self.ppidKeyBytes) != nil)
-
-        guard mayNeedCodex || mayBeLinkedChild,
-              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return (data, nil)
-        }
-
-        // A child that names its parent, one already folded into a card, a
-        // Cursor Task or a plugin proxy (``SubsessionRouter/link(in:context:now:)``).
-        let context = appState.subsessionContext
-        if let link = SubsessionRouter.link(in: raw, context: context) {
-            return routeLinkedChild(link, data: data, raw: raw, mode: mode, cards: context.cards)
-        }
-
-        guard isMergeOrHide else {
-            return (data, nil)
-        }
-
-        guard let childSessionId = Self.rawSessionId(from: raw) else {
-            return (data, nil)
-        }
-        let codexMetadata = Self.codexSubagentMetadata(from: raw)
-        let parentSessionId = codexNativeSubsessionParentId(from: raw)
-        guard codexMetadata != nil || parentSessionId != nil else {
-            return (data, nil)
-        }
-
-        switch mode {
-        case "hide":
-            // Hiding the card must not approve what Codex's auto reviewer
-            // would otherwise judge (#165): hand it back undecided instead.
-            if Self.rawEventName(from: raw).map(EventNormalizer.normalize) == "PermissionRequest",
-               let event = HookEvent(from: data),
-               Self.shouldDeferPermissionRequestToProvider(event) {
-                return (data, Data("{}".utf8))
-            }
-            return (data, Self.hiddenPluginResponse(for: raw))
-        case "merge":
-            guard let parentSessionId else { return (data, nil) }
-            var rewritten = raw
-            rewritten["session_id"] = parentSessionId
-            rewritten["agent_id"] = Self.nonEmptyString(raw["agent_id"]) ?? childSessionId
-            rewritten["agent_type"] = Self.nonEmptyString(raw["agent_type"])
-                ?? codexMetadata?.agentType
-                ?? "default"
-            rewritten["_codex_subagent"] = true
-            rewritten["_codex_subagent_session_id"] = childSessionId
-            if let eventName = Self.rawEventName(from: raw) {
-                rewritten["_codex_subagent_event"] = EventNormalizer.normalize(eventName)
-            }
-            if let newData = try? JSONSerialization.data(withJSONObject: rewritten) {
-                return (newData, nil)
-            }
-        default:
-            break
-        }
-        return (data, nil)
     }
 
     private func processRequest(data: Data, connection: NWConnection) {
-        // Sub-session pre-filter (#123, #151): plugin, Codex, or Cursor Task hooks
-        // (Cursor: transcript parent ≠ session_id) follow Agent Sub-Sessions —
-        // merge into the parent, hide, or keep separate.
-        //
-        // Cheap byte probes first; avoid JSONSerialization on every PostToolUse.
+        // Sub-session pre-filter: a child session's hook (a Codex thread, a
+        // Cursor Task, a declared child, a plugin proxy) follows Agent
+        // Sub-Sessions — its own linked card, its parent's card, or hidden.
         let routed = routeSubsessionPayloadIfNeeded(data: data)
-        if let responseData = routed.responseData {
+        if let responseData = routed.response {
             sendResponse(connection: connection, data: responseData)
             return
         }
-        let processedData = routed.processedData
 
-        guard let event = HookEvent(from: processedData) else {
+        guard let event = routed.json.flatMap(HookEvent.init(json:)) ?? HookEvent(from: routed.data) else {
             sendResponse(connection: connection, data: Data("{\"error\":\"parse_failed\"}".utf8))
             return
         }

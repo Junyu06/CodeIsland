@@ -28,8 +28,20 @@ final class SubsessionRouterTests: XCTestCase {
         ["hook_event_name": event, "session_id": cursorTask, "_source": "cursor", "_ppid": 4242]
     }
 
+    private func codexThread(_ event: String = "PreToolUse", transcript: String = "/rollouts/child.jsonl") -> [String: Any] {
+        ["hook_event_name": event, "session_id": child, "_source": "codex", "transcript_path": transcript, "_ppid": 7070]
+    }
+
+    private func codexFiledUnderParent(_ event: String = "PreToolUse") -> [String: Any] {
+        ["hook_event_name": event, "session_id": parent, "_source": "codex", "agent_id": child, "agent_type": "worker"]
+    }
+
     private func pluginProxy(_ event: String = "PostToolUse") -> [String: Any] {
         ["hook_event_name": event, "session_id": child, "_source": "opencode", "_via_plugin": true, "_ppid": 9090]
+    }
+
+    private var childRollout: CodexTranscriptSubagentInspection {
+        .subagent(CodexSubagentMetadata(parentThreadId: parent, agentType: "worker", agentNickname: "Ohm"))
     }
 
     // MARK: - Helpers
@@ -88,6 +100,53 @@ final class SubsessionRouterTests: XCTestCase {
         XCTAssertEqual(try placement(cursorByProcess(), .hide, context), .hidden)
     }
 
+    func testCodexThreadNamedByItsRolloutInEveryMode() throws {
+        let noParent = StubSubsessionContext(rollouts: ["/rollouts/child.jsonl": childRollout])
+        let withParent = StubSubsessionContext(
+            cards: [parent: subsessionCard(source: "codex", providerSessionId: parent)],
+            rollouts: ["/rollouts/child.jsonl": childRollout]
+        )
+        XCTAssertEqual(try placement(codexThread(), .separate, withParent), .ownCard(linkedTo: parent))
+        XCTAssertEqual(
+            try placement(codexThread(), .separate, noParent), .ownCard(linkedTo: parent),
+            "a parent thread the island has no card for yet still makes it a child"
+        )
+        XCTAssertEqual(try placement(codexThread(), .merge, withParent), .fold(into: parent))
+        XCTAssertEqual(try placement(codexThread(), .merge, noParent), .ownCard(linkedTo: parent))
+        XCTAssertEqual(try placement(codexThread(), .hide, withParent), .hidden)
+        XCTAssertEqual(try placement(codexThread("PermissionRequest"), .hide, withParent, blocking: true), .ownCard(linkedTo: parent))
+    }
+
+    func testCodexThreadFoundByItsParentsProcessInEveryMode() throws {
+        let context = StubSubsessionContext(cards: [
+            parent: subsessionCard(source: "codex", status: .running, cliPid: 7070),
+        ])
+        let guess = try link(codexThread(), context)
+        XCTAssertTrue(guess.isInferred)
+        XCTAssertEqual(try placement(codexThread(), .separate, context), .unchanged)
+        XCTAssertEqual(try placement(codexThread(), .merge, context), .fold(into: parent))
+        XCTAssertEqual(try placement(codexThread(), .hide, context), .hidden)
+    }
+
+    func testCodexThreadCodexFiledUnderItsParentInEveryMode() throws {
+        var root = subsessionCard(source: "codex")
+        let context = StubSubsessionContext(cards: [parent: root])
+        let filed = try link(codexFiledUnderParent(), context)
+        XCTAssertTrue(filed.isProviderFolded)
+        XCTAssertEqual(filed.agentId, child)
+        XCTAssertEqual(try placement(codexFiledUnderParent(), .separate, context), .unchanged)
+        XCTAssertEqual(try placement(codexFiledUnderParent(), .merge, context), .unchanged)
+        XCTAssertEqual(try placement(codexFiledUnderParent(), .hide, context), .hidden)
+        XCTAssertEqual(
+            try placement(codexFiledUnderParent("PermissionRequest"), .hide, context, blocking: true), .unchanged,
+            "a request it is blocked on still reaches the user"
+        )
+        // Once that request put the child on the card, it stays visible until it ends.
+        root.subagents[child] = SubagentState(agentId: child, agentType: "worker")
+        context.cards[parent] = root
+        XCTAssertEqual(try placement(codexFiledUnderParent(), .hide, context), .unchanged)
+    }
+
     func testPluginProxyInEveryMode() throws {
         let alone = StubSubsessionContext()
         let withAgent = StubSubsessionContext(cards: [
@@ -108,8 +167,9 @@ final class SubsessionRouterTests: XCTestCase {
     }
 
     func testHookOfASessionNobodySpawnedHasNoLink() {
-        let context = StubSubsessionContext()
+        let context = StubSubsessionContext(rollouts: ["/rollouts/root.jsonl": .root])
         XCTAssertNil(SubsessionRouter.link(in: ["hook_event_name": "Stop", "session_id": parent], context: context))
+        XCTAssertNil(SubsessionRouter.link(in: codexThread(transcript: "/rollouts/root.jsonl"), context: context))
         XCTAssertNil(SubsessionRouter.link(in: [
             "hook_event_name": "Stop", "session_id": cursorChat, "_source": "cursor", "transcript_path": cursorTranscript,
         ], context: context))
@@ -118,7 +178,14 @@ final class SubsessionRouterTests: XCTestCase {
     // MARK: - A child stays where it is
 
     func testChildWithACardOfItsOwnKeepsItWhateverTheMode() throws {
-        let context = StubSubsessionContext(cards: [parent: subsessionCard(source: "pi"), child: subsessionCard(source: "pi")])
+        let context = StubSubsessionContext(
+            cards: [parent: subsessionCard(source: "codex"), child: subsessionCard(source: "codex")],
+            rollouts: ["/rollouts/child.jsonl": childRollout]
+        )
+        for mode in [SubsessionMode.merge, .hide] {
+            XCTAssertEqual(try placement(codexThread(), mode, context), .ownCard(linkedTo: parent), "\(mode)")
+        }
+        context.cards[child] = subsessionCard(source: "pi")
         for mode in [SubsessionMode.merge, .hide] {
             XCTAssertEqual(try placement(declared(), mode, context), .ownCard(linkedTo: parent), "\(mode)")
         }
@@ -141,6 +208,16 @@ final class SubsessionRouterTests: XCTestCase {
         }
     }
 
+    func testAgentsOwnSubagentRowDoesNotPullAChildOffItsCard() throws {
+        // A Codex parent's SubagentStart made a row for the thread; its own
+        // hooks keep a card of their own in Show separately.
+        var root = subsessionCard(source: "codex", providerSessionId: parent)
+        root.subagents[child] = SubagentState(agentId: child, agentType: "worker")
+        let context = StubSubsessionContext(cards: [parent: root], rollouts: ["/rollouts/child.jsonl": childRollout])
+        XCTAssertEqual(try placement(codexThread(), .separate, context), .ownCard(linkedTo: parent))
+        XCTAssertEqual(try placement(codexThread(), .merge, context), .fold(into: parent))
+    }
+
     func testGrandchildFoldsIntoTheCardItsParentIsFoldedInto() throws {
         var root = subsessionCard(source: "pi")
         var folded = SubagentState(agentId: parent, agentType: "worker")
@@ -148,9 +225,49 @@ final class SubsessionRouterTests: XCTestCase {
         root.subagents[parent] = folded
         let context = StubSubsessionContext(cards: ["root": root])
         XCTAssertEqual(try placement(declared(), .merge, context), .fold(into: "root"))
+
+        // A Codex grandchild names its parent thread, folded as a row by its raw id.
+        var codexRoot = subsessionCard(source: "codex", termBundleId: "com.openai.codex")
+        var codexParent = SubagentState(agentId: parent, agentType: "worker")
+        codexParent.subsessionKind = .codexThread
+        codexRoot.subagents[parent] = codexParent
+        let desktop = StubSubsessionContext(
+            cards: ["codexapp:root": codexRoot],
+            rollouts: ["/rollouts/child.jsonl": childRollout]
+        )
+        var grandchild = codexThread()
+        grandchild["_term_bundle"] = "com.openai.codex"
+        XCTAssertEqual(try placement(grandchild, .merge, desktop), .fold(into: "codexapp:root"))
     }
 
     // MARK: - The rewrite
+
+    func testFoldRewritesEveryKindOntoTheHostAsItsSubagent() throws {
+        let context = StubSubsessionContext(
+            cards: [parent: subsessionCard(source: "codex", providerSessionId: parent)],
+            rollouts: ["/rollouts/child.jsonl": childRollout]
+        )
+        var codex = codexThread()
+        XCTAssertEqual(
+            SubsessionRouter.route(&codex, link: try link(codex, context), mode: .merge, cards: context.cards, isBlockingRequest: { false }),
+            .rewritten
+        )
+        XCTAssertEqual(codex["session_id"] as? String, parent)
+        XCTAssertEqual(codex["agent_id"] as? String, child)
+        XCTAssertEqual(codex["agent_type"] as? String, "worker", "the rollout's role")
+        XCTAssertEqual(codex[SubsessionRouter.foldedKey] as? String, "codex")
+        XCTAssertEqual(codex["_codex_subagent"] as? Bool, true)
+
+        var misbranded: [String: Any] = [
+            "hook_event_name": "PreToolUse", "session_id": cursorTask, "_source": "claude",
+            "transcript_path": "/Users/u/.cursor/projects/x/agent-transcripts/\(cursorChat)/subagents/\(cursorTask).jsonl",
+        ]
+        let cursorLink = try link(misbranded, StubSubsessionContext())
+        XCTAssertTrue(SubsessionRouter.fold(&misbranded, link: cursorLink, into: cursorChat))
+        XCTAssertEqual(misbranded["_source"] as? String, "cursor")
+        XCTAssertEqual(misbranded["agent_type"] as? String, "cursor-subagent")
+        XCTAssertEqual(misbranded[SubsessionRouter.foldedKey] as? String, "cursor")
+    }
 
     func testPluginProxyJoinsItsAgentsCardAsItsOwnEvents() throws {
         let context = StubSubsessionContext(cards: [
@@ -167,10 +284,10 @@ final class SubsessionRouterTests: XCTestCase {
     }
 
     func testChildOnItsOwnCardIsLinkedToItsParent() throws {
-        var raw: [String: Any] = ["hook_event_name": "Stop", "session_id": child, "_source": "codex"]
-        let codexLink = SubsessionLink(kind: .codexThread, childCardId: child, agentId: child, parentCardId: parent)
+        let context = StubSubsessionContext(rollouts: ["/rollouts/child.jsonl": childRollout])
+        var raw = codexThread("Stop")
         XCTAssertEqual(
-            SubsessionRouter.route(&raw, link: codexLink, mode: .separate, cards: [:], isBlockingRequest: { false }),
+            SubsessionRouter.route(&raw, link: try link(raw, context), mode: .separate, cards: context.cards, isBlockingRequest: { false }),
             .rewritten
         )
         XCTAssertEqual(raw["session_id"] as? String, child)
@@ -179,16 +296,15 @@ final class SubsessionRouterTests: XCTestCase {
         // A declared child already says so: nothing to rewrite.
         var pi = declared("Stop")
         XCTAssertEqual(
-            SubsessionRouter.route(&pi, link: try link(pi, StubSubsessionContext()), mode: .separate, cards: [:], isBlockingRequest: { false }),
+            SubsessionRouter.route(&pi, link: try link(pi, context), mode: .separate, cards: [:], isBlockingRequest: { false }),
             .unchanged
         )
     }
 
     func testFoldThePayloadCannotAddressKeepsTheChildOnItsOwnLinkedCard() throws {
         // A Codex Desktop thread can only land on a `codexapp:` card.
-        var raw: [String: Any] = [
-            "hook_event_name": "PreToolUse", "session_id": child, "_source": "codex", "_term_bundle": "com.openai.codex",
-        ]
+        var raw = codexThread()
+        raw["_term_bundle"] = "com.openai.codex"
         let link = SubsessionLink(kind: .codexThread, childCardId: "codexapp:\(child)", agentId: child, parentCardId: "cli-parent")
         XCTAssertEqual(
             SubsessionRouter.route(&raw, link: link, mode: .merge, cards: ["cli-parent": subsessionCard(source: "codex")], isBlockingRequest: { false }),

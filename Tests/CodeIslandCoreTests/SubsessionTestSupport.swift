@@ -1,12 +1,25 @@
 import Foundation
 @testable import CodeIslandCore
 
-/// A ``SubsessionContext`` without AppState: the cards a test sets up.
+/// A ``SubsessionContext`` without AppState: the cards a test sets up, and
+/// the Codex rollouts it says exist (counting how often each is asked for).
 final class StubSubsessionContext: SubsessionContext {
     var cards: [String: SessionSnapshot]
+    /// Rollout answers by transcript path; any other path is unreadable.
+    var rollouts: [String: CodexTranscriptSubagentInspection]
+    private(set) var rolloutQueries: [String] = []
 
-    init(cards: [String: SessionSnapshot] = [:]) {
+    init(
+        cards: [String: SessionSnapshot] = [:],
+        rollouts: [String: CodexTranscriptSubagentInspection] = [:]
+    ) {
         self.cards = cards
+        self.rollouts = rollouts
+    }
+
+    func codexRolloutInspection(transcriptPath: String) -> CodexTranscriptSubagentInspection {
+        rolloutQueries.append(transcriptPath)
+        return rollouts[transcriptPath] ?? .unavailable
     }
 }
 

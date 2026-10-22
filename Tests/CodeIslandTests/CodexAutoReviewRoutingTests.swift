@@ -156,7 +156,12 @@ final class CodexAutoReviewRoutingTests: XCTestCase {
         XCTAssertEqual(CodexPermissionRules.transcriptReviewerValue(event.rawJSON), "auto_review")
     }
 
-    func testHiddenSubagentPermissionIsLeftToAutoReviewInsteadOfAllowed() throws {
+    /// Hiding a Codex subagent never answers its request for the user
+    /// (#165): it reaches the island like any request, where Codex's auto
+    /// reviewer still gets it back undecided, and anything else surfaces on
+    /// the child's own card (linked to its parent) for the user to decide.
+    /// The router used to answer it `allow` when the reviewer was the user.
+    func testHiddenSubagentPermissionIsLeftToAutoReviewOrTheUserNeverAllowed() throws {
         let previousMode = UserDefaults.standard.object(forKey: SettingsKey.pluginSessionMode)
         UserDefaults.standard.set("hide", forKey: SettingsKey.pluginSessionMode)
         defer {
@@ -169,7 +174,7 @@ final class CodexAutoReviewRoutingTests: XCTestCase {
 
         let url = root.appendingPathComponent("child.jsonl")
         let meta = #"{"type":"session_meta","payload":{"id":"child","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","depth":1}}}}}"#
-        for (reviewer, expected) in [("auto_review", "{}"), ("user", #""behavior":"allow""#)] {
+        for (reviewer, defersToCodex) in [("auto_review", true), ("user", false)] {
             var data = Data((meta + "\n").utf8)
             data.append(try JSONSerialization.data(withJSONObject: context("current", reviewer)))
             data.append(0x0A)
@@ -182,12 +187,11 @@ final class CodexAutoReviewRoutingTests: XCTestCase {
             ]
             let routed = HookServer(appState: AppState())
                 .routeSubsessionPayloadIfNeededForTesting(data: try JSONSerialization.data(withJSONObject: payload))
-            let response = String(decoding: try XCTUnwrap(routed.responseData, reviewer), as: UTF8.self)
-            if expected == "{}" {
-                XCTAssertEqual(response, expected, reviewer)
-            } else {
-                XCTAssertTrue(response.contains(expected), reviewer)
-            }
+            XCTAssertNil(routed.responseData, "\(reviewer): hide must not answer a permission request")
+            let event = try XCTUnwrap(HookEvent(from: routed.processedData), reviewer)
+            XCTAssertEqual(event.sessionId, "child", "\(reviewer): on a card of the child's own")
+            XCTAssertEqual(event.rawJSON[SubsessionRouter.linkedParentKey] as? String, "parent", reviewer)
+            XCTAssertEqual(HookServer.shouldDeferPermissionRequestToProvider(event), defersToCodex, reviewer)
         }
     }
 

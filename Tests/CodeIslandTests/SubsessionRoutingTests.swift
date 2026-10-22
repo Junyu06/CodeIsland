@@ -9,12 +9,15 @@ import CodeIslandCore
 /// Hide never answers a request for the user.
 @MainActor
 final class SubsessionRoutingTests: XCTestCase {
+    private let parentThread = "019a0000-0000-7000-8000-00000000000a"
+    private let childThread = "019a0000-0000-7000-8000-00000000000b"
     private let cursorChat = "e1247fd5-d9a0-48ef-8457-0304606b1833"
     private let cursorTask = "2528cb91-6379-48f2-aff8-40f4b804dafa"
     private let otherChat = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
     private var played: [String] = []
     private var savedDefaults: [String: Any?] = [:]
+    private var rolloutDir: URL!
 
     private let watchedKeys = [
         SettingsKey.pluginSessionMode,
@@ -51,6 +54,10 @@ final class SubsessionRoutingTests: XCTestCase {
         defaults.set(false, forKey: SettingsKey.smartSuppress)
         defaults.set("expand", forKey: SettingsKey.completionNotificationStyle)
         defaults.set("separate", forKey: SettingsKey.pluginSessionMode)
+
+        rolloutDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codeisland-subsession-routing-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: rolloutDir, withIntermediateDirectories: true)
     }
 
     override func tearDown() {
@@ -63,6 +70,9 @@ final class SubsessionRoutingTests: XCTestCase {
             }
         }
         savedDefaults = [:]
+        if let rolloutDir {
+            try? FileManager.default.removeItem(at: rolloutDir)
+        }
         super.tearDown()
     }
 
@@ -94,6 +104,281 @@ final class SubsessionRoutingTests: XCTestCase {
             appState.handleEvent(try XCTUnwrap(HookEvent(from: routed.data)))
         }
         return routed
+    }
+
+    private func writeRollout(_ name: String, sessionMeta: String) throws -> String {
+        let url = rolloutDir.appendingPathComponent(name)
+        try (sessionMeta + "\n").write(to: url, atomically: true, encoding: .utf8)
+        return url.path
+    }
+
+    private func rootRollout(_ thread: String) -> String {
+        #"{"type":"session_meta","payload":{"id":"\#(thread)","cwd":"/repo","source":"cli"}}"#
+    }
+
+    private func childRollout(_ thread: String, parent: String) -> String {
+        #"{"type":"session_meta","payload":{"id":"\#(thread)","cwd":"/repo","source":{"subagent":{"thread_spawn":{"parent_thread_id":"\#(parent)","agent_role":"worker","agent_nickname":"Ohm"}}}}}"#
+    }
+
+    /// A Codex state database that does not exist: the passes over known
+    /// cards go by rollouts alone.
+    private var missingStatePath: String {
+        rolloutDir.appendingPathComponent("missing.sqlite").path
+    }
+
+    private func codex(_ event: String, thread: String, transcript: String, _ extra: [String: Any] = [:]) -> [String: Any] {
+        [
+            "hook_event_name": event, "session_id": thread, "_source": "codex",
+            "cwd": "/repo", "transcript_path": transcript,
+        ].merging(extra) { _, new in new }
+    }
+
+    // MARK: - Codex: a child shown separately stays quiet
+
+    /// A Codex subagent thread on a card of its own used to chime and pop a
+    /// completion card for every turn, like the session the user started.
+    func testCodexChildShownSeparatelyNeverRingsOrCompletes() throws {
+        let parentPath = try writeRollout("parent.jsonl", sessionMeta: rootRollout(parentThread))
+        let childPath = try writeRollout("child.jsonl", sessionMeta: childRollout(childThread, parent: parentThread))
+        let appState = AppState()
+        let server = HookServer(appState: appState)
+
+        try deliver(codex("SessionStart", thread: parentThread, transcript: parentPath), to: appState, server: server)
+        try deliver(codex("UserPromptSubmit", thread: parentThread, transcript: parentPath, ["prompt": "fan out"]), to: appState, server: server)
+        try deliver(codex("PreToolUse", thread: parentThread, transcript: parentPath, ["tool_name": "spawn_agent"]), to: appState, server: server)
+
+        let start = try deliver(codex("SessionStart", thread: childThread, transcript: childPath), to: appState, server: server)
+        XCTAssertEqual(start.sessionId, childThread, "kept on its own card")
+        XCTAssertEqual(start.raw[SubsessionRouter.linkedParentKey] as? String, parentThread)
+        try deliver(codex("UserPromptSubmit", thread: childThread, transcript: childPath, ["prompt": "task"]), to: appState, server: server)
+        try deliver(codex("PreToolUse", thread: childThread, transcript: childPath, ["tool_name": "exec_command"]), to: appState, server: server)
+        try deliver(codex("Stop", thread: childThread, transcript: childPath, ["last_assistant_message": "done"]), to: appState, server: server)
+
+        XCTAssertEqual(appState.sessions[childThread]?.parentSessionId, parentThread)
+        XCTAssertEqual(appState.sessions[childThread]?.status, .idle, "its card still settles")
+        XCTAssertNil(appState.justCompletedSessionId, "a child's turn pops no completion card")
+        XCTAssertEqual(played, ["8bit_start"], "the child neither starts nor finishes audibly")
+
+        try deliver(codex("Stop", thread: parentThread, transcript: parentPath, ["last_assistant_message": "all done"]), to: appState, server: server)
+        XCTAssertEqual(played, ["8bit_start", "8bit_complete"], "the parent chimes exactly once")
+        XCTAssertEqual(appState.justCompletedSessionId, parentThread)
+        XCTAssertNil(appState.sessions[parentThread]?.parentSessionId)
+    }
+
+    /// The rollout is read once per thread: the router asks on every hook.
+    func testCodexChildsRolloutIsReadOnce() throws {
+        let childPath = try writeRollout("child.jsonl", sessionMeta: childRollout(childThread, parent: parentThread))
+        let appState = AppState()
+        let server = HookServer(appState: appState)
+        try deliver(codex("SessionStart", thread: childThread, transcript: childPath), to: appState, server: server)
+        XCTAssertEqual(appState.sessions[childThread]?.parentSessionId, parentThread)
+
+        // Were it read again, the thread would now read as a root.
+        _ = try writeRollout("child.jsonl", sessionMeta: rootRollout(childThread))
+        let later = try route(codex("SessionStart", thread: childThread, transcript: childPath), server: server)
+        XCTAssertEqual(later.raw[SubsessionRouter.linkedParentKey] as? String, parentThread)
+    }
+
+    /// Without a rollout to say so, a thread sharing a busy Codex process is
+    /// only a guess at a child. Show separately does not act on it: it is the
+    /// default, and a wrong guess would silence a session the user started.
+    func testCodexThreadGuessedFromItsProcessStillRingsInShowSeparately() throws {
+        let parentPath = try writeRollout("parent.jsonl", sessionMeta: rootRollout(parentThread))
+        let missing = rolloutDir.appendingPathComponent("not-yet-written.jsonl").path
+        let pid = Int(getpid())
+        let appState = AppState()
+        let server = HookServer(appState: appState)
+        try deliver(codex("UserPromptSubmit", thread: parentThread, transcript: parentPath, ["prompt": "go", "_ppid": pid]), to: appState, server: server)
+
+        let stop = try deliver(codex("Stop", thread: childThread, transcript: missing, ["_ppid": pid]), to: appState, server: server)
+        XCTAssertNil(stop.raw[SubsessionRouter.linkedParentKey])
+        XCTAssertNil(appState.sessions[childThread]?.parentSessionId)
+        XCTAssertEqual(played, ["8bit_complete"])
+
+        // Merge acts on that guess, as it always has.
+        setMode("merge")
+        let merged = try route(codex("PreToolUse", thread: "019a0000-0000-7000-8000-00000000000c", transcript: missing, ["_ppid": pid]), server: server)
+        XCTAssertEqual(merged.sessionId, parentThread)
+    }
+
+    // MARK: - Codex: a child stays where it is
+
+    func testCodexChildThatStartedOnItsOwnCardKeepsItInMerge() throws {
+        setMode("merge")
+        let parentPath = try writeRollout("parent.jsonl", sessionMeta: rootRollout(parentThread))
+        let childPath = try writeRollout("child.jsonl", sessionMeta: childRollout(childThread, parent: parentThread))
+        let appState = AppState()
+        let server = HookServer(appState: appState)
+
+        // The parent's card is not on the island yet: none is invented.
+        let first = try deliver(codex("UserPromptSubmit", thread: childThread, transcript: childPath, ["prompt": "task"]), to: appState, server: server)
+        XCTAssertEqual(first.sessionId, childThread)
+        XCTAssertEqual(appState.sessions[childThread]?.parentSessionId, parentThread, "still a child: quiet")
+
+        try deliver(codex("UserPromptSubmit", thread: parentThread, transcript: parentPath, ["prompt": "go"]), to: appState, server: server)
+        let later = try deliver(codex("PreToolUse", thread: childThread, transcript: childPath, ["tool_name": "exec_command"]), to: appState, server: server)
+        XCTAssertEqual(later.sessionId, childThread, "its card is not stranded by the parent turning up")
+        XCTAssertTrue(appState.sessions[parentThread]?.subagents.isEmpty == true)
+    }
+
+    func testCodexChildFoldedByAModeChangeFollowsItsRow() throws {
+        setMode("merge")
+        let childPath = try writeRollout("child.jsonl", sessionMeta: childRollout(childThread, parent: parentThread))
+        let appState = AppState()
+        var parent = SessionSnapshot()
+        parent.source = "codex"
+        parent.providerSessionId = parentThread
+        parent.status = .running
+        var child = SessionSnapshot()
+        child.source = "codex"
+        child.providerSessionId = childThread
+        child.status = .running
+        child.transcriptPath = childPath
+        appState.sessions[parentThread] = parent
+        appState.sessions[childThread] = child
+
+        XCTAssertTrue(appState.applyCodexSubsessionModeToKnownSessions(statePath: missingStatePath))
+        XCTAssertNil(appState.sessions[childThread])
+        XCTAssertEqual(appState.sessions[parentThread]?.subagents[childThread]?.subsessionKind, .codexThread)
+
+        let next = try route(codex("PreToolUse", thread: childThread, transcript: childPath), server: HookServer(appState: appState))
+        XCTAssertEqual(next.sessionId, parentThread)
+        XCTAssertEqual(next.raw["agent_id"] as? String, childThread)
+    }
+
+    // MARK: - Codex: a request waiting on a child's card
+
+    /// Hide shows a hidden thread's request on a card of its own. The passes
+    /// over known cards (every discovery scan) leave that card alone while
+    /// the request waits — removing it denied the request unseen — and hide
+    /// the thread again once the user has answered.
+    func testHiddenCodexThreadsRequestWaitsOnItsCardThroughThePasses() async throws {
+        setMode("hide")
+        let childPath = try writeRollout("child.jsonl", sessionMeta: childRollout(childThread, parent: parentThread))
+        let appState = AppState()
+        var parent = SessionSnapshot()
+        parent.source = "codex"
+        parent.status = .running
+        appState.sessions[parentThread] = parent
+        let server = HookServer(appState: appState)
+
+        let request = try route(codex("PermissionRequest", thread: childThread, transcript: childPath, [
+            "tool_name": "Bash", "tool_input": ["command": "rm -rf build"],
+        ]), server: server)
+        XCTAssertNil(request.response)
+        let event = try XCTUnwrap(HookEvent(from: request.data))
+        let task = await startHookRequest { appState.handlePermissionRequest(event, continuation: $0) }
+        XCTAssertEqual(appState.sessions[childThread]?.parentSessionId, parentThread)
+
+        appState.applyCodexSubsessionModeToKnownSessions(statePath: missingStatePath)
+        appState.integrateDiscovered([AppState.DiscoveredSession(
+            sessionId: childThread,
+            cwd: "/repo",
+            tty: nil,
+            model: nil,
+            pid: nil,
+            modifiedAt: Date(),
+            recentMessages: [],
+            source: "codex",
+            transcriptPath: childPath,
+            parentSessionId: parentThread,
+            status: .idle,
+            providerSessionId: childThread
+        )])
+        XCTAssertNotNil(appState.sessions[childThread], "its request still waits for the user")
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+
+        appState.approvePermission()
+        let response = String(decoding: try await awaitValue(of: task), as: UTF8.self)
+        XCTAssertTrue(response.contains(#""allow""#), "the user's own answer: \(response)")
+
+        appState.applyCodexSubsessionModeToKnownSessions(statePath: missingStatePath)
+        XCTAssertNil(appState.sessions[childThread], "hidden again once answered")
+    }
+
+    /// A thread that started on its own card (its parent's was not there yet)
+    /// asks on that card; Merge folds the card into its parent only once the
+    /// request is answered.
+    func testMergedCodexThreadsRequestOnItsOwnCardIsNotFoldedAway() async throws {
+        setMode("merge")
+        let parentPath = try writeRollout("parent.jsonl", sessionMeta: rootRollout(parentThread))
+        let childPath = try writeRollout("child.jsonl", sessionMeta: childRollout(childThread, parent: parentThread))
+        let appState = AppState()
+        let server = HookServer(appState: appState)
+        try deliver(codex("UserPromptSubmit", thread: childThread, transcript: childPath, ["prompt": "task"]), to: appState, server: server)
+        try deliver(codex("UserPromptSubmit", thread: parentThread, transcript: parentPath, ["prompt": "go"]), to: appState, server: server)
+
+        let request = try route(codex("PermissionRequest", thread: childThread, transcript: childPath, [
+            "tool_name": "Bash", "tool_input": ["command": "make"],
+        ]), server: server)
+        XCTAssertEqual(request.sessionId, childThread)
+        let event = try XCTUnwrap(HookEvent(from: request.data))
+        let task = await startHookRequest { appState.handlePermissionRequest(event, continuation: $0) }
+
+        appState.applyCodexSubsessionModeToKnownSessions(statePath: missingStatePath)
+        XCTAssertNotNil(appState.sessions[childThread])
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+
+        appState.approvePermission()
+        let response = String(decoding: try await awaitValue(of: task), as: UTF8.self)
+        XCTAssertTrue(response.contains(#""allow""#), response)
+
+        appState.applyCodexSubsessionModeToKnownSessions(statePath: missingStatePath)
+        XCTAssertNil(appState.sessions[childThread])
+        XCTAssertEqual(appState.sessions[parentThread]?.subagents[childThread]?.subsessionKind, .codexThread)
+    }
+
+    /// Codex has filed a subagent's hook under its parent's session id, with
+    /// the subagent's rollout. The rollout's answer is the file's: the
+    /// parent's own hooks, naming its own rollout, are still the parent's.
+    func testSubagentRolloutFiledUnderTheParentNeverHidesTheParent() throws {
+        setMode("hide")
+        let parentPath = try writeRollout("parent.jsonl", sessionMeta: rootRollout(parentThread))
+        let childPath = try writeRollout("child.jsonl", sessionMeta: childRollout(childThread, parent: parentThread))
+        let appState = AppState()
+        var parent = SessionSnapshot()
+        parent.source = "codex"
+        parent.status = .running
+        appState.sessions[parentThread] = parent
+        let server = HookServer(appState: appState)
+
+        let filedUnderParent = try route(
+            codex("PreToolUse", thread: parentThread, transcript: childPath, ["tool_name": "exec_command"]),
+            server: server
+        )
+        XCTAssertNotNil(filedUnderParent.response, "the subagent's hook is hidden")
+        for event in ["PreToolUse", "Stop"] {
+            let own = try route(codex(event, thread: parentThread, transcript: parentPath), server: server)
+            XCTAssertNil(own.response, "\(event): the parent's own hook is the parent's")
+            XCTAssertNil(own.raw[SubsessionRouter.linkedParentKey], event)
+        }
+    }
+
+    /// Current Codex files a thread's hooks under the root's session id. In
+    /// Hide its SubagentStart is hidden too, so a request it is blocked on
+    /// starts its row on the root's card: under the thread's own role.
+    func testHiddenCodexThreadFiledUnderItsParentAsksOnARowOfItsOwnRole() async throws {
+        setMode("hide")
+        let appState = AppState()
+        var parent = SessionSnapshot()
+        parent.source = "codex"
+        parent.status = .running
+        appState.sessions[parentThread] = parent
+        let server = HookServer(appState: appState)
+        let filed: [String: Any] = ["agent_id": childThread, "agent_type": "worker"]
+
+        let start = try route(codex("SubagentStart", thread: parentThread, transcript: "/nonexistent.jsonl", filed), server: server)
+        XCTAssertNotNil(start.response, "hidden")
+        let request = try route(codex("PermissionRequest", thread: parentThread, transcript: "/nonexistent.jsonl", filed.merging([
+            "tool_name": "Bash", "tool_input": ["command": "ls"],
+        ]) { _, new in new }), server: server)
+        XCTAssertNil(request.response)
+        let event = try XCTUnwrap(HookEvent(from: request.data))
+        let task = await startHookRequest { appState.handlePermissionRequest(event, continuation: $0) }
+        XCTAssertEqual(appState.sessions[parentThread]?.subagents[childThread]?.agentType, "worker")
+
+        appState.handlePeerDisconnect(sessionId: parentThread, agentId: childThread)
+        _ = try await awaitValue(of: task)
     }
 
     // MARK: - Cursor

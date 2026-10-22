@@ -65,6 +65,7 @@ public enum SubsessionRouter {
             ?? foldedLink(in: raw, cards: context.cards)
             ?? CursorSubsessionRouter.link(in: raw, context: context, now: now)
             ?? PluginProxySubsession.link(in: raw, context: context, now: now)
+            ?? CodexThreadSubsession.link(in: raw, context: context, now: now)
         // A session cannot be its own parent.
         guard let link, link.isProviderFolded || link.parentCardId != link.childCardId else { return nil }
         return link

@@ -30,24 +30,10 @@ private final class ProjectsWatcherBox: @unchecked Sendable {
     }
 }
 
-struct CodexSubagentMetadata: Equatable, Sendable {
-    let parentThreadId: String
-    let agentType: String?
-    let agentNickname: String?
-}
-
 private struct CodexSpawnEdgeRecord {
     let metadata: CodexSubagentMetadata
     let status: String?
     let transcriptPath: String?
-}
-
-private enum CodexTranscriptSubagentInspection {
-    /// The first line could not be established as a valid `session_meta`.
-    case unavailable
-    /// A valid root `session_meta` explicitly contains no subagent relation.
-    case root
-    case subagent(CodexSubagentMetadata)
 }
 
 struct ProcessIdentity: Equatable {
@@ -96,6 +82,11 @@ struct CodexDesktopThreadRecord: Sendable {
 /// actor for one hook (``AppState/subsessionContext``).
 struct AppSubsessionContext: SubsessionContext {
     let cards: [String: SessionSnapshot]
+    let codexRollouts: CodexRolloutCache
+
+    func codexRolloutInspection(transcriptPath: String) -> CodexTranscriptSubagentInspection {
+        codexRollouts.inspection(transcriptPath: transcriptPath)
+    }
 }
 
 @MainActor
@@ -440,6 +431,10 @@ final class AppState {
     /// When such a card is looked up after it first goes unresolved. Tests shorten it.
     @ObservationIgnored
     var cursorSubagentLookupDelays = CursorSubagentLookupSchedule.defaultDelays
+    /// What each Codex thread's rollout says about its parent: Agent
+    /// Sub-Sessions asks on every Codex hook, and reads a rollout once.
+    @ObservationIgnored
+    let codexRollouts = CodexRolloutCache(read: { AppState.inspectCodexSubagentMetadata(inTranscriptPath: $0) })
     private var isShowingCompletion: Bool {
         if case .completionCard = surface { return true }
         return false
@@ -2401,24 +2396,6 @@ final class AppState {
         answerQuestion(answer, expectedSessionId: expectedSessionId)
     }
 
-    /// An existing session whose source matches and whose CLI PID equals the
-    /// supplied ppid, active in the last five minutes (see
-    /// ``SubsessionCards/samePidCard(source:ppid:excluding:requireActive:in:now:)``).
-    func findSessionId(
-        forSource source: String,
-        ppid: Int,
-        excluding excludedSessionId: String? = nil,
-        requireActive: Bool = false
-    ) -> String? {
-        SubsessionCards.samePidCard(
-            source: source,
-            ppid: ppid,
-            excluding: excludedSessionId,
-            requireActive: requireActive,
-            in: sessions
-        )
-    }
-
     func findSessionId(providerSessionId: String) -> String? {
         SubsessionCards.cardId(forProviderSessionId: providerSessionId, in: sessions)
     }
@@ -2430,25 +2407,16 @@ final class AppState {
         providerSessionId: String,
         childTermBundleId: String?
     ) -> String? {
-        let childIsDesktop = childTermBundleId == Self.codexAppBundleId
-        let canonicalId = childIsDesktop
-            ? Self.codexAppSessionPrefix + providerSessionId
-            : providerSessionId
-        if let session = sessions[canonicalId],
-           session.source == "codex",
-           session.isNativeAppMode == childIsDesktop {
-            return canonicalId
-        }
-        return sessions.first(where: { _, snapshot in
-            snapshot.source == "codex"
-                && snapshot.providerSessionId == providerSessionId
-                && snapshot.isNativeAppMode == childIsDesktop
-        })?.key
+        SubsessionCards.codexParentCard(
+            threadId: providerSessionId,
+            childTermBundleId: childTermBundleId,
+            in: sessions
+        )
     }
 
     /// What Agent Sub-Sessions needs from the island to route one hook.
     var subsessionContext: AppSubsessionContext {
-        AppSubsessionContext(cards: sessions)
+        AppSubsessionContext(cards: sessions, codexRollouts: codexRollouts)
     }
 
     func denyPermission(expectedSessionId: String? = nil) {
@@ -3990,7 +3958,7 @@ final class AppState {
                 source: info.source,
                 parentSessionId: info.parentSessionId,
                 status: info.status
-            ) {
+            ), !hasWaitingRequest(onCard: info.sessionId) {
                 if sessions[info.sessionId] != nil {
                     removeSession(info.sessionId)
                     didMutate = true
@@ -4244,7 +4212,7 @@ final class AppState {
         for candidate in candidates where candidate.session.source == "codex" {
             let providerSessionId = candidate.session.providerSessionId ?? candidate.sessionId
             if let transcriptPath = candidate.session.transcriptPath {
-                switch Self.inspectCodexSubagentMetadata(inTranscriptPath: transcriptPath) {
+                switch codexRollouts.inspection(transcriptPath: transcriptPath) {
                 case .subagent(let metadata):
                     transcriptMetadata[candidate.sessionId] = metadata
                     databaseLookupIds.insert(providerSessionId)
@@ -4272,7 +4240,8 @@ final class AppState {
             let providerSessionId = candidate.session.providerSessionId ?? candidate.sessionId
             guard let metadata = transcriptMetadata[candidate.sessionId]
                     ?? databaseRecords[providerSessionId]?.metadata,
-                  metadata.parentThreadId != providerSessionId else {
+                  metadata.parentThreadId != providerSessionId,
+                  !hasWaitingRequest(onCard: candidate.sessionId) else {
                 continue
             }
 
@@ -4321,6 +4290,8 @@ final class AppState {
             if candidate.session.lastActivity > subagent.lastActivity {
                 subagent.lastActivity = candidate.session.lastActivity
             }
+            // The thread's later hooks follow its row here.
+            subagent.subsessionKind = .codexThread
             sessions[parentKey]?.subagents[providerSessionId] = subagent
 
             if sessions[parentKey]?.status != .waitingApproval && sessions[parentKey]?.status != .waitingQuestion {
@@ -5050,7 +5021,10 @@ final class AppState {
     private func routeDiscoveredSubsessionIfNeeded(_ info: DiscoveredSession) -> Bool {
         guard info.source == "codex",
               let parentSessionId = info.parentSessionId,
-              !parentSessionId.isEmpty else {
+              !parentSessionId.isEmpty,
+              // A thread whose request waits on its own card stays there
+              // until it is answered; discovery just keeps the card current.
+              !hasWaitingRequest(onCard: info.sessionId) else {
             return false
         }
 
@@ -5093,6 +5067,8 @@ final class AppState {
         subagent.status = .running
         subagent.toolDescription = info.agentNickname
         subagent.lastActivity = info.modifiedAt
+        // The thread's hooks follow its row here.
+        subagent.subsessionKind = .codexThread
         sessions[parentKey]?.subagents[providerSessionId] = subagent
 
         if sessions[parentKey]?.status != .waitingApproval && sessions[parentKey]?.status != .waitingQuestion {
