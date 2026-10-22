@@ -122,13 +122,20 @@ func debugLog(_ message: String) {
     // CODEISLAND_BRIDGE_LOG moves the log: the tests that run this binary point
     // it at a temp file, so their payloads stay out of the log real hooks append to.
     let path = ProcessInfo.processInfo.environment["CODEISLAND_BRIDGE_LOG"] ?? "/tmp/codeisland-bridge.log"
-    if let handle = FileHandle(forWritingAtPath: path) {
-        handle.seekToEndOfFile()
-        handle.write(Data(line.utf8))
-        handle.closeFile()
-    } else {
-        FileManager.default.createFile(atPath: path, contents: Data(line.utf8))
-    }
+    // It holds every hook's payload, under a predictable name in /tmp that
+    // another user can take first: with a file of theirs, a link to a file of
+    // ours, or a FIFO that would hang the hook. So it is written only as a
+    // regular file of this user's that nothing else links to, never through a
+    // symlink, and readable by nobody else.
+    let fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
+    guard fd >= 0 else { return }
+    defer { close(fd) }
+    var info = stat()
+    guard fstat(fd, &info) == 0, info.st_uid == getuid(),
+          (info.st_mode & S_IFMT) == S_IFREG, info.st_nlink == 1 else { return }
+    if info.st_mode & 0o077 != 0 { fchmod(fd, 0o600) }
+    let bytes = Array(line.utf8)
+    _ = bytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
 }
 
 func connectSocket(_ path: String, timeoutMs: Int32 = 3000) -> Int32? {
