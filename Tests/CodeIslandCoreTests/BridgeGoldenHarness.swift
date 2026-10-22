@@ -385,18 +385,45 @@ final class BridgeGoldenRunner {
 }
 
 /// Minimal Unix-socket stand-in for HookServer: accepts one connection,
-/// reads the event to EOF, answers with `reply`, closes.
+/// reads the event to EOF, answers with `reply`, closes. Gone with its
+/// owner even when nothing connected (a dropped hook): its thread polls, so
+/// it notices and closes the listener, and the socket file is removed.
 final class GoldenUnixServer {
     let path: String
-    private let listener: Int32
-    private let accepted = DispatchSemaphore(value: 0)
-    private let served = DispatchSemaphore(value: 0)
-    private(set) var received = Data()
+    private let state: State
+
+    /// What the accepting thread shares; never the server itself, so the
+    /// server can go while the thread still waits.
+    private final class State {
+        let listener: Int32
+        let accepted = DispatchSemaphore(value: 0)
+        let served = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var _received = Data()
+        private var _stopped = false
+
+        init(listener: Int32) {
+            self.listener = listener
+        }
+
+        var received: Data {
+            get { lock.lock(); defer { lock.unlock() }; return _received }
+            set { lock.lock(); _received = newValue; lock.unlock() }
+        }
+
+        var stopped: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return _stopped }
+            set { lock.lock(); _stopped = newValue; lock.unlock() }
+        }
+    }
+
+    var received: Data { state.received }
 
     init?(reply: Data) {
         // sun_path is 104 bytes; NSTemporaryDirectory() can be too long for it.
-        path = "/tmp/ci-gold-\(UUID().uuidString.prefix(8)).sock"
-        listener = socket(AF_UNIX, SOCK_STREAM, 0)
+        let path = "/tmp/ci-gold-\(UUID().uuidString.prefix(8)).sock"
+        self.path = path
+        let listener = socket(AF_UNIX, SOCK_STREAM, 0)
         guard listener >= 0 else { return nil }
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -410,12 +437,22 @@ final class GoldenUnixServer {
         }
         guard bound == 0, listen(listener, 1) == 0 else {
             close(listener)
+            unlink(path)
             return nil
         }
-        DispatchQueue.global().async { [self] in
-            let client = accept(listener, nil, nil)
-            if client >= 0 {
-                accepted.signal()
+        let state = State(listener: listener)
+        self.state = state
+        DispatchQueue.global().async {
+            defer { close(state.listener) }
+            var pending = pollfd(fd: state.listener, events: Int16(POLLIN), revents: 0)
+            while !state.stopped {
+                guard poll(&pending, 1, 50) > 0 else { continue }
+                let client = accept(state.listener, nil, nil)
+                guard client >= 0 else { return }
+                // The bridge may be gone before the answer: no SIGPIPE for it.
+                var on: Int32 = 1
+                setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+                state.accepted.signal()
                 var buffer = [UInt8](repeating: 0, count: 4096)
                 var data = Data()
                 while true {
@@ -423,10 +460,11 @@ final class GoldenUnixServer {
                     if n <= 0 { break }
                     data.append(contentsOf: buffer[..<n])
                 }
-                received = data
+                state.received = data
                 _ = reply.withUnsafeBytes { write(client, $0.baseAddress, reply.count) }
                 close(client)
-                served.signal()
+                state.served.signal()
+                return
             }
         }
     }
@@ -434,15 +472,15 @@ final class GoldenUnixServer {
     /// Whether the bridge connected at all. It exits only after reading the
     /// answer, so once it has exited this needs no real wait.
     func waitUntilAccepted(timeout: TimeInterval) -> Bool {
-        accepted.wait(timeout: .now() + timeout) == .success
+        state.accepted.wait(timeout: .now() + timeout) == .success
     }
 
     func waitUntilServed(timeout: TimeInterval) -> Bool {
-        served.wait(timeout: .now() + timeout) == .success
+        state.served.wait(timeout: .now() + timeout) == .success
     }
 
     deinit {
-        close(listener)
+        state.stopped = true
         unlink(path)
     }
 }
