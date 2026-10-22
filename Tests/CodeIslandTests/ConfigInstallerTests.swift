@@ -1106,7 +1106,7 @@ hooks:
         let script = RemoteInstaller.configureRemoteHooksScript(host: host, remoteSocketPath: "/tmp/codeisland-1000/island.sock")
 
         XCTAssertTrue(script.contains(#"socket_path = "/tmp/codeisland-1000/island.sock""#))
-        XCTAssertTrue(script.contains("CODEISLAND_SOCKET_PATH={socket_path}"))
+        XCTAssertTrue(script.contains(#""CODEISLAND_SOCKET_PATH=" + shlex.quote(socket_path)"#))
         XCTAssertFalse(script.contains("CODEISLAND_SOCKET_PATH=/tmp/codeisland.sock"))
     }
 

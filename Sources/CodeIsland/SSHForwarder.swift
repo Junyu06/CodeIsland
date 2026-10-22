@@ -169,8 +169,9 @@ final class SSHForwarder {
         if !trimmedIdentity.isEmpty {
             args += ["-i", trimmedIdentity]
         }
-        // `--` ends ssh's options: the host is never read as one.
-        args += ["--", host.sshTarget, "rm", "-f", remoteSocketPath]
+        // `--` ends ssh's options: the host is never read as one. The path
+        // is one word for the remote shell, and never an option of rm's.
+        args += ["--", host.sshTarget, "rm", "-f", "--", RemoteInstaller.shellWord(remoteSocketPath)]
         return args
     }
 

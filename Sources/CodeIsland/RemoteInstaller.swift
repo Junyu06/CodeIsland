@@ -557,8 +557,18 @@ def write_opencode_config(path, data):
 socket_owner_uid = str(os.getuid()) if agents_run_as_other_users else ""
 
 def command_for(source):
-    owner = f"CODEISLAND_SOCKET_OWNER_UID={socket_owner_uid} " if socket_owner_uid else ""
-    return f"CODEISLAND_SOCKET_PATH={socket_path} {owner}CODEISLAND_REMOTE_HOST_ID={json.dumps(host_id)} CODEISLAND_REMOTE_HOST_NAME={json.dumps(host_name)} CODEISLAND_SOURCE={source} python3 ~/.codeisland/codeisland-remote-hook.py"
+    # The agent runs this line in a shell: every value is quoted for it, so
+    # a host named `$(...)` or with a backtick is a name, never a command run
+    # on this host (double quotes, as json.dumps gave, let both run).
+    assignments = ["CODEISLAND_SOCKET_PATH=" + shlex.quote(socket_path)]
+    if socket_owner_uid:
+        assignments.append("CODEISLAND_SOCKET_OWNER_UID=" + shlex.quote(socket_owner_uid))
+    assignments += [
+        "CODEISLAND_REMOTE_HOST_ID=" + shlex.quote(host_id),
+        "CODEISLAND_REMOTE_HOST_NAME=" + shlex.quote(host_name),
+        "CODEISLAND_SOURCE=" + shlex.quote(source),
+    ]
+    return " ".join(assignments) + " python3 ~/.codeisland/codeisland-remote-hook.py"
 
 def append_our_hooks(hooks, event, entries):
     # Preserve user-authored entries (#242): remove_our_hooks() already dropped our
@@ -1732,11 +1742,43 @@ print(" · ".join(parts))
     }
 
     private static func pythonStringLiteral(_ value: String) -> String {
-        let escaped = value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\n", with: "\\n")
+        quotedLiteral(value)
+    }
+
+    /// `value` as a double-quoted string literal that Python and JavaScript
+    /// both read back as `value`: backslash and quote escaped, and every
+    /// control character and line separator written as an escape (`\n`,
+    /// `\r`, `\t`, else `\uXXXX`), so nothing in it ends the literal, or the
+    /// line it is on.
+    static func quotedLiteral(_ value: String) -> String {
+        var escaped = ""
+        for scalar in value.unicodeScalars {
+            switch scalar {
+            case "\\": escaped += "\\\\"
+            case "\"": escaped += "\\\""
+            case "\n": escaped += "\\n"
+            case "\r": escaped += "\\r"
+            case "\t": escaped += "\\t"
+            case _ where scalar.value < 0x20 || (0x7F...0x9F).contains(scalar.value)
+                || scalar.value == 0x2028 || scalar.value == 0x2029:
+                escaped += String(format: "\\u%04x", scalar.value)
+            default:
+                escaped.unicodeScalars.append(scalar)
+            }
+        }
         return "\"\(escaped)\""
+    }
+
+    /// `value` as one word for the shell on a remote host: as it is when it
+    /// holds nothing a shell reads, else in single quotes — each single quote
+    /// in it spelled `'\''` — inside which no shell (sh, bash, zsh, fish,
+    /// csh) expands `$`, a backtick or anything else.
+    static func shellWord(_ value: String) -> String {
+        let plain = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+=:,./_-")
+        if !value.isEmpty, value.unicodeScalars.allSatisfy({ plain.contains($0) }) {
+            return value
+        }
+        return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     static func remoteOpencodePluginForInstall(source: String, host: RemoteHost, remoteSocketPath: String? = nil) -> String {
@@ -1761,23 +1803,7 @@ print(" · ".join(parts))
     }
 
     private static func jsonStringLiteral(_ value: String) -> String {
-        let escaped = value.reduce(into: "") { result, ch in
-            switch ch {
-            case "\\":
-                result += "\\\\"
-            case "\"":
-                result += "\\\""
-            case "\n":
-                result += "\\n"
-            case "\r":
-                result += "\\r"
-            case "\t":
-                result += "\\t"
-            default:
-                result.append(ch)
-            }
-        }
-        return "\"\(escaped)\""
+        quotedLiteral(value)
     }
 }
 

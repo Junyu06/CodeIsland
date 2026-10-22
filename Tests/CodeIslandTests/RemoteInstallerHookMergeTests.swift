@@ -593,6 +593,64 @@ final class RemoteInstallerHookMergeTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(SocketPath.lstat(socketPath)).st_mode & 0o777, 0o640)
     }
 
+    /// The agent runs its hook command in a shell. A host's id, name and
+    /// socket path reach the hook as they are — `$(…)`, backticks, quotes —
+    /// and nothing in them runs on the host.
+    func testNothingInAHostsNameRunsOnTheHost() throws {
+        try installFakeBinary("claude")
+        let marker = sandboxHome.appendingPathComponent("ran").path
+        let host = RemoteHost(
+            id: "id-`touch \(marker)`",
+            name: "Dev $(touch \(marker)) Box \"x\" 'y' \\ $HOME",
+            host: "example.invalid"
+        )
+        let socketPath = "/tmp/ci rim/$(touch \(marker)).sock"
+        try runConfigureScript(host: host, remoteSocketPath: socketPath)
+        let hooks = try XCTUnwrap(try readJSON(".claude/settings.json")["hooks"] as? [String: Any])
+        let command = try XCTUnwrap(commands(in: try XCTUnwrap(hooks["Stop"] as? [[String: Any]])).first)
+
+        // A python3 that prints what it was given, run by the shell the
+        // agent uses.
+        let fake = sandboxBin.appendingPathComponent("python3")
+        try Data("#!/bin/sh\nprintf '%s\\n' \"$CODEISLAND_REMOTE_HOST_ID\" \"$CODEISLAND_REMOTE_HOST_NAME\" \"$CODEISLAND_SOCKET_PATH\" \"$CODEISLAND_SOURCE\"\n".utf8)
+            .write(to: fake)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", command]
+        process.environment = ["HOME": sandboxHome.path, "PATH": sandboxBin.path]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardInput = FileHandle.nullDevice
+        try process.run()
+        let out = String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker), "the host's name ran a command: \(command)")
+        XCTAssertEqual(out, [host.id, host.name, socketPath, "claude"].joined(separator: "\n") + "\n", command)
+    }
+
+    /// The literals the install scripts carry read back as what they hold,
+    /// in Python and in the OpenCode plugin's JavaScript: no control
+    /// character or line separator ends one.
+    func testScriptLiteralsHoldAnyName() throws {
+        let name = "a\"b\\c\nd\re\tf\u{0}g\u{1B}h\u{2028}i\u{85}j😀k"
+        let literal = RemoteInstaller.quotedLiteral(name)
+        XCTAssertFalse(literal.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x2028 || $0.value == 0x85 }, literal)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-c", "import sys; sys.stdout.write(\(literal).encode('utf-8').hex())"]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        try process.run()
+        let hex = String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        XCTAssertEqual(hex, Data(name.utf8).map { String(format: "%02x", $0) }.joined())
+        // JSON reads the same escapes as JavaScript.
+        let decoded = try JSONSerialization.jsonObject(with: Data(literal.utf8), options: [.fragmentsAllowed]) as? String
+        XCTAssertEqual(decoded, name)
+    }
+
     func testHermesHooksRunWithoutAShellAndReplaceTheShellForm() throws {
         let staleCommand = "CODEISLAND_SOCKET_PATH=/tmp/ci-test.sock CODEISLAND_REMOTE_HOST_ID=\"old\" "
             + "CODEISLAND_REMOTE_HOST_NAME=\"old\" CODEISLAND_SOURCE=hermes python3 ~/.codeisland/codeisland-remote-hook.py"

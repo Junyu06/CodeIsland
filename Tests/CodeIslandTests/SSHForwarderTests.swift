@@ -13,7 +13,7 @@ final class SSHForwarderTests: XCTestCase {
         XCTAssertEqual(args, [
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=5",
-            "--", "alice@192.168.1.10", "rm", "-f", "/tmp/codeisland-501.sock",
+            "--", "alice@192.168.1.10", "rm", "-f", "--", "/tmp/codeisland-501.sock",
         ])
     }
 
@@ -56,9 +56,9 @@ final class SSHForwarderTests: XCTestCase {
         XCTAssertTrue(args.contains("2222"))
         XCTAssertTrue(args.contains("-i"))
         XCTAssertTrue(args.contains("/Users/bob/.ssh/id_rsa"))
-        // Last three elements are always: target, "rm", "-f", socketPath
-        let suffix = args.suffix(4)
-        XCTAssertEqual(Array(suffix), ["bob@example.com", "rm", "-f", "/tmp/codeisland-1000.sock"])
+        // The last elements are always: "--", target, "rm", "-f", "--", socketPath
+        let suffix = args.suffix(6)
+        XCTAssertEqual(Array(suffix), ["--", "bob@example.com", "rm", "-f", "--", "/tmp/codeisland-1000.sock"])
     }
 
     func testCleanupArgumentsTrimsIdentityWhitespace() {
@@ -94,10 +94,22 @@ final class SSHForwarderTests: XCTestCase {
         let socketPath = "/tmp/codeisland-0.sock"
         let args = SSHForwarder.cleanupArguments(host: host, remoteSocketPath: socketPath)
 
-        // Must contain: rm -f <socketPath>
+        // Must contain: rm -f -- <socketPath>
         let rmIndex = args.firstIndex(of: "rm")!
         XCTAssertEqual(args[rmIndex + 1], "-f")
-        XCTAssertEqual(args[rmIndex + 2], socketPath)
+        XCTAssertEqual(args[rmIndex + 2], "--")
+        XCTAssertEqual(args[rmIndex + 3], socketPath)
+    }
+
+    /// ssh hands the remote command to the host's shell as one line: the
+    /// path is one word there, whatever it holds.
+    func testTheCleanupPathIsOneWordForTheRemoteShell() {
+        let host = RemoteHost(name: "test", host: "10.0.0.1", user: "root")
+        let path = "/tmp/it's $(touch x) `y`.sock"
+        let args = SSHForwarder.cleanupArguments(host: host, remoteSocketPath: path)
+        XCTAssertEqual(args.last, #"'/tmp/it'\''s $(touch x) `y`.sock'"#)
+        XCTAssertEqual(RemoteInstaller.shellWord("/tmp/codeisland-501/island.sock"), "/tmp/codeisland-501/island.sock")
+        XCTAssertEqual(RemoteInstaller.shellWord(""), "''")
     }
 
     func testCleanupArgumentsBatchModeAlwaysOn() {
