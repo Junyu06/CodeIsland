@@ -336,11 +336,19 @@ final class HookConnection: @unchecked Sendable {
             guard let request = readAvailable(limit: limit) else { return }
             reader?.cancel()
             reader = nil
+            // Handed over: a held connection, which may wait for hours,
+            // keeps none of its request (up to `limit` bytes).
+            received = Data()
             completion(request)
         }
         countOnDescriptor(source)
         reader = source
         source.resume()
+    }
+
+    /// The bytes of its request the connection still keeps. For tests.
+    var keptRequestBytesForTesting: Int {
+        queue.sync { received.count }
     }
 
     /// Writes `answer` — nothing, when it is empty — then closes. The first

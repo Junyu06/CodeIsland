@@ -413,6 +413,33 @@ final class HookConnectionTests: XCTestCase {
         }
     }
 
+    /// Once its request is handed over, a connection keeps none of it: a
+    /// held request may wait for hours, and its payload be megabytes.
+    func testAHeldConnectionKeepsNoneOfItsRequest() throws {
+        let (connection, hook) = try connectionPair()
+        let payload = Data(repeating: UInt8(ascii: " "), count: 100_000)
+        DispatchQueue.global().async {
+            payload.withUnsafeBytes { raw in
+                var offset = 0
+                while offset < raw.count {
+                    let sent = send(hook, raw.baseAddress! + offset, raw.count - offset, MSG_NOSIGNAL)
+                    guard sent > 0 else { return }
+                    offset += sent
+                }
+            }
+            shutdown(hook, SHUT_WR)
+        }
+        let handedOver = Flag()
+        queue.async {
+            connection.readRequest(limit: 1_000_000) { request in
+                if case .received(let data) = request, data.count == payload.count { handedOver.set() }
+            }
+        }
+        XCTAssertTrue(wait(for: handedOver, timeout: 5), "the request was not handed over whole")
+        XCTAssertEqual(connection.keptRequestBytesForTesting, 0, "the connection keeps its request")
+        connection.cancel()
+    }
+
     /// The first answer is the one: a second, arriving while the first is
     /// still being written, is dropped, not spliced into it.
     func testTheFirstAnswerWins() throws {
