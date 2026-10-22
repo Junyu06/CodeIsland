@@ -26,7 +26,7 @@ final class SSHForwarder {
         disconnect()
 
         let target = host.sshTarget
-        guard !target.isEmpty else {
+        guard !target.isEmpty, host.unsafeSSHField == nil else {
             status = .failed("invalid host")
             return
         }
@@ -169,7 +169,8 @@ final class SSHForwarder {
         if !trimmedIdentity.isEmpty {
             args += ["-i", trimmedIdentity]
         }
-        args += [host.sshTarget, "rm", "-f", remoteSocketPath]
+        // `--` ends ssh's options: the host is never read as one.
+        args += ["--", host.sshTarget, "rm", "-f", remoteSocketPath]
         return args
     }
 
@@ -216,7 +217,8 @@ final class SSHForwarder {
         }
 
         args += ["-R", "\(remoteSocketPath):\(localSocketPath)"]
-        args.append(host.sshTarget)
+        // `--` ends ssh's options: the host is never read as one.
+        args += ["--", host.sshTarget]
         return args
     }
 

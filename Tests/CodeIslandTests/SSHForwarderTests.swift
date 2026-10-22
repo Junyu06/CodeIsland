@@ -13,7 +13,7 @@ final class SSHForwarderTests: XCTestCase {
         XCTAssertEqual(args, [
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=5",
-            "alice@192.168.1.10", "rm", "-f", "/tmp/codeisland-501.sock",
+            "--", "alice@192.168.1.10", "rm", "-f", "/tmp/codeisland-501.sock",
         ])
     }
 
@@ -142,5 +142,72 @@ final class SSHForwarderTests: XCTestCase {
         )
         XCTAssertTrue(args.contains("StreamLocalBindMask=0000"))
         XCTAssertFalse(args.contains("StreamLocalBindMask=0177"))
+    }
+
+    // MARK: - What reaches ssh
+
+    /// A host that starts with `-` would be an option of ssh's own:
+    /// `-oProxyCommand=…` runs a command on this Mac. Every ssh the island
+    /// runs ends its options (`--`) right before the host.
+    func testEverySSHEndsItsOptionsBeforeTheHost() {
+        let hosts = [
+            RemoteHost(name: "test", host: "-oProxyCommand=touch /tmp/ci-pwned", user: ""),
+            RemoteHost(name: "test", host: "10.0.0.1", user: "-oProxyCommand=x"),
+            RemoteHost(name: "test", host: "devbox", user: "alice", port: 2222, identityFile: "~/.ssh/id"),
+        ]
+        for host in hosts {
+            let runs = [
+                SSHForwarder.tunnelArguments(host: host, localSocketPath: "/tmp/l.sock", remoteSocketPath: "/tmp/r.sock"),
+                SSHForwarder.cleanupArguments(host: host, remoteSocketPath: "/tmp/r.sock"),
+                RemoteInstaller.sshArguments(host: host),
+            ]
+            for args in runs {
+                let target = args.firstIndex(of: host.sshTarget)
+                XCTAssertNotNil(target, "\(args)")
+                XCTAssertEqual(target.map { args[$0 - 1] }, "--", "the host may be read as an option: \(args)")
+                XCTAssertEqual(args.firstIndex(of: "--"), target.map { $0 - 1 }, "an option after the end of options: \(args)")
+            }
+        }
+    }
+
+    /// What ssh is never given: a host, user or identity file that starts
+    /// with `-` or holds a control character, a host with a space, a port
+    /// that is not one.
+    func testFieldsSSHWouldMisreadAreFound() {
+        let unsafe: [(RemoteHost, String)] = [
+            (RemoteHost(name: "t", host: "-oProxyCommand=touch /tmp/x"), "-oProxyCommand=touch /tmp/x"),
+            (RemoteHost(name: "t", host: " -p2222 devbox"), "-p2222 devbox"),
+            (RemoteHost(name: "t", host: "dev box"), "dev box"),
+            (RemoteHost(name: "t", host: "devbox\nProxyCommand x"), "devbox\nProxyCommand x"),
+            (RemoteHost(name: "t", host: "devbox", user: "-lroot"), "-lroot"),
+            (RemoteHost(name: "t", host: "devbox", user: "al\u{7}ice"), "al\u{7}ice"),
+            (RemoteHost(name: "t", host: "devbox", identityFile: "-oProxyCommand=x"), "-oProxyCommand=x"),
+            (RemoteHost(name: "t", host: "devbox", port: 0), "0"),
+            (RemoteHost(name: "t", host: "devbox", port: 65_536), "65536"),
+            (RemoteHost(name: "t", host: "devbox", port: -22), "-22"),
+        ]
+        for (host, field) in unsafe {
+            XCTAssertEqual(host.unsafeSSHField, field)
+        }
+        let safe = [
+            RemoteHost(name: "t", host: "devbox"),
+            RemoteHost(name: "t", host: " 192.168.1.10 ", user: "alice", port: 22),
+            RemoteHost(name: "t", host: "fe80::1%en0", user: "AD\\John Smith", port: 65_535),
+            RemoteHost(name: "t", host: "build-01.example.com", identityFile: "~/My Keys/id_ed25519"),
+        ]
+        for host in safe {
+            XCTAssertNil(host.unsafeSSHField, host.sshTarget)
+        }
+    }
+
+    /// The forwarder itself starts no ssh for such a host.
+    func testTheForwarderStartsNoSSHForAFieldItWouldMisread() {
+        let forwarder = SSHForwarder()
+        forwarder.connect(
+            host: RemoteHost(name: "t", host: "-oProxyCommand=touch /tmp/ci-pwned"),
+            localSocketPath: "/tmp/l.sock",
+            remoteSocketPath: "/tmp/r.sock"
+        )
+        XCTAssertEqual(forwarder.status, .failed("invalid host"))
     }
 }

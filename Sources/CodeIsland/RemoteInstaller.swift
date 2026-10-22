@@ -1620,7 +1620,7 @@ print(" · ".join(parts))
     }
 
     private static func runSSH(host: RemoteHost, command: String, timeout: TimeInterval) async -> RemoteCommandResult {
-        guard !host.sshTarget.isEmpty else {
+        guard !host.sshTarget.isEmpty, host.unsafeSSHField == nil else {
             return RemoteCommandResult(stdout: "", stderr: "invalid host", exitCode: -1)
         }
         return await withCheckedContinuation { continuation in
@@ -1661,7 +1661,9 @@ print(" · ".join(parts))
         }
     }
 
-    private static func sshArguments(host: RemoteHost) -> [String] {
+    /// ssh's arguments up to the remote command: options, then `--`, which
+    /// ends them, then the host — never read as an option, whatever it says.
+    static func sshArguments(host: RemoteHost) -> [String] {
         var args: [String] = [
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=8",
@@ -1675,7 +1677,7 @@ print(" · ".join(parts))
         if !trimmedIdentity.isEmpty {
             args += ["-i", trimmedIdentity]
         }
-        args.append(host.sshTarget)
+        args += ["--", host.sshTarget]
         return args
     }
 

@@ -183,6 +183,14 @@ final class RemoteManager: ObservableObject {
             lastMessage[id] = "invalid host"
             return
         }
+        // A field ssh would read as an option of its own never reaches it.
+        if let field = host.unsafeSSHField {
+            reconnectPolicy.connectAborted(id)
+            let message = String(format: L10n.shared["remote_ssh_field_unsafe"], field)
+            connectionStatus[id] = .failed(message)
+            lastMessage[id] = message
+            return
+        }
 
         // The host's hooks arrive on a socket bound for it now, which names
         // the host to everything they reach (HookOrigin); its tunnel ends

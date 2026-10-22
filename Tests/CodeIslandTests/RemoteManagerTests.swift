@@ -506,6 +506,25 @@ final class RemoteManagerTests: XCTestCase {
         XCTAssertEqual(tunnels.connects, 0)
     }
 
+    /// A host whose fields ssh would read as options of its own does not
+    /// connect, and says which: nothing reaches ssh.
+    func testAHostSSHWouldMisreadDoesNotConnect() async {
+        let sockets = FakeHookSockets()
+        let (manager, gate, tunnels) = makeManager(sockets: sockets)
+        defer { manager.shutdown() }
+        let host = RemoteHost(name: "devbox", host: "-oProxyCommand=touch /tmp/ci-pwned", autoConnect: true)
+        manager.addHost(host)
+
+        manager.connect(id: host.id)
+        await settle()
+
+        let message = String(format: L10n.shared["remote_ssh_field_unsafe"], "-oProxyCommand=touch /tmp/ci-pwned")
+        XCTAssertEqual(manager.connectionStatus[host.id], .failed(message))
+        XCTAssertTrue(sockets.log.filter { $0.hasPrefix("open") }.isEmpty)
+        XCTAssertEqual(gate.started, 0, "the probe ran ssh")
+        XCTAssertEqual(tunnels.connects, 0)
+    }
+
     // MARK: - The island's socket on the host
 
     /// The folder for the island's socket on the host is not the SSH

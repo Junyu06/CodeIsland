@@ -66,6 +66,27 @@ struct RemoteHost: Identifiable, Codable, Equatable, Sendable {
         self.agentsRunAsOtherUsers = try c.decodeIfPresent(Bool.self, forKey: .agentsRunAsOtherUsers) ?? false
     }
 
+    /// The first field ssh would be given that it must not be — as typed,
+    /// trimmed — or nil when there is none. ssh reads a host, user or
+    /// identity file that starts with `-` as an option of its own
+    /// (`-oProxyCommand=…` runs a command on this Mac); a control character
+    /// in one, or whitespace in a host, is never meant; a port is 1–65535.
+    /// Every ssh the island runs also ends its options before the host
+    /// (`--`), so none of these is read as an option even so.
+    var unsafeSSHField: String? {
+        if let port, !(1...65_535).contains(port) { return String(port) }
+        let fields: [(value: String, mayHoldSpaces: Bool)] = [(host, false), (user, true), (identityFile, true)]
+        for field in fields {
+            let value = field.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            let unsafe = value.hasPrefix("-") || value.unicodeScalars.contains { scalar in
+                CharacterSet.controlCharacters.contains(scalar)
+                    || (!field.mayHoldSpaces && CharacterSet.whitespacesAndNewlines.contains(scalar))
+            }
+            if unsafe { return value }
+        }
+        return nil
+    }
+
     var sshTarget: String {
         let trimmedUser = user.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedUser.isEmpty {

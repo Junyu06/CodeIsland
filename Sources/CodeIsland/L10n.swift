@@ -477,6 +477,7 @@ final class L10n: ObservableObject {
         "remote_host_socket_folder_unsafe": "CodeIsland's folder on the host, %@, can't be made the SSH user's alone (%@), so nothing is forwarded there.",
         "remote_host_socket_unverified": "CodeIsland's socket on the host, %@, couldn't be verified (%@), so its tunnel was closed.",
         "remote_host_id_blank": "This host has no ID, so its hooks couldn't be told apart from this Mac's. Remove it and add it again.",
+        "remote_ssh_field_unsafe": "“%@” can't be given to ssh as it is: a host, user or identity file may not start with “-” or hold control characters, a host no spaces either, and a port is 1–65535.",
 
         // Buddy
         "buddy": "Buddy",
@@ -1070,6 +1071,7 @@ final class L10n: ObservableObject {
         "remote_host_socket_folder_unsafe": "Der Ordner von CodeIsland auf dem Host, %@, kann nicht allein dem SSH-Benutzer gehören (%@) – daher wird nichts dorthin weitergeleitet.",
         "remote_host_socket_unverified": "Der Socket von CodeIsland auf dem Host, %@, konnte nicht überprüft werden (%@) – daher wurde sein Tunnel geschlossen.",
         "remote_host_id_blank": "Dieser Host hat keine ID – seine Hooks wären nicht von denen dieses Macs zu unterscheiden. Entferne ihn und füge ihn erneut hinzu.",
+        "remote_ssh_field_unsafe": "„%@“ kann ssh so nicht übergeben werden: Host, Benutzer und Identity-Datei dürfen nicht mit „-“ beginnen und keine Steuerzeichen enthalten, ein Host auch keine Leerzeichen, und ein Port liegt zwischen 1 und 65535.",
 
         // Buddy
         "buddy": "Buddy",
@@ -1663,6 +1665,7 @@ final class L10n: ObservableObject {
         "remote_host_socket_folder_unsafe": "主机上 CodeIsland 的文件夹 %@ 无法设为仅 SSH 用户可用（%@），因此不会向它转发任何内容。",
         "remote_host_socket_unverified": "无法验证主机上 CodeIsland 的 socket %@（%@），因此已关闭它的隧道。",
         "remote_host_id_blank": "此主机没有 ID，它的 hooks 无法与本机的区分开。请删除后重新添加。",
+        "remote_ssh_field_unsafe": "无法将“%@”原样交给 ssh：主机、用户和身份文件不能以“-”开头或包含控制字符，主机也不能包含空格，端口须在 1–65535 之间。",
 
         // Buddy
         "buddy": "Buddy",
@@ -2256,6 +2259,7 @@ final class L10n: ObservableObject {
         "remote_host_socket_folder_unsafe": "主機上 CodeIsland 的資料夾 %@ 無法設為僅 SSH 使用者可用（%@），因此不會轉送任何內容到那裡。",
         "remote_host_socket_unverified": "無法驗證主機上 CodeIsland 的 socket %@（%@），因此已關閉它的通道。",
         "remote_host_id_blank": "此主機沒有 ID，它的 hooks 無法與本機的區分開。請刪除後重新加入。",
+        "remote_ssh_field_unsafe": "無法將「%@」原樣交給 ssh：主機、使用者和身分檔案不能以「-」開頭或包含控制字元，主機也不能包含空格，連接埠須在 1–65535 之間。",
 
         // Buddy
         "buddy": "Buddy",
@@ -2849,6 +2853,7 @@ final class L10n: ObservableObject {
         "remote_host_socket_folder_unsafe": "ホスト上の CodeIsland のフォルダ %@ を SSH ユーザー専用にできないため（%@）、そこへは何も転送しません。",
         "remote_host_socket_unverified": "ホスト上の CodeIsland のソケット %@ を確認できなかったため（%@）、トンネルを閉じました。",
         "remote_host_id_blank": "このホストには ID がないため、そのフックをこの Mac のものと区別できません。削除してから追加し直してください。",
+        "remote_ssh_field_unsafe": "「%@」はそのまま ssh に渡せません。ホスト・ユーザー・ID ファイルは「-」で始まったり制御文字を含んだりできず、ホストは空白も含められません。ポートは 1〜65535 です。",
 
         // Buddy
         "buddy": "Buddy",
@@ -3442,6 +3447,7 @@ final class L10n: ObservableObject {
         "remote_host_socket_folder_unsafe": "호스트의 CodeIsland 폴더 %@을(를) SSH 사용자 전용으로 만들 수 없어(%@) 그곳으로 아무것도 전달하지 않습니다.",
         "remote_host_socket_unverified": "호스트의 CodeIsland 소켓 %@을(를) 확인할 수 없어(%@) 터널을 닫았습니다.",
         "remote_host_id_blank": "이 호스트에는 ID가 없어 훅을 이 Mac의 훅과 구분할 수 없습니다. 삭제한 뒤 다시 추가하세요.",
+        "remote_ssh_field_unsafe": "“%@”은(는) 그대로 ssh에 전달할 수 없습니다. 호스트, 사용자, ID 파일은 “-”로 시작하거나 제어 문자를 포함할 수 없고, 호스트는 공백도 포함할 수 없으며, 포트는 1–65535여야 합니다.",
 
         // Buddy
         "buddy": "Buddy",
@@ -4035,6 +4041,7 @@ final class L10n: ObservableObject {
         "remote_host_socket_folder_unsafe": "CodeIsland'in sunucudaki klasörü %@ yalnızca SSH kullanıcısına ait yapılamıyor (%@); bu yüzden oraya hiçbir şey iletilmiyor.",
         "remote_host_socket_unverified": "CodeIsland'in sunucudaki soketi %@ doğrulanamadı (%@); bu yüzden tüneli kapatıldı.",
         "remote_host_id_blank": "Bu sunucunun kimliği yok; kancaları bu Mac'inkilerden ayırt edilemez. Kaldırıp yeniden ekleyin.",
+        "remote_ssh_field_unsafe": "“%@” ssh'ye olduğu gibi verilemez: sunucu, kullanıcı ve kimlik dosyası “-” ile başlayamaz ya da kontrol karakteri içeremez, sunucu boşluk da içeremez; bağlantı noktası 1–65535 arasında olmalıdır.",
 
         // Buddy
         "buddy": "Buddy",
