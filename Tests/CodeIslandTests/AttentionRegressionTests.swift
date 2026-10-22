@@ -257,4 +257,32 @@ final class AttentionRegressionTests: XCTestCase {
         await appState.followUps.tick(now: now)   // Y's reminder
         XCTAssertEqual(played, ["8bit_error", "8bit_error"], "one reminder per failed turn, each audible")
     }
+
+    /// A turn the user stopped did not complete, and the user knows: an Esc'd
+    /// Stop and Cline's TaskCancel used to ring the "task complete" jingle.
+    /// Their cards still pop, reading interrupted.
+    func testAnInterruptedTurnPopsItsCardWithoutTheDoneChime() throws {
+        let appState = appStateWithFollowUps()
+        appState.handleEvent(try event(["hook_event_name": "UserPromptSubmit", "session_id": "esc", "prompt": "go"]))
+        played = []
+        appState.handleEvent(try event(["hook_event_name": "Stop", "session_id": "esc", "stop_reason": "user"]))
+        XCTAssertEqual(played, [])
+        XCTAssertEqual(appState.justCompletedSessionId, "esc", "its card still pops")
+        XCTAssertEqual(appState.sessions["esc"]?.interrupted, true)
+
+        appState.cancelCompletionQueue()
+        appState.surface = .collapsed
+        appState.handleEvent(try event(["hook_event_name": "TaskResume", "session_id": "cline", "_source": "cline", "prompt": "go"]))
+        played = []
+        appState.handleEvent(try event(["hook_event_name": "TaskCancel", "session_id": "cline", "_source": "cline"]))
+        XCTAssertEqual(played, [])
+        XCTAssertEqual(appState.justCompletedSessionId, "cline", "its card still pops")
+
+        // A turn that did complete still rings.
+        appState.surface = .collapsed
+        appState.handleEvent(try event(["hook_event_name": "UserPromptSubmit", "session_id": "esc", "prompt": "again"]))
+        played = []
+        appState.handleEvent(try event(["hook_event_name": "Stop", "session_id": "esc"]))
+        XCTAssertEqual(played, ["8bit_complete"])
+    }
 }

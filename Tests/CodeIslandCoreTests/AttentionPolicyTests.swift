@@ -117,16 +117,28 @@ final class AttentionPolicyTests: XCTestCase {
             expected: finished(sound: "TaskRoundComplete", push: finishedPush)
         ),
         IntentRow(
-            rule: "an Esc'd Stop still pops its card and rings, is offered to the push gate as interrupted, and is not followed up",
+            rule: "an Esc'd Stop pops its card without a chime, is offered to the push gate as interrupted, and is not followed up",
             moment: hook("Stop", endedTurn: true),
             subject: interrupted,
-            expected: finished(sound: "Stop", push: .completion(isSubagent: false, interrupted: true), followUp: false)
+            expected: finished(sound: nil, push: .completion(isSubagent: false, interrupted: true), followUp: false)
         ),
         IntentRow(
-            rule: "a Codex Interrupt: its card pops, its cue has no sound, the push gate turns it away",
+            rule: "Cline's TaskCancel (an interrupted task round) pops its card without a chime",
+            moment: hook("TaskCancel", endedTurn: true),
+            subject: interrupted,
+            expected: finished(sound: nil, push: .completion(isSubagent: false, interrupted: true), followUp: false)
+        ),
+        IntentRow(
+            rule: "a Codex Interrupt: its card pops silently, the push gate turns it away",
             moment: hook("Interrupt", endedTurn: true),
             subject: interrupted,
-            expected: finished(sound: "Interrupt", push: .completion(isSubagent: false, interrupted: true), followUp: false)
+            expected: finished(sound: nil, push: .completion(isSubagent: false, interrupted: true), followUp: false)
+        ),
+        IntentRow(
+            rule: "only the turn's end goes silent: another event of an interrupted session still rings its cue",
+            moment: hook("SessionStart"),
+            subject: interrupted,
+            expected: AttentionIntents(sound: "SessionStart")
         ),
         IntentRow(
             rule: "a subagent's turn end is offered to the push gate as a subagent's",
@@ -306,6 +318,12 @@ final class AttentionPolicyTests: XCTestCase {
             rule: "an aborted AiWork stream pops its card, silently, with no push and no follow-up",
             moment: .turnEnded(.stopped, host: .aiwork),
             expected: AttentionIntents(completion: .init(turnFailed: false))
+        ),
+        IntentRow(
+            rule: "a turn marked interrupted ends without a chime wherever it ran",
+            moment: .turnEnded(.completed, host: .aiwork),
+            subject: interrupted,
+            expected: finished(sound: nil, push: .completion(isSubagent: false, interrupted: true), followUp: false)
         ),
         IntentRow(
             rule: "a child's turn end elsewhere is its parent's business too",

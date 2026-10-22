@@ -195,8 +195,10 @@ public enum AttentionPolicy {
         let cue = EventSoundRouting.soundEvent(rawEventName: facts.rawEventName, normalizedEventName: facts.eventName)
         var intents = AttentionIntents()
         // Only an event that moved the session itself rings: not one dropped
-        // as stale, filed under a subagent, or ending the session.
-        if facts.appliedToSession {
+        // as stale, filed under a subagent, or ending the session. A turn the
+        // user stopped (Esc / Ctrl-C, Cline's cancel) ends without a chime:
+        // it did not complete, and the user knows — its card still pops.
+        if facts.appliedToSession, !(facts.endedTurn && subject.interrupted) {
             intents.sound = cue
         }
         if facts.endedTurn {
@@ -221,10 +223,11 @@ public enum AttentionPolicy {
         return intents
     }
 
-    /// A turn that finished in a source the hook reducer never sees.
+    /// A turn that finished in a source the hook reducer never sees. One the
+    /// user stopped ends without a chime there too.
     private static func finishedTurnIntents(turnFailed: Bool, subject: AttentionSubject) -> AttentionIntents {
         AttentionIntents(
-            sound: turnFailed ? SoundCue.turnFailed : SoundCue.turnEnd,
+            sound: subject.interrupted ? nil : turnFailed ? SoundCue.turnFailed : SoundCue.turnEnd,
             completion: .init(turnFailed: turnFailed),
             push: .init(kind: turnFailed
                 ? .error
