@@ -253,6 +253,36 @@ final class HookServerTransportTests: XCTestCase {
         pump(until: { self.appState.permissionQueue.isEmpty }, timeout: 2, "the card outlived the replay's hook")
     }
 
+    /// Every held request is watched through one kqueue: holding one costs
+    /// its socket and nothing more. It cost a kqueue of its own as well, and
+    /// launchd's 256 descriptors ran out twice as fast.
+    func testHeldRequestsShareOneKqueue() throws {
+        let before = try openKqueues()
+        var hooks: [RawHook] = []
+        for index in 0..<10 {
+            let hook = try XCTUnwrap(RawHook.connect(to: socketPath))
+            hook.write(permissionPayload(session: "fd-\(index)", toolUseId: "tu-\(index)"))
+            hooks.append(hook)
+        }
+        pump(until: { self.appState.permissionQueue.count == 10 }, "no cards for the requests")
+        pump(for: 0.3)  // every watch is set
+        XCTAssertLessThanOrEqual(try openKqueues() - before, 1, "a held request costs a kqueue of its own")
+
+        hooks.forEach { $0.close() }
+        pump(until: { self.appState.permissionQueue.isEmpty }, timeout: 2, "cards outlived their hooks")
+    }
+
+    /// This process's open kqueues.
+    private func openKqueues() throws -> Int {
+        let size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, nil, 0)
+        guard size > 0 else { throw XCTSkip("proc_pidinfo: \(String(cString: strerror(errno)))") }
+        var infos = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(size) / MemoryLayout<proc_fdinfo>.stride)
+        let filled = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, &infos, size)
+        return infos.prefix(Int(filled) / MemoryLayout<proc_fdinfo>.stride)
+            .filter { $0.proc_fdtype == UInt32(PROX_FDTYPE_KQUEUE) }
+            .count
+    }
+
     /// More than the island reads of one request is refused, and nothing
     /// reaches a card.
     func testAnOversizedRequestIsDenied() throws {
@@ -277,13 +307,19 @@ final class HookConnectionTests: XCTestCase {
     }
 
     /// A connection and the hook's end of it.
-    private func connectionPair() throws -> (HookConnection, hook: Int32) {
+    private func connectionPair(peerWatch: HookPeerWatch = .shared) throws -> (HookConnection, hook: Int32) {
         var fds: [Int32] = [0, 0]
         guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else {
             throw XCTSkip("socketpair: \(String(cString: strerror(errno)))")
         }
         hookEnds.append(fds[1])
-        return (HookConnection(fd: fds[0], queue: queue), fds[1])
+        return (HookConnection(fd: fds[0], queue: queue, peerWatch: peerWatch), fds[1])
+    }
+
+    /// Closes the hook's end.
+    private func closeHook(_ hook: Int32) {
+        Darwin.close(hook)
+        hookEnds.removeAll { $0 == hook }
     }
 
     /// Set once `connection` closes.
@@ -313,10 +349,69 @@ final class HookConnectionTests: XCTestCase {
         connection.closeIfPeerGone()
         XCTAssertFalse(wait(for: closed, timeout: 0.3), "the check cut off a waiting hook")
 
-        Darwin.close(hook)
-        hookEnds.removeAll { $0 == hook }
+        closeHook(hook)
         connection.closeIfPeerGone()
         XCTAssertTrue(wait(for: closed, timeout: 2), "the check missed a hook that is gone")
+    }
+
+    /// A watched connection closes the moment its hook goes, and not before.
+    func testAWatchedHookIsSeenGoingAtOnce() throws {
+        let (connection, hook) = try connectionPair(peerWatch: HookPeerWatch())
+        let closed = closing(connection)
+        shutdown(hook, SHUT_WR)
+
+        connection.closeWhenPeerLeaves()
+        XCTAssertFalse(wait(for: closed, timeout: 0.3), "a waiting hook was cut off")
+        closeHook(hook)
+        XCTAssertTrue(wait(for: closed, timeout: 0.5), "the hook's going was not seen at once")
+    }
+
+    /// With no kqueue to be had (the descriptors ran out), a held connection
+    /// still sees its hook go, by asking its socket now and then — and
+    /// leaves a waiting hook alone.
+    func testAHookIsSeenGoingWithoutAKqueue() throws {
+        let noKqueue = HookPeerWatch(makeKqueue: {
+            errno = EMFILE
+            return -1
+        })
+        let (connection, hook) = try connectionPair(peerWatch: noKqueue)
+        let closed = closing(connection)
+        shutdown(hook, SHUT_WR)
+
+        connection.closeWhenPeerLeaves()
+        XCTAssertFalse(wait(for: closed, timeout: HookConnection.peerPollInterval * 1.5), "a waiting hook was cut off")
+        closeHook(hook)
+        XCTAssertTrue(wait(for: closed, timeout: HookConnection.peerPollInterval * 3), "the hook's going went unnoticed")
+    }
+}
+
+/// The listener's own concerns.
+final class HookSocketListenerTests: XCTestCase {
+    /// launchd starts the app with 256 descriptors; the island raises that
+    /// toward what it wants, never past the hard limit and never lower.
+    func testTheDescriptorLimitRisesTowardWhatTheIslandWants() {
+        let wanted = HookSocketListener.wantedDescriptorLimit
+        XCTAssertEqual(HookSocketListener.raisedDescriptorLimit(soft: 256, hard: .max), wanted)
+        XCTAssertEqual(HookSocketListener.raisedDescriptorLimit(soft: 256, hard: 1_024), 1_024)
+        XCTAssertNil(HookSocketListener.raisedDescriptorLimit(soft: 10_240, hard: .max))
+        XCTAssertNil(HookSocketListener.raisedDescriptorLimit(soft: 256, hard: 256))
+    }
+
+    func testRaisingTheDescriptorLimitLiftsLaunchdsDefault() throws {
+        var saved = rlimit()
+        XCTAssertEqual(getrlimit(RLIMIT_NOFILE, &saved), 0)
+        defer {
+            var restored = saved
+            setrlimit(RLIMIT_NOFILE, &restored)
+        }
+        var launchd = saved
+        launchd.rlim_cur = 256
+        XCTAssertEqual(setrlimit(RLIMIT_NOFILE, &launchd), 0)
+
+        HookSocketListener.raiseDescriptorLimit()
+        var raised = rlimit()
+        XCTAssertEqual(getrlimit(RLIMIT_NOFILE, &raised), 0)
+        XCTAssertEqual(raised.rlim_cur, min(saved.rlim_max, HookSocketListener.wantedDescriptorLimit))
     }
 }
 

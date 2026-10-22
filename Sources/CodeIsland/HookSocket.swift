@@ -109,8 +109,12 @@ final class HookSocketListener: @unchecked Sendable {
             case EINTR, ECONNABORTED:
                 continue
             case EMFILE, ENFILE, ENOBUFS, ENOMEM:
-                // The connection waits in the backlog; try again shortly
-                // rather than spin on a listener that stays readable.
+                // That connection is lost: XNU closes the connection accept()
+                // fails on rather than leave it queued, and its hook finds
+                // its end closed. Back off briefly rather than spin on a
+                // listener that stays readable, losing one connection after
+                // another. The limit raised at launch (raiseDescriptorLimit)
+                // leaves this to a real shortage.
                 log.error("HookServer: cannot accept: \(String(cString: strerror(error)), privacy: .public)")
                 pause()
                 return
@@ -130,6 +134,138 @@ final class HookSocketListener: @unchecked Sendable {
             source.resume()
         }
     }
+
+    /// The soft limit on open descriptors the island wants. launchd starts an
+    /// app with 256, and a held request keeps its hook's socket open for as
+    /// long as the hook waits; short of descriptors, accept() drops the
+    /// connection it fails on.
+    static let wantedDescriptorLimit: rlim_t = 4096
+
+    /// Raises this process's soft descriptor limit toward
+    /// ``wantedDescriptorLimit``: never past the hard limit, never lower.
+    static func raiseDescriptorLimit() {
+        var limit = rlimit()
+        guard getrlimit(RLIMIT_NOFILE, &limit) == 0,
+              let raised = raisedDescriptorLimit(soft: limit.rlim_cur, hard: limit.rlim_max) else { return }
+        limit.rlim_cur = raised
+        if setrlimit(RLIMIT_NOFILE, &limit) != 0 {
+            log.error("HookServer: cannot raise the descriptor limit to \(raised): \(String(cString: strerror(errno)), privacy: .public)")
+        }
+    }
+
+    /// The soft limit to set; nil when `soft` already reaches what is wanted,
+    /// or what `hard` allows.
+    static func raisedDescriptorLimit(soft: rlim_t, hard: rlim_t) -> rlim_t? {
+        let target = min(hard, wantedDescriptorLimit)
+        return target > soft ? target : nil
+    }
+}
+
+/// Tells held hook connections that their hook is gone, through one kqueue
+/// for all of them: a held request costs its socket and nothing more, and
+/// watching one more needs no descriptor that may not be there.
+///
+/// A hook half-closes its end once it has written (the bridge's
+/// `shutdown(SHUT_WR)`), so its EOF on the read side says nothing. The write
+/// side ends only when the hook is gone: the write filter, edge triggered,
+/// fires once when it is added (writable), then not again until that happens
+/// (EV_EOF). Nothing is polled. Each watch carries a token of its own, so a
+/// descriptor closed and its number reused is never taken for the
+/// connection that had it.
+final class HookPeerWatch: @unchecked Sendable {
+    static let shared = HookPeerWatch()
+
+    private struct Watched {
+        weak var connection: HookConnection?
+    }
+
+    private let makeKqueue: () -> Int32
+    private let queue = DispatchQueue(label: "com.codeisland.hook-peer-watch", qos: .userInitiated)
+    private let lock = NSLock()
+    // Under `lock`:
+    private var kq: Int32 = -1
+    private var source: DispatchSourceRead?
+    private var watched: [UInt: Watched] = [:]
+    private var lastToken: UInt = 0
+
+    /// `makeKqueue` is for tests: a kqueue() that fails.
+    init(makeKqueue: @escaping () -> Int32 = { kqueue() }) {
+        self.makeKqueue = makeKqueue
+    }
+
+    deinit {
+        // The shared watch lives as long as the app; a test's ends here.
+        source?.cancel()
+    }
+
+    /// Watches `fd` until its hook is gone, then tells `connection`. Nil,
+    /// logged, when no watch can be set (no kqueue to be had): the
+    /// connection must find out some other way.
+    func watch(_ fd: Int32, for connection: HookConnection) -> UInt? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let kq = openKqueue() else { return nil }
+        lastToken += 1
+        let token = lastToken
+        var change = kevent(
+            ident: UInt(fd),
+            filter: Int16(EVFILT_WRITE),
+            flags: UInt16(EV_ADD | EV_CLEAR),
+            fflags: 0,
+            data: 0,
+            udata: UnsafeMutableRawPointer(bitPattern: token)
+        )
+        guard kevent(kq, &change, 1, nil, 0, nil) == 0 else {
+            log.error("HookServer: cannot watch a held hook: \(String(cString: strerror(errno)), privacy: .public)")
+            return nil
+        }
+        watched[token] = Watched(connection: connection)
+        return token
+    }
+
+    /// Stops telling the connection of `token`, which is closing. Its
+    /// descriptor's close takes the kevent away.
+    func unwatch(_ token: UInt) {
+        lock.lock()
+        watched[token] = nil
+        lock.unlock()
+    }
+
+    /// The kqueue, opened on first use; nil, logged, while it cannot be.
+    /// Under `lock`.
+    private func openKqueue() -> Int32? {
+        if kq >= 0 { return kq }
+        let opened = makeKqueue()
+        guard opened >= 0 else {
+            log.error("HookServer: kqueue() failed: \(String(cString: strerror(errno)), privacy: .public)")
+            return nil
+        }
+        _ = fcntl(opened, F_SETFD, FD_CLOEXEC)
+        let source = DispatchSource.makeReadSource(fileDescriptor: opened, queue: queue)
+        kq = opened
+        self.source = source
+        source.setEventHandler { [weak self] in self?.reportGone(from: opened) }
+        source.setCancelHandler { Darwin.close(opened) }
+        source.resume()
+        return opened
+    }
+
+    /// Tells each connection whose hook has gone. On `queue`.
+    private func reportGone(from kq: Int32) {
+        var events: [kevent] = Array(repeating: kevent(), count: 16)
+        var now = timespec(tv_sec: 0, tv_nsec: 0)
+        while true {
+            let count = kevent(kq, nil, 0, &events, Int32(events.count), &now)
+            guard count > 0 else { return }
+            for event in events.prefix(Int(count)) where event.flags & UInt16(EV_EOF) != 0 {
+                let token = UInt(bitPattern: event.udata)
+                lock.lock()
+                let connection = watched.removeValue(forKey: token)?.connection
+                lock.unlock()
+                connection?.peerLeft()
+            }
+        }
+    }
 }
 
 /// One accepted hook connection. Its state lives on the listener's queue;
@@ -147,12 +283,18 @@ final class HookConnection: @unchecked Sendable {
         case failed
     }
 
+    /// How often a held connection asks its socket whether the hook is gone
+    /// when it cannot be watched (``closeWhenPeerLeaves()``).
+    static let peerPollInterval: TimeInterval = 1
+
     private let fd: Int32
     private let queue: DispatchQueue
+    private let peerWatch: HookPeerWatch
     // On `queue`:
     private var reader: DispatchSourceRead?
     private var writer: DispatchSourceWrite?
-    private var peerWatch: DispatchSourceRead?
+    private var peerWatchToken: UInt?
+    private var peerPoll: DispatchSourceTimer?
     /// Sources on `fd` whose cancel handler has not run yet: the descriptor
     /// is closed only once they are gone.
     private var sourcesOnDescriptor = 0
@@ -162,9 +304,11 @@ final class HookConnection: @unchecked Sendable {
     private var closed = false
     private var closeHandlers: [@Sendable () -> Void] = []
 
-    init(fd: Int32, queue: DispatchQueue) {
+    /// `peerWatch` is for tests: one whose kqueue cannot be had.
+    init(fd: Int32, queue: DispatchQueue, peerWatch: HookPeerWatch = .shared) {
         self.fd = fd
         self.queue = queue
+        self.peerWatch = peerWatch
         _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
         _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
     }
@@ -211,58 +355,36 @@ final class HookConnection: @unchecked Sendable {
     }
 
     /// Closes the connection as soon as the hook at the other end is gone —
-    /// killed, or its agent answered without the island.
-    ///
-    /// A hook half-closes its end once it has written (the bridge's
-    /// `shutdown(SHUT_WR)`), so its EOF on the read side says nothing. The
-    /// write side ends only when the hook is gone: the write filter, edge
-    /// triggered, fires once when it is registered (writable), then not again
-    /// until that happens (EV_EOF). Nothing is polled.
+    /// killed, or its agent answered without the island (``HookPeerWatch``).
+    /// Should no watch be had (no kqueue: the descriptors ran out), the
+    /// socket is asked every ``peerPollInterval`` instead: a hook that goes
+    /// is noticed a little later, but noticed.
     func closeWhenPeerLeaves() {
         queue.async { [self] in
-            guard !finishing, peerWatch == nil else { return }
-            let watch = kqueue()
-            guard watch >= 0 else {
-                log.error("HookServer: kqueue() failed: \(String(cString: strerror(errno)), privacy: .public)")
+            guard !finishing, peerWatchToken == nil, peerPoll == nil else { return }
+            if let token = peerWatch.watch(fd, for: self) {
+                peerWatchToken = token
                 return
             }
-            _ = fcntl(watch, F_SETFD, FD_CLOEXEC)
-            var change = kevent(
-                ident: UInt(fd),
-                filter: Int16(EVFILT_WRITE),
-                flags: UInt16(EV_ADD | EV_CLEAR),
-                fflags: 0,
-                data: 0,
-                udata: nil
-            )
-            guard kevent(watch, &change, 1, nil, 0, nil) == 0 else {
-                Darwin.close(watch)
-                return
-            }
-            let source = DispatchSource.makeReadSource(fileDescriptor: watch, queue: queue)
-            source.setEventHandler { [self] in
-                var event = kevent()
-                var now = timespec(tv_sec: 0, tv_nsec: 0)
-                while kevent(watch, nil, 0, &event, 1, &now) > 0 {
-                    if event.flags & UInt16(EV_EOF) != 0 {
-                        finish()
-                        return
-                    }
-                }
-            }
-            source.setCancelHandler { Darwin.close(watch) }
-            peerWatch = source
-            source.resume()
+            let poll = DispatchSource.makeTimerSource(queue: queue)
+            peerPoll = poll
+            // Held until the hook goes or the connection closes, as a watched
+            // connection is held by its hook.
+            poll.setEventHandler { [self] in finishIfPeerGone() }
+            poll.schedule(deadline: .now() + Self.peerPollInterval, repeating: Self.peerPollInterval)
+            poll.resume()
         }
     }
 
     /// Closes the connection if the hook at the other end is gone; while it
     /// is there — half-closed, waiting for its answer — nothing happens.
     func closeIfPeerGone() {
-        queue.async { [self] in
-            guard !finishing, peerIsGone() else { return }
-            finish()
-        }
+        queue.async { [self] in finishIfPeerGone() }
+    }
+
+    /// The watch saw the hook go. On the watch's queue.
+    fileprivate func peerLeft() {
+        queue.async { [self] in finish() }
     }
 
     // MARK: - On the queue
@@ -290,12 +412,14 @@ final class HookConnection: @unchecked Sendable {
         }
     }
 
-    /// Whether the hook has closed its end for good: nothing can be sent to
-    /// it any more (POLLHUP on the write side). Its half-close is not that.
-    private func peerIsGone() -> Bool {
+    /// Closes the connection if the hook has closed its end for good: nothing
+    /// can be sent to it any more (POLLHUP on the write side). Its half-close
+    /// is not that.
+    private func finishIfPeerGone() {
+        guard !finishing else { return }
         var check = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-        guard poll(&check, 1, 0) > 0 else { return false }
-        return check.revents & Int16(POLLHUP | POLLERR) != 0
+        guard poll(&check, 1, 0) > 0, check.revents & Int16(POLLHUP | POLLERR) != 0 else { return }
+        finish()
     }
 
     private func writeUnsent() {
@@ -344,8 +468,12 @@ final class HookConnection: @unchecked Sendable {
         reader = nil
         writer?.cancel()
         writer = nil
-        peerWatch?.cancel()
-        peerWatch = nil
+        if let peerWatchToken {
+            peerWatch.unwatch(peerWatchToken)
+            self.peerWatchToken = nil
+        }
+        peerPoll?.cancel()
+        peerPoll = nil
         closeIfDone()
     }
 
