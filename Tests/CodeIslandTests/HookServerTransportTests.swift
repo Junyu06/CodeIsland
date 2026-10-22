@@ -899,6 +899,82 @@ final class HookSocketListenerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: path), "start() removed what it could not listen on")
     }
 
+    // MARK: - One island per socket
+
+    /// An island is found where one listens — and only there: not at a stale
+    /// socket a crash left, nor through a symlink, nor where nothing is.
+    func testAnIslandIsFoundWhereOneListens() throws {
+        let path = "/tmp/ci-one-\(UUID().uuidString.prefix(8)).sock"
+        defer { unlink(path) }
+        XCTAssertNil(HookSocketListener.islandListening(at: path), "nothing there")
+        try leaveSocket(at: path)
+        XCTAssertNil(HookSocketListener.islandListening(at: path), "a stale socket")
+        unlink(path)
+
+        let listener = HookSocketListener(path: path, queue: DispatchQueue(label: "one-island")) { $0.cancel() }
+        XCTAssertTrue(listener.start())
+        defer {
+            listener.stop()
+            listener.removeSocketFile()
+        }
+        XCTAssertEqual(HookSocketListener.islandListening(at: path), getpid())
+        let link = "/tmp/ci-one-\(UUID().uuidString.prefix(8)).sock"
+        XCTAssertEqual(symlink(path, link), 0)
+        defer { unlink(link) }
+        XCTAssertNil(HookSocketListener.islandListening(at: link), "through a symlink")
+        XCTAssertNil(HookSocketListener.islandListening(at: path, uid: getuid() + 1), "another user's")
+    }
+
+    /// Another island already listening keeps its socket: a second one does
+    /// not take it from under it. One of this process's own is replaced, as
+    /// ever.
+    func testASecondIslandLeavesTheFirstItsSocket() throws {
+        let path = "/tmp/ci-one-\(UUID().uuidString.prefix(8)).sock"
+        defer { unlink(path) }
+        // The other island: another process listening as this user.
+        let other = Process()
+        other.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        other.arguments = ["-c", """
+            import socket, sys, time
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.bind(sys.argv[1])
+            s.listen(8)
+            print("ready", flush=True)
+            time.sleep(30)
+            """, path]
+        let ready = Pipe()
+        other.standardOutput = ready
+        try other.run()
+        defer { other.terminate() }
+        _ = ready.fileHandleForReading.availableData  // "ready"
+        let theirs = try XCTUnwrap(SocketPath.lstat(path))
+        XCTAssertEqual(HookSocketListener.islandListening(at: path), other.processIdentifier)
+
+        let second = HookSocketListener(path: path, queue: DispatchQueue(label: "second-island")) { $0.cancel() }
+        XCTAssertFalse(second.start(), "a second island took the socket")
+        let still = try XCTUnwrap(SocketPath.lstat(path))
+        XCTAssertEqual(still.st_ino, theirs.st_ino, "the first island's socket was replaced")
+        XCTAssertEqual(HookSocketListener.islandListening(at: path), other.processIdentifier)
+
+        // Once it is gone, its stale socket is taken as before.
+        other.terminate()
+        other.waitUntilExit()
+        let next = HookSocketListener(path: path, queue: DispatchQueue(label: "next-island")) { $0.cancel() }
+        XCTAssertTrue(next.start())
+        defer {
+            next.stop()
+            next.removeSocketFile()
+        }
+        // And one of this process's own is replaced.
+        let replacement = HookSocketListener(path: path, queue: DispatchQueue(label: "replacement")) { $0.cancel() }
+        XCTAssertTrue(replacement.start())
+        defer {
+            replacement.stop()
+            replacement.removeSocketFile()
+        }
+        XCTAssertEqual(HookSocketListener.islandListening(at: path), getpid())
+    }
+
     func testRaisingTheDescriptorLimitLiftsLaunchdsDefault() throws {
         var saved = rlimit()
         XCTAssertEqual(getrlimit(RLIMIT_NOFILE, &saved), 0)

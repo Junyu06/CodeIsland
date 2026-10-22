@@ -13,12 +13,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastHookCheck: Date = .distantPast
     private let hotKeyManager = GlobalHotKeyManager()
     private var localShortcutMonitor: Any?
+    /// Another island already serves this hook socket: this one quits at
+    /// launch, and touches nothing of the other's on the way out — its
+    /// socket, its hosts' sockets, its saved sessions.
+    private var standingAside = false
     let appState = AppState()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Read before anything else: the launch Apple Event that says "login
         // item" is only current during this synchronous call.
         let isLoginLaunch = LaunchContext.isCurrentLaunchAtLogin()
+        // One island per hook socket. A second one — `open -n`, a second copy
+        // of the app — would take the socket from the first, which would go
+        // on unheard, and remove its hosts' sockets. An island on a
+        // CODEISLAND_SOCKET_PATH of its own is another socket's.
+        if let other = HookSocketListener.islandListening(at: HookServer.socketPath) {
+            Self.log.error("Another CodeIsland (pid \(other)) already serves \(HookServer.socketPath, privacy: .public): this one quits and leaves it alone")
+            standingAside = true
+            NSApp.terminate(nil)
+            return
+        }
         ProcessInfo.processInfo.disableAutomaticTermination("CodeIsland must stay running")
         ProcessInfo.processInfo.disableSuddenTermination()
         // Pre-set app icon so Dock/menu bar use the packaged bundle icon.
@@ -206,6 +220,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Nothing was started; what is on disk is the other island's.
+        guard !standingAside else { return }
         hookRecoveryTimer?.invalidate()
         teardownGlobalShortcut()
         appState.saveSessions()

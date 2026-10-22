@@ -136,7 +136,9 @@ final class HookSocketListener: @unchecked Sendable {
     }
 
     /// Creates the socket file, readable by this user only, and starts
-    /// accepting. False, logged, when the socket cannot be created.
+    /// accepting. False, logged, when the socket cannot be created — or
+    /// another island of this user's listens there already: its socket is
+    /// never taken from under it.
     func start() -> Bool {
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
@@ -144,6 +146,11 @@ final class HookSocketListener: @unchecked Sendable {
         // Before anything is removed: a path no socket can have is left alone.
         guard pathBytes.count < MemoryLayout.size(ofValue: address.sun_path) else {
             log.error("HookServer: socket path too long: \(self.path, privacy: .public)")
+            return false
+        }
+        // A listener of this process's own is one being replaced, as before.
+        if let other = Self.islandListening(at: path), other != getpid() {
+            log.error("HookServer: another CodeIsland (pid \(other)) already listens at \(self.path, privacy: .public); leaving it alone")
             return false
         }
         withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: pathBytes) }
@@ -187,6 +194,35 @@ final class HookSocketListener: @unchecked Sendable {
         source.setCancelHandler { close(fd) }
         source.resume()
         return true
+    }
+
+    /// Whether an island already listens at `path`: a socket of `uid`'s
+    /// there that takes a connection, from a listener the kernel says is
+    /// `uid` too. Its pid when one does (0 when the kernel will not say);
+    /// nil for a stale file, a path nobody holds, or anyone else's. Answers
+    /// the connection it makes with nothing: an island reads an empty
+    /// request and drops it.
+    static func islandListening(at path: String, uid: uid_t = getuid()) -> pid_t? {
+        guard case .thisUser = SocketPath.holder(of: path, uid: uid) else { return nil }
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(path.utf8)
+        guard pathBytes.count < MemoryLayout.size(ofValue: address.sun_path) else { return nil }
+        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: pathBytes) }
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+        let connected = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connected == 0, SocketPath.peerIsUser(fd, uid: uid) else { return nil }
+        var pid: pid_t = 0
+        var size = socklen_t(MemoryLayout<pid_t>.size)
+        if getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &size) != 0 { pid = 0 }
+        return pid
     }
 
     /// Removes the socket file start() made, and nothing else: not a file
