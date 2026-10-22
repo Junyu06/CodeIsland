@@ -47,10 +47,12 @@ quirk is then fixed once, in HookIntake, for every edge.
   (`codeisland-hosts/h-<digest>.sock` in the user's own temporary folder,
   `/var/folders/…/T/`, which only the Mac's user can enter and nobody can
   make first; an island on a `$CODEISLAND_SOCKET_PATH` of its own keeps them
-  in `<that path without .sock>-hosts/`), never at the main socket. Every request arriving
-  there is filed under that host: its `_remote_host_id`, `_remote_host_name`
-  and `_edge.host` are replaced with the host's own before anything reads
-  them, so an edge that names another host, or none, changes nothing. The
+  in `<that path without .sock>-hosts/`), never at the main socket. Every
+  request arriving there is filed under that host: its `_remote_host_id`,
+  `_remote_host_name` and `_edge.host` are replaced with the host's own
+  before anything reads them, so an edge that names another host, or none,
+  changes nothing. A host with a blank id, which would be filed under no
+  host at all, gets no socket and never connects. The
   main socket, which no remote edge reaches, answers a request that claims a
   remote host (a non-blank `_remote_host_id` or `_remote_host_name`, or an
   `_edge` with `host`) with nothing.
