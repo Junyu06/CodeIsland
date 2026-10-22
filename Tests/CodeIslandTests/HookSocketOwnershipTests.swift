@@ -306,9 +306,10 @@ final class HookSocketOwnershipTests: XCTestCase {
 
     /// An agent started before its host's hooks were reinstalled still runs
     /// the command an older install wrote, naming /tmp/codeisland-<uid>.sock.
-    /// Where no socket is there any more, its events reach the island's
-    /// socket in that user's folder; where an older island still forwards to
-    /// that path, they go there as before.
+    /// Where no island answers there any more — nothing there, or the socket
+    /// a finished tunnel left behind (sshd never removes it) — its events
+    /// reach the island's socket in that user's folder; where an older
+    /// island still forwards to that path, they go there as before.
     func testAHookAnOlderInstallWroteFindsTheSocketInItsFolder() throws {
         let hookURL = URL(fileURLWithPath: scratch + "/codeisland-remote-hook.py")
         try Data(XCTUnwrap(RemoteInstaller.remoteHookSource()).utf8).write(to: hookURL)
@@ -316,7 +317,7 @@ final class HookSocketOwnershipTests: XCTestCase {
         let number = String(Int.random(in: 3_000_000_000..<3_100_000_000))
         let driver = """
         import importlib.util, io, json, os, socket, sys, threading
-        hook_path, number, both = sys.argv[1], sys.argv[2], sys.argv[3] == "both"
+        hook_path, number, at_legacy = sys.argv[1], sys.argv[2], sys.argv[3]
         legacy = "/tmp/codeisland-%s.sock" % number
         folder = "/tmp/codeisland-%s" % number
         os.mkdir(folder, 0o700)
@@ -328,8 +329,14 @@ final class HookSocketOwnershipTests: XCTestCase {
             server.settimeout(1.5)
             listeners[key] = (server, path)
         listen("folder", os.path.join(folder, "island.sock"))
-        if both:
+        if at_legacy == "island":
             listen("legacy", legacy)
+        stale = None
+        if at_legacy == "stale":
+            # A socket file nobody listens on: what a finished tunnel leaves.
+            stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            stale.bind(legacy)
+            stale.close()
         received = {}
         def serve(key):
             try:
@@ -366,13 +373,20 @@ final class HookSocketOwnershipTests: XCTestCase {
             for server, path in listeners.values():
                 server.close()
                 os.unlink(path)
+            if stale is not None:
+                os.unlink(legacy)
             os.rmdir(folder)
         print(json.dumps(received))
         """
-        for both in [false, true] {
+        let cases: [(atLegacy: String, expected: [String: Bool])] = [
+            ("nothing", ["folder": true]),
+            ("stale", ["folder": true]),
+            ("island", ["legacy": true]),
+        ]
+        for (atLegacy, expected) in cases {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-            process.arguments = ["-c", driver, hookURL.path, number, both ? "both" : "folder"]
+            process.arguments = ["-c", driver, hookURL.path, number, atLegacy]
             var environment = ProcessInfo.processInfo.environment
             environment["HOME"] = scratch
             environment["CODEISLAND_SOURCE"] = "claude"
@@ -388,7 +402,7 @@ final class HookSocketOwnershipTests: XCTestCase {
             process.waitUntilExit()
             XCTAssertEqual(process.terminationStatus, 0, "hook driver failed: \(err)")
             let received = try XCTUnwrap(JSONSerialization.jsonObject(with: out) as? [String: Bool])
-            XCTAssertEqual(received, both ? ["legacy": true] : ["folder": true], both ? "with an older island's socket there" : "with none there")
+            XCTAssertEqual(received, expected, "with \(atLegacy) at the old path")
         }
     }
 
