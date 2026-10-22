@@ -1932,9 +1932,16 @@ final class AppState {
         // Handle the "else if activeSessionId == sessionId → mostActive" edge case
         // (reducer can't check activeSessionId since it's AppState-local)
         if sessions[sessionId]?.status == .idle && activeSessionId == sessionId {
-            // A Stop keeps its session up for the completion card. A child's
-            // Stop pops none (#378), so it hands the spot on like any event.
-            if normalizedEventName != "Stop" || attentionSubject.isChild {
+            // A Stop keeps its session up for the completion card it pops. A
+            // turn end that pops none — a child's (#378), a gateway chat's
+            // (#364), one the completion style keeps to the glance dot or to
+            // nothing — hands the spot on like any event; so does a child's
+            // Stop that ended no turn.
+            let poppedCard: Bool
+            if case .card? = attention.completion?.presentation { poppedCard = true } else { poppedCard = false }
+            let keepsSpot = normalizedEventName == "Stop"
+                && (reduction.facts.endedTurn ? poppedCard : !subject.isChild)
+            if !keepsSpot {
                 activeSessionId = mostActiveSessionId()
             }
         }

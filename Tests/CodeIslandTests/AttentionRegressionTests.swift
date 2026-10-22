@@ -285,4 +285,36 @@ final class AttentionRegressionTests: XCTestCase {
         appState.handleEvent(try event(["hook_event_name": "Stop", "session_id": "esc"]))
         XCTAssertEqual(played, ["8bit_complete"])
     }
+
+    /// A Stop keeps its session in the island's spot for the completion card
+    /// it pops. A turn end that pops none — announced only by the glance dot,
+    /// or a Hermes gateway chat's — used to hold the spot on an idle session
+    /// while others were at work. (With at most one other session at work,
+    /// rotation hands the spot over anyway; it shows with two.)
+    func testATurnEndThatPopsNoCardHandsTheSpotOn() throws {
+        let appState = appStateWithFollowUps()
+        for busy in ["busy-1", "busy-2"] {
+            appState.handleEvent(try event(["hook_event_name": "PreToolUse", "session_id": busy, "tool_name": "Bash"]))
+        }
+
+        UserDefaults.standard.set("glance", forKey: SettingsKey.completionNotificationStyle)
+        appState.handleEvent(try event(["hook_event_name": "UserPromptSubmit", "session_id": "glance", "prompt": "go"]))
+        XCTAssertEqual(appState.activeSessionId, "glance")
+        appState.handleEvent(try event(["hook_event_name": "Stop", "session_id": "glance"]))
+        XCTAssertTrue(appState.activeSessionId?.hasPrefix("busy-") == true, "the dot pops no card to keep the spot for")
+
+        func hermes(_ name: String, _ extra: [String: Any]) throws -> HookEvent {
+            try event(["hook_event_name": name, "session_id": "telegram", "_source": "hermes", "extra": extra])
+        }
+        appState.handleEvent(try hermes("pre_llm_call", ["user_message": "status?", "platform": "telegram"]))
+        XCTAssertEqual(appState.activeSessionId, "telegram")
+        appState.handleEvent(try hermes("on_session_end", ["completed": true, "platform": "telegram"]))
+        XCTAssertTrue(appState.activeSessionId?.hasPrefix("busy-") == true, "a gateway chat's turn end pops nothing")
+
+        UserDefaults.standard.set("expand", forKey: SettingsKey.completionNotificationStyle)
+        appState.handleEvent(try event(["hook_event_name": "UserPromptSubmit", "session_id": "card", "prompt": "go"]))
+        appState.handleEvent(try event(["hook_event_name": "Stop", "session_id": "card"]))
+        XCTAssertEqual(appState.justCompletedSessionId, "card")
+        XCTAssertEqual(appState.activeSessionId, "card", "a Stop keeps its session up for the card it popped")
+    }
 }
