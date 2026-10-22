@@ -678,6 +678,30 @@ final class AttentionPolicyTests: XCTestCase {
         XCTAssertTrue(holds(sceneQuiet: scene.isQuiet))
     }
 
+    // MARK: - Fixed rules, by name
+
+    /// A hook-driven turn the user stopped (Claude Code, Hermes, Cline's
+    /// TaskCancel) used to ring the "task complete" jingle.
+    func testAnInterruptedHookTurnDoesNotRingDone() {
+        let intents = AttentionPolicy.intents(
+            for: .hookEvent(HookEventFacts(rawEventName: "Stop", appliedToSession: true, endedTurn: true)),
+            subject: AttentionSubject(interrupted: true)
+        )
+        XCTAssertNil(intents.sound, "an interrupted turn ends without a chime")
+        XCTAssertNotNil(intents.completion, "its card still pops")
+    }
+
+    /// A StopFailure filed under a subagent moved nothing on the parent's
+    /// card, yet pushed an error under the parent's name.
+    func testASubagentsFailureDoesNotPushAnErrorForItsParent() {
+        let intents = AttentionPolicy.intents(for: .hookEvent(HookEventFacts(
+            rawEventName: "StopFailure",
+            appliedToSession: false,
+            turnError: PushSessionError(type: "rate_limit", detail: "API Error")
+        )))
+        XCTAssertNil(intents.push)
+    }
+
     func testSubjectIsReadOffTheSession() {
         XCTAssertEqual(AttentionSubject(nil), AttentionSubject())
         var session = SessionSnapshot()
