@@ -1893,12 +1893,12 @@ final class AppState {
         tryMonitorSession(sessionId)
 
         // Closed Task/subagent ids must not surface new permission UI (parity with
-        // ensureSubagent refusing late tool hooks after Stop).
+        // ensureSubagent refusing late tool hooks after Stop). Nor is the request
+        // decided: the SubagentStop that closed the id says nothing of what the
+        // user would choose — it may have overtaken a request still waiting, and
+        // whoever can send a hook can send it — so the agent asks in its own prompt.
         if shouldSuppressClosedSubagentUI(sessionId: sessionId, agentId: event.agentId) {
-            let denyResponse = Data(
-                #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8
-            )
-            continuation.resume(returning: denyResponse)
+            continuation.resume(returning: Self.noDecisionAnswer)
             return
         }
 
@@ -2364,11 +2364,9 @@ final class AppState {
         }
         tryMonitorSession(sessionId)
 
+        // As for a closed subagent's permission request: no card, no decision.
         if shouldSuppressClosedSubagentUI(sessionId: sessionId, agentId: event.agentId) {
-            let denyResponse = Data(
-                #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8
-            )
-            continuation.resume(returning: denyResponse)
+            continuation.resume(returning: Self.noDecisionAnswer)
             return
         }
 

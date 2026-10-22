@@ -1026,7 +1026,7 @@ final class AppStateCursorSubsessionTests: XCTestCase {
         )
     }
 
-    func testClosedSubagentPermissionRequestIsDeniedWithoutQueueing() async throws {
+    func testClosedSubagentPermissionRequestIsDroppedUndecidedWithoutQueueing() async throws {
         let parentId = "e1247fd5-d9a0-48ef-8457-0304606b1833"
         let childId = "2528cb91-6379-48f2-aff8-40f4b804dafa"
         let appState = AppState()
@@ -1048,10 +1048,7 @@ final class AppStateCursorSubsessionTests: XCTestCase {
         let response = try await awaitValue(of: await startHookRequest { appState.handlePermissionRequest(event, continuation: $0) })
 
         XCTAssertTrue(appState.permissionQueue.isEmpty)
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
-        let hook = try XCTUnwrap(json["hookSpecificOutput"] as? [String: Any])
-        let decision = try XCTUnwrap(hook["decision"] as? [String: Any])
-        XCTAssertEqual(decision["behavior"] as? String, "deny")
+        XCTAssertEqual(response, AppState.noDecisionAnswer, "dropped, not decided")
         XCTAssertEqual(appState.sessions[parentId]?.status, .processing)
     }
 
@@ -1109,10 +1106,7 @@ final class AppStateCursorSubsessionTests: XCTestCase {
         let response = try await awaitValue(of: await startHookRequest { appState.handleAskUserQuestion(event, continuation: $0) })
 
         XCTAssertTrue(appState.questionQueue.isEmpty)
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
-        let hook = try XCTUnwrap(json["hookSpecificOutput"] as? [String: Any])
-        let decision = try XCTUnwrap(hook["decision"] as? [String: Any])
-        XCTAssertEqual(decision["behavior"] as? String, "deny")
+        XCTAssertEqual(response, AppState.noDecisionAnswer, "dropped, not decided")
         XCTAssertEqual(appState.sessions[parentId]?.status, .processing)
     }
 
@@ -1256,7 +1250,7 @@ final class AppStateCursorSubsessionTests: XCTestCase {
         XCTAssertEqual(appState.sessions[parentId]?.currentTool, "Agent")
     }
 
-    func testSeparateSelfTombstoneDeniesPermissionWithoutAgentId() async throws {
+    func testSeparateSelfTombstoneDropsPermissionWithoutAgentIdUndecided() async throws {
         let childId = "2528cb91-6379-48f2-aff8-40f4b804dafa"
         let appState = AppState()
         var child = SessionSnapshot()
@@ -1276,10 +1270,7 @@ final class AppStateCursorSubsessionTests: XCTestCase {
         let response = try await awaitValue(of: await startHookRequest { appState.handlePermissionRequest(event, continuation: $0) })
 
         XCTAssertTrue(appState.permissionQueue.isEmpty)
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
-        let hook = try XCTUnwrap(json["hookSpecificOutput"] as? [String: Any])
-        let decision = try XCTUnwrap(hook["decision"] as? [String: Any])
-        XCTAssertEqual(decision["behavior"] as? String, "deny")
+        XCTAssertEqual(response, AppState.noDecisionAnswer, "dropped, not decided")
     }
 }
 

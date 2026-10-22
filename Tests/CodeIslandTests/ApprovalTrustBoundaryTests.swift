@@ -211,6 +211,32 @@ final class ApprovalTrustBoundaryTests: XCTestCase {
         XCTAssertEqual(appState.surface, .collapsed)
     }
 
+    /// A SubagentStop closes the subagent's id, and its later requests get no
+    /// card — and no decision either: the stop may have overtaken a request
+    /// still waiting, and whoever can send a hook can send it. The agent asks
+    /// in its own prompt.
+    func testAClosedSubagentsLateRequestsGetNoCardAndNoDecision() async throws {
+        let appState = AppState()
+        appState.handleEvent(try event(["hook_event_name": "SubagentStop", "session_id": "s1", "agent_id": "agent-x"]))
+
+        let permission = try event([
+            "hook_event_name": "PermissionRequest", "session_id": "s1", "agent_id": "agent-x",
+            "tool_name": "Bash", "tool_input": ["command": "make deploy"],
+        ])
+        let ask = try event([
+            "hook_event_name": "PermissionRequest", "session_id": "s1", "agent_id": "agent-x",
+            "tool_name": "AskUserQuestion",
+            "tool_input": ["questions": [["question": "Ship it?", "options": [["label": "Yes"], ["label": "No"]]]]],
+        ])
+        let permissionAnswer = try await awaitValue(of: await startHookRequest { appState.handlePermissionRequest(permission, continuation: $0) })
+        let askAnswer = try await awaitValue(of: await startHookRequest { appState.handleAskUserQuestion(ask, continuation: $0) })
+
+        XCTAssertNil(try decidedBehavior(permissionAnswer), String(decoding: permissionAnswer, as: UTF8.self))
+        XCTAssertNil(try decidedBehavior(askAnswer), String(decoding: askAnswer, as: UTF8.self))
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+        XCTAssertTrue(appState.questionQueue.isEmpty)
+    }
+
     // MARK: - A tool_use_id names a request only within its card
 
     /// A local request, and a step from another host — as HookOrigin stamps
