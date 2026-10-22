@@ -166,9 +166,13 @@ extension AppState {
         let denyBody = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#
         existing.continuation.resume(returning: Data(denyBody.utf8))
         // Same request, new waiter: it keeps its identity, so its reminders
-        // and the card showing it carry on rather than starting over.
+        // and the card showing it carry on rather than starting over. It now
+        // goes with the new waiter's hook; the old one has its answer.
         permissionQueue[existingIndex] = PermissionRequest(
-            id: existing.id, event: request.event, continuation: request.continuation
+            id: existing.id,
+            event: request.event,
+            continuation: request.continuation,
+            hookConnectionId: request.hookConnectionId
         )
         return true
     }

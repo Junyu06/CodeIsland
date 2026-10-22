@@ -1873,7 +1873,11 @@ final class AppState {
         }
     }
 
-    func handlePermissionRequest(_ event: HookEvent, continuation: CheckedContinuation<Data, Never>) {
+    func handlePermissionRequest(
+        _ event: HookEvent,
+        continuation: CheckedContinuation<Data, Never>,
+        hookConnectionId: UUID? = nil
+    ) {
         let sessionId = event.sessionId ?? "default"
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
@@ -1923,7 +1927,7 @@ final class AppState {
         // Backfill tool name/description from cached PreToolUse when the payload is thin.
         enrichPermissionRequestFromCache(sessionId: sessionId, event: event)
 
-        let request = PermissionRequest(event: event, continuation: continuation)
+        let request = PermissionRequest(event: event, continuation: continuation, hookConnectionId: hookConnectionId)
 
         // Replay deduplication: if the same tool_use_id is already queued, swap the
         // continuation in place and deny the previous waiter. Preserves card order.
@@ -2284,7 +2288,11 @@ final class AppState {
         refreshDerivedState()
     }
 
-    func handleQuestion(_ event: HookEvent, continuation: CheckedContinuation<Data, Never>) {
+    func handleQuestion(
+        _ event: HookEvent,
+        continuation: CheckedContinuation<Data, Never>,
+        hookConnectionId: UUID? = nil
+    ) {
         let sessionId = event.sessionId ?? "default"
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
@@ -2311,7 +2319,12 @@ final class AppState {
         sessions[sessionId]?.lastActivity = Date()
         markMergedSubagentWaiting(sessionId: sessionId, event: event, status: .waitingQuestion)
 
-        let request = QuestionRequest(event: event, question: question, continuation: continuation)
+        let request = QuestionRequest(
+            event: event,
+            question: question,
+            continuation: continuation,
+            hookConnectionId: hookConnectionId
+        )
         questionQueue.append(request)
         // First of a burst: nothing else visibly waiting. Not `count == 1` —
         // a closed question stays queued, and must not swallow every later
@@ -2332,7 +2345,11 @@ final class AppState {
         refreshDerivedState()
     }
 
-    func handleAskUserQuestion(_ event: HookEvent, continuation: CheckedContinuation<Data, Never>) {
+    func handleAskUserQuestion(
+        _ event: HookEvent,
+        continuation: CheckedContinuation<Data, Never>,
+        hookConnectionId: UUID? = nil
+    ) {
         let sessionId = event.sessionId ?? "default"
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
@@ -2441,7 +2458,8 @@ final class AppState {
             question: askItems[0].payload,
             continuation: continuation,
             isFromPermission: true,
-            askUserQuestionState: askState
+            askUserQuestionState: askState,
+            hookConnectionId: hookConnectionId
         )
         questionQueue.append(request)
         // First of a burst, as in `handleQuestion`.
@@ -2773,9 +2791,10 @@ final class AppState {
         }
     }
 
-    /// Called when the bridge socket disconnects — the question/permission was answered externally (e.g. user replied in terminal).
-    /// Only the disconnecting agent's requests are drained: the socket belonged to one agent,
-    /// and another agent's request in the same session is still waiting on the user.
+    /// Drains every pending request of one agent in a session, as if all its
+    /// hooks had gone at once; another agent's request in the same session
+    /// stays. A single hook that goes takes only its own request
+    /// (``handleHookGone(connectionId:)``).
     func handlePeerDisconnect(sessionId: String, agentId: String? = nil) {
         let sameAgent: (HookEvent) -> Bool = { $0.sessionId == sessionId && $0.agentId == agentId }
         let hadPending = questionQueue.contains(where: { sameAgent($0.event) })
@@ -2784,6 +2803,49 @@ final class AppState {
 
         drainQuestions(forSession: sessionId, reason: "peer-disconnect", where: sameAgent)
         drainPermissions(forSession: sessionId, reason: "peer-disconnect", where: sameAgent)
+        settleAfterWaitEnded(sessionId: sessionId)
+    }
+
+    /// A held request's hook is gone — killed, or its agent answered in the
+    /// terminal (``HookServer``). The request that hook waited on goes, and
+    /// only that one: its session's other requests — a parallel tool call's,
+    /// a subagent's — each have a hook of their own still waiting on the
+    /// user, and stay answerable.
+    func handleHookGone(connectionId: UUID) {
+        let sessionId: String
+        if let index = permissionQueue.firstIndex(where: { $0.hookConnectionId == connectionId }) {
+            let pending = permissionQueue.remove(at: index)
+            sessionId = pending.event.sessionId ?? "default"
+            log.notice("⚠️ permission deny reason=hookGone session=\(sessionId, privacy: .public) toolUseId=\(pending.toolUseId ?? "nil", privacy: .public) tool=\(pending.event.toolName ?? "nil", privacy: .public)")
+            // Nobody reads it, but the continuation must not leak.
+            pending.continuation.resume(returning: Data(
+                #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8
+            ))
+            // A dismissal goes with the last of the session's requests; the
+            // rest stay as the user left them.
+            if !permissionQueue.contains(where: { ($0.event.sessionId ?? "default") == sessionId }) {
+                dismissedPermissionSessionIds.remove(sessionId)
+            }
+        } else if let index = questionQueue.firstIndex(where: { $0.hookConnectionId == connectionId }) {
+            let pending = questionQueue.remove(at: index)
+            sessionId = pending.event.sessionId ?? "default"
+            if pending.isFromPermission {
+                log.notice("⚠️ permission deny reason=hookGone session=\(sessionId, privacy: .public) tool=AskUserQuestion")
+                pending.resolution.resumeHook(returning: Data(
+                    #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8
+                ))
+            } else {
+                pending.resolution.resumeHook(returning: Data("{}".utf8))
+            }
+        } else {
+            return  // answered already, or never queued
+        }
+        settleAfterWaitEnded(sessionId: sessionId)
+    }
+
+    /// After a disconnect took requests of `sessionId`: a session that was
+    /// waiting waits on what is still queued for it, else goes back to work.
+    private func settleAfterWaitEnded(sessionId: String) {
         let currentStatus = sessions[sessionId]?.status
         let wasWaiting = currentStatus == .waitingApproval || currentStatus == .waitingQuestion
         if wasWaiting, permissionQueue.contains(where: { $0.event.sessionId == sessionId }) {

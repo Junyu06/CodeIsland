@@ -550,10 +550,10 @@ class HookServer {
 
             // AskUserQuestion is a question, not a permission — route to QuestionBar
             if event.toolName == "AskUserQuestion" {
-                monitorPeerDisconnect(connection: connection, sessionId: sessionId, agentId: event.agentId)
+                let hook = monitorPeerDisconnect(connection: connection, sessionId: sessionId)
                 Task {
                     let responseBody = await withCheckedContinuation { continuation in
-                        appState.handleAskUserQuestion(event, continuation: continuation)
+                        appState.handleAskUserQuestion(event, continuation: continuation, hookConnectionId: hook)
                     }
                     self.sendResponse(connection: connection, data: responseBody)
                 }
@@ -565,20 +565,20 @@ class HookServer {
                 return
             }
 
-            monitorPeerDisconnect(connection: connection, sessionId: sessionId, agentId: event.agentId)
+            let hook = monitorPeerDisconnect(connection: connection, sessionId: sessionId)
             Task {
                 let responseBody = await withCheckedContinuation { continuation in
-                    appState.handlePermissionRequest(event, continuation: continuation)
+                    appState.handlePermissionRequest(event, continuation: continuation, hookConnectionId: hook)
                 }
                 self.sendResponse(connection: connection, data: responseBody)
             }
 
         case .question:
             let questionSessionId = event.sessionId ?? "default"
-            monitorPeerDisconnect(connection: connection, sessionId: questionSessionId, agentId: event.agentId)
+            let hook = monitorPeerDisconnect(connection: connection, sessionId: questionSessionId)
             Task {
                 let responseBody = await withCheckedContinuation { continuation in
-                    appState.handleQuestion(event, continuation: continuation)
+                    appState.handleQuestion(event, continuation: continuation, hookConnectionId: hook)
                 }
                 self.sendResponse(connection: connection, data: responseBody)
             }
@@ -592,8 +592,10 @@ class HookServer {
     /// Per-connection state used by the disconnect monitor.
     /// `responded` flips to true once we've sent the response, so our own
     /// closing of the connection after `sendResponse` does not masquerade as a
-    /// peer disconnect.
+    /// peer disconnect. `id` names the connection to AppState: the request it
+    /// holds goes with it (``AppState/handleHookGone(connectionId:)``).
     private final class ConnectionContext {
+        let id = UUID()
         var responded: Bool = false
     }
 
@@ -607,8 +609,11 @@ class HookServer {
     /// taken for a disconnect, every PermissionRequest was auto-drained as `deny`
     /// before its card was even visible. ``HookConnection/closeWhenPeerLeaves()``
     /// closes the connection only on real teardown, and a connection that closes
-    /// without an answer — its hook gone, or the safety net below — drops its card.
-    private func monitorPeerDisconnect(connection: HookConnection, sessionId: String, agentId: String?) {
+    /// without an answer — its hook gone, or the safety net below — drops its
+    /// card, and no other: each held request has a hook of its own.
+    ///
+    /// Returns the connection's id, for its request (`hookConnectionId`).
+    private func monitorPeerDisconnect(connection: HookConnection, sessionId: String) -> UUID {
         let context = ConnectionContext()
         let connId = ObjectIdentifier(connection)
         connectionContexts[connId] = context
@@ -619,7 +624,7 @@ class HookServer {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     if !context.responded {
-                        self.appState.handlePeerDisconnect(sessionId: sessionId, agentId: agentId)
+                        self.appState.handleHookGone(connectionId: context.id)
                     }
                     if self.connectionContexts[ObjectIdentifier(connection)] === context {
                         self.connectionContexts.removeValue(forKey: connId)
@@ -641,6 +646,7 @@ class HookServer {
                 }
             }
         }
+        return context.id
     }
 
     private func sendResponse(connection: HookConnection, data: Data) {

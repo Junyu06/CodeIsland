@@ -9,11 +9,20 @@ struct PermissionRequest {
     let id: UUID
     let event: HookEvent
     let continuation: CheckedContinuation<Data, Never>
+    /// The hook connection waiting on the answer (``HookServer``), nil when
+    /// none does. When that hook is gone, this request goes, and no other.
+    let hookConnectionId: UUID?
 
-    init(id: UUID = UUID(), event: HookEvent, continuation: CheckedContinuation<Data, Never>) {
+    init(
+        id: UUID = UUID(),
+        event: HookEvent,
+        continuation: CheckedContinuation<Data, Never>,
+        hookConnectionId: UUID? = nil
+    ) {
         self.id = id
         self.event = event
         self.continuation = continuation
+        self.hookConnectionId = hookConnectionId
     }
 
     var toolUseId: String? { event.toolUseId }
@@ -90,19 +99,24 @@ struct QuestionRequest {
     /// true when converted from AskUserQuestion PermissionRequest
     let isFromPermission: Bool
     var askUserQuestionState: AskUserQuestionState?
+    /// The hook connection waiting on the answer (``HookServer``), nil when
+    /// none does. When that hook is gone, this request goes, and no other.
+    let hookConnectionId: UUID?
 
     init(
         event: HookEvent,
         question: QuestionPayload,
         resolution: QuestionResolution,
         isFromPermission: Bool = false,
-        askUserQuestionState: AskUserQuestionState? = nil
+        askUserQuestionState: AskUserQuestionState? = nil,
+        hookConnectionId: UUID? = nil
     ) {
         self.event = event
         self.question = askUserQuestionState?.items.first?.payload ?? question
         self.resolution = resolution
         self.isFromPermission = isFromPermission
         self.askUserQuestionState = askUserQuestionState
+        self.hookConnectionId = hookConnectionId
     }
 
     /// Back-compat convenience for hook-originated questions.
@@ -111,14 +125,16 @@ struct QuestionRequest {
         question: QuestionPayload,
         continuation: CheckedContinuation<Data, Never>,
         isFromPermission: Bool = false,
-        askUserQuestionState: AskUserQuestionState? = nil
+        askUserQuestionState: AskUserQuestionState? = nil,
+        hookConnectionId: UUID? = nil
     ) {
         self.init(
             event: event,
             question: question,
             resolution: .hook(continuation),
             isFromPermission: isFromPermission,
-            askUserQuestionState: askUserQuestionState
+            askUserQuestionState: askUserQuestionState,
+            hookConnectionId: hookConnectionId
         )
     }
 

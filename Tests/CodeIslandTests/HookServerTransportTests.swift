@@ -34,6 +34,15 @@ final class HookServerTransportTests: XCTestCase {
         #"{"hook_event_name":"\#(event)","session_id":"\#(session)","cwd":"/work/proj","_source":"claude","_remote_host_id":"host-1","_remote_host_name":"Build Box"\#(extra)}"#
     }
 
+    /// A PermissionRequest for one tool call, as a remote hook sends it.
+    private func permissionPayload(session: String, toolUseId: String, command: String = "make") -> String {
+        remotePayload(
+            "PermissionRequest",
+            session: session,
+            extra: #","tool_name":"Bash","tool_use_id":"\#(toolUseId)","tool_input":{"command":"\#(command)"}"#
+        )
+    }
+
     /// Runs the main run loop until `condition` holds; false (and a failure) after `timeout`.
     @discardableResult
     private func pump(
@@ -148,6 +157,70 @@ final class HookServerTransportTests: XCTestCase {
         pump(until: { self.appState.pendingPermission != nil }, "no card for the request")
         hook.close()
         pump(until: { self.appState.pendingPermission == nil }, timeout: 2, "the card outlived its hook")
+    }
+
+    /// Two held requests of one session and agent — parallel tool calls —
+    /// and one hook goes: its card goes, and only its. The other hook still
+    /// waits on the user, and gets the user's answer.
+    func testAHookThatGoesTakesOnlyItsOwnRequest() throws {
+        let gone = try XCTUnwrap(RawHook.connect(to: socketPath))
+        gone.write(permissionPayload(session: "pair", toolUseId: "tu-a"))
+        pump(until: { self.appState.permissionQueue.count == 1 }, "no card for the first request")
+        let waiting = try XCTUnwrap(RawHook.connect(to: socketPath))
+        waiting.write(permissionPayload(session: "pair", toolUseId: "tu-b", command: "make test"))
+        let answer = waiting.readAnswerInBackground()
+        pump(until: { self.appState.permissionQueue.count == 2 }, "no card for the second request")
+
+        gone.close()
+        pump(until: { self.appState.permissionQueue.count != 2 }, timeout: 2, "the card outlived its hook")
+        pump(for: 0.3)
+        XCTAssertEqual(appState.permissionQueue.map(\.toolUseId), ["tu-b"], "a sibling's card went with the hook")
+        XCTAssertNil(answer.value, "the waiting hook was answered without the user: \(String(decoding: answer.value ?? Data(), as: UTF8.self))")
+
+        appState.approvePermission()
+        pump(until: { answer.value != nil }, "the answer did not reach the waiting hook")
+        XCTAssertTrue(String(decoding: answer.value ?? Data(), as: UTF8.self).contains(#""behavior":"allow""#))
+        waiting.close()
+    }
+
+    /// The same for two questions of one session.
+    func testAQuestionsHookThatGoesTakesOnlyItsOwnQuestion() throws {
+        let gone = try XCTUnwrap(RawHook.connect(to: socketPath))
+        gone.write(remotePayload("Notification", session: "ask", extra: #","question":"First?""#))
+        pump(until: { self.appState.questionQueue.count == 1 }, "no card for the first question")
+        let waiting = try XCTUnwrap(RawHook.connect(to: socketPath))
+        waiting.write(remotePayload("Notification", session: "ask", extra: #","question":"Second?""#))
+        let answer = waiting.readAnswerInBackground()
+        pump(until: { self.appState.questionQueue.count == 2 }, "no card for the second question")
+
+        gone.close()
+        pump(until: { self.appState.questionQueue.count != 2 }, timeout: 2, "the question outlived its hook")
+        pump(for: 0.3)
+        XCTAssertEqual(appState.questionQueue.map(\.question.question), ["Second?"], "a sibling's question went with the hook")
+        XCTAssertNil(answer.value, "the waiting hook was answered without the user: \(String(decoding: answer.value ?? Data(), as: UTF8.self))")
+
+        waiting.close()
+        pump(until: { self.appState.questionQueue.isEmpty }, timeout: 2, "the question outlived its hook")
+    }
+
+    /// A replay of a held request (the same tool call, asked again) takes
+    /// the first one's place, and the first hook gets its answer. The card
+    /// then goes with the replay's hook, not with the first one's.
+    func testAReplayedRequestGoesWithTheReplaysHook() throws {
+        let first = try XCTUnwrap(RawHook.connect(to: socketPath))
+        first.write(permissionPayload(session: "replay", toolUseId: "tu-r"))
+        let firstAnswer = first.readAnswerInBackground()
+        pump(until: { self.appState.permissionQueue.count == 1 }, "no card for the request")
+        let replay = try XCTUnwrap(RawHook.connect(to: socketPath))
+        replay.write(permissionPayload(session: "replay", toolUseId: "tu-r"))
+        pump(until: { firstAnswer.value != nil }, "the replay did not let the first hook go")
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+
+        first.close()
+        pump(for: 0.5)
+        XCTAssertEqual(appState.permissionQueue.count, 1, "the replay's card went with the first hook")
+        replay.close()
+        pump(until: { self.appState.permissionQueue.isEmpty }, timeout: 2, "the card outlived the replay's hook")
     }
 
     /// More than the island reads of one request is refused, and nothing
