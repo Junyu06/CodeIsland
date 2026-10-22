@@ -8,13 +8,13 @@ final class OpenCodeV2SupportTests: XCTestCase {
     /// orphan sweep once the client that spawned it quits, so the pid scan
     /// must be able to tell it apart from the TUI (same executable).
     func testSharedServiceIsRecognisedFromArgv() {
-        XCTAssertTrue(AppState.isOpenCodeSharedService(arguments: ["/Users/u/.opencode/bin/opencode", "serve", "--service"]))
-        XCTAssertFalse(AppState.isOpenCodeSharedService(arguments: ["/Users/u/.opencode/bin/opencode"]), "the TUI client")
+        XCTAssertTrue(AgentProcessFinder.isOpenCodeSharedService(arguments: ["/Users/u/.opencode/bin/opencode", "serve", "--service"]))
+        XCTAssertFalse(AgentProcessFinder.isOpenCodeSharedService(arguments: ["/Users/u/.opencode/bin/opencode"]), "the TUI client")
         XCTAssertFalse(
-            AppState.isOpenCodeSharedService(arguments: ["opencode", "serve", "--stdio", "--port", "0"]),
+            AgentProcessFinder.isOpenCodeSharedService(arguments: ["opencode", "serve", "--stdio", "--port", "0"]),
             "a standalone server is its client's child and dies with it"
         )
-        XCTAssertFalse(AppState.isOpenCodeSharedService(arguments: ["opencode", "run", "--service"]))
+        XCTAssertFalse(AgentProcessFinder.isOpenCodeSharedService(arguments: ["opencode", "run", "--service"]))
     }
 
     func testBundledPluginServesBothPluginAPIs() throws {

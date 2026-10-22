@@ -799,75 +799,7 @@ final class AppState {
         guard let session = sessions[sessionId] else { return true }
         if session.isNativeAppMode { return false }
         guard let source = SessionSnapshot.normalizedSupportedSource(session.source) else { return true }
-        return !Self.isNativeAppProcess(pid, source: source)
-    }
-
-    /// Both bundle names the Qoder IDE has shipped under, lowercased.
-    ///
-    /// Qoder IDE 1.25.1 (2026-08-19) renamed the macOS bundle from `Qoder.app`
-    /// to `Qoder IDE.app` and its executable from `Electron` to `Qoder` — so
-    /// matching on `/qoder.app/contents/` alone stopped recognising the IDE
-    /// entirely (#327). Both names stay listed: the rename doesn't reach
-    /// installs that haven't updated. `com.qoder.ide` is unchanged, so
-    /// activation and badge labels were never affected — only the
-    /// process-ancestry matching that runs off executable paths.
-    ///
-    /// Qoder App (`com.qoder.app`) also uses `Qoder.app` and the `qoder` hook
-    /// source, so it shares this process-path protection. Session bundle IDs
-    /// distinguish it from the IDE. Neither prefix matches QoderWork.
-    nonisolated static let qoderIDEBundlePrefixes = [
-        "/qoder.app/contents/",
-        "/qoder ide.app/contents/",
-    ]
-
-    /// Is `executablePath` inside a Qoder IDE bundle, under either name?
-    nonisolated static func isQoderIDEBundlePath(_ executablePath: String) -> Bool {
-        let path = executablePath.lowercased()
-        return qoderIDEBundlePrefixes.contains { path.contains($0) }
-    }
-
-    /// Is `executablePath` inside the Trae CN IDE bundle, under any name it
-    /// ships as? It never matches the international `Trae.app`: the two
-    /// editions are separate installs and must not keep each other's
-    /// sessions alive. The markers live in CodeIslandCore so the bridge's
-    /// `_ppid` resolution uses the same list.
-    nonisolated static func isTraeCNIDEBundlePath(_ executablePath: String) -> Bool {
-        CLIProcessResolver.isTraeCNBundlePath(executablePath)
-    }
-
-    private nonisolated static func isNativeAppProcess(_ pid: pid_t, source: String) -> Bool {
-        guard let executable = ProcessTable.executablePath(for: pid) else { return false }
-        let path = executable.lowercased()
-        switch source {
-        case "cursor":     return path.contains("/cursor.app/contents/")
-        case "trae":       return path.contains("/trae.app/contents/")
-        case "traecn":     return isTraeCNIDEBundlePath(path)
-        case "qoder":      return isQoderIDEBundlePath(path)
-        // QoderWork desktop app (#249) — bundle id undocumented; the standard
-        // /Applications/QoderWork.app layout is assumed, pending real-install
-        // verification.
-        case "qoderwork":  return path.contains("/qoderwork.app/contents/")
-        case "droid":      return path.contains("/factory.app/contents/")
-        case "codebuddy":  return path.contains("/codebuddy.app/contents/")
-        case "codybuddycn": return path.contains("/codebuddycn.app/contents/") || path.contains("/codebuddy.app/contents/")
-        case "stepfun":    return path.contains("/stepfun.app/contents/")
-        case "codex":      return isCodexExecutablePath(executable)
-        case "opencode":   return path.contains("/opencode.app/contents/")
-        // Xiaomi MiMo desktop runs MiMo Code inside its own main process.
-        case "mimo":       return CLIProcessResolver.isMimoDesktopBundlePath(path)
-        case "antigravity": return path.contains("/antigravity.app/contents/")
-        // Google Antigravity IDE — host app is Antigravity.app. Same .app path as
-        // the fork, but the check is per-source so a "google-antigravity" session
-        // (whose host genuinely IS Antigravity.app) never collides with the fork's
-        // "antigravity" CLI sessions (#215).
-        case "google-antigravity": return path.contains("/antigravity.app/contents/")
-        case "workbuddy":   return path.contains("/workbuddy.app/contents/")
-        case "hermes":      return path.contains("/hermes.app/contents/")
-        // Claude Code Desktop (#211): local Code-tab sessions live inside Claude.app.
-        case "claude":      return path.contains("/claude.app/contents/")
-        case "zcode":       return path.contains("/zcode.app/contents/")
-        default:           return false
-        }
+        return !AgentProcessFinder.isNativeAppProcess(pid, source: source)
     }
 
     /// Watch a Claude process for exit — waits a grace period before removing, in case the
@@ -1074,7 +1006,7 @@ final class AppState {
         guard let cwd = sessions[sessionId]?.cwd else { return }
         let source = sessions[sessionId]?.source
         Task.detached {
-            let pid = Self.findPidForCwd(cwd, source: source)
+            let pid = AgentProcessFinder.findPidForCwd(cwd, source: source)
             await MainActor.run { [weak self] in
                 guard let self = self, let pid = pid,
                       self.sessions[sessionId] != nil else { return }
@@ -1102,53 +1034,6 @@ final class AppState {
                 }
                 self.monitorProcess(sessionId: sessionId, process: preferredProcess)
             }
-        }
-    }
-
-    /// Find a CLI process PID by matching CWD, scoped to the correct source.
-    /// Never guesses across sources: a missing/unknown source returns no PID instead of
-    /// accidentally binding a session to the wrong process family.
-    private nonisolated static func findPidForCwd(_ cwd: String, source: String? = nil) -> pid_t? {
-        guard let normalizedSource = SessionSnapshot.normalizedSupportedSource(source) else { return nil }
-        let pids = findPids(forSource: normalizedSource)
-        for pid in pids {
-            if ProcessTable.getCwd(for: pid) == cwd { return pid }
-        }
-        return nil
-    }
-
-    private nonisolated static func findPids(forSource source: String, candidatePids: [pid_t]? = nil) -> [pid_t] {
-        switch source {
-        case "claude":     return findClaudePids(candidatePids: candidatePids)
-        case "codex":      return findCodexPids(candidatePids: candidatePids)
-        case "gemini":     return findGeminiPids(candidatePids: candidatePids)
-        case "cursor":     return findCursorPids(candidatePids: candidatePids)
-        case "cursor-cli": return findCursorCliPids(candidatePids: candidatePids)
-        case "trae":       return findTraePids(candidatePids: candidatePids)
-        case "traecn":     return findTraeCNPids(candidatePids: candidatePids)
-        case "traecli":   return findTraeCliPids(candidatePids: candidatePids)
-        case "copilot":    return findCopilotPids(candidatePids: candidatePids)
-        case "qoder":      return findQoderPids(candidatePids: candidatePids)
-        case "qoder-cli":  return findQoderCliPids(candidatePids: candidatePids)
-        case "qoderwork":  return findQoderWorkPids(candidatePids: candidatePids)
-        case "droid":      return findFactoryPids(candidatePids: candidatePids)
-        case "codebuddy":  return findCodeBuddyPids(candidatePids: candidatePids)
-        case "codybuddycn": return findCodyBuddyCNPids(candidatePids: candidatePids)
-        case "stepfun":    return findStepFunPids(candidatePids: candidatePids)
-        case "opencode":   return findOpenCodePids(candidatePids: candidatePids)
-        case "mimo":       return findMimoPids(candidatePids: candidatePids)
-        case "antigravity": return findAntiGravityPids(candidatePids: candidatePids)
-        case "google-antigravity": return findGoogleAntigravityPids(candidatePids: candidatePids)
-        case "workbuddy":  return findWorkBuddyPids(candidatePids: candidatePids)
-        case "hermes":     return findHermesPids(candidatePids: candidatePids)
-        case "grok":       return findGrokPids(candidatePids: candidatePids)
-        case "qwen":       return findQwenPids(candidatePids: candidatePids)
-        case "kimi":       return findKimiPids(candidatePids: candidatePids)
-        case "pi":         return findPiPids(candidatePids: candidatePids)
-        case "cline":      return findClinePids(candidatePids: candidatePids)
-        case "zcode":      return findZcodePids(candidatePids: candidatePids)
-        case "minimax":    return findMinimaxPids(candidatePids: candidatePids)
-        default:           return []
         }
     }
 
@@ -5075,7 +4960,7 @@ final class AppState {
     /// Find running `claude` processes, match to transcript files, extract recent messages
     private nonisolated static func findActiveClaudeSessions(candidatePids: [pid_t]? = nil) -> [DiscoveredSession] {
         // Step 1: find running claude processes using native APIs
-        let claudePids = findClaudePids(candidatePids: candidatePids)
+        let claudePids = AgentProcessFinder.findClaudePids(candidatePids: candidatePids)
         guard !claudePids.isEmpty else { return [] }
 
         let fm = FileManager.default
@@ -5203,402 +5088,13 @@ final class AppState {
         )
     }
 
-    private nonisolated static func findPids(
-        matchingPathSubstrings pathSubstrings: [String],
-        argSubstrings: [String] = [],
-        candidatePids: [pid_t]? = nil
-    ) -> [pid_t] {
-        let loweredPaths = pathSubstrings.map { $0.lowercased() }
-        let loweredArgs = argSubstrings.map { $0.lowercased() }
-        guard !loweredPaths.isEmpty || !loweredArgs.isEmpty else { return [] }
-
-        var matched: [pid_t] = []
-        for pid in candidatePids ?? ProcessTable.allProcessIds() {
-            guard let path = ProcessTable.executablePath(for: pid)?.lowercased() else { continue }
-            if loweredPaths.contains(where: { path.contains($0) }) {
-                matched.append(pid)
-                continue
-            }
-            guard !loweredArgs.isEmpty,
-                  let args = ProcessTable.getProcessArgs(pid)?.map({ $0.lowercased() }) else { continue }
-            if args.contains(where: { arg in loweredArgs.contains(where: { arg.contains($0) }) }) {
-                matched.append(pid)
-            }
-        }
-        return matched
-    }
-
-    /// Get PIDs of running Claude Code processes
-    /// Claude's binary is named by version (e.g. "2.1.91") under ~/.local/share/claude/versions/
-    private nonisolated static func findClaudePids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        let claudeVersionsDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/share/claude/versions").path
-
-        var claudePids: [pid_t] = []
-
-        for pid in candidatePids ?? ProcessTable.allProcessIds() {
-            guard let path = ProcessTable.executablePath(for: pid) else { continue }
-            // Match processes whose executable is under claude's versions directory
-            if path.hasPrefix(claudeVersionsDir) {
-                claudePids.append(pid)
-            }
-        }
-        return claudePids
-    }
-
-    private nonisolated static func findGeminiPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [],
-            argSubstrings: [
-                "/gemini-cli/bundle/gemini.js",
-                "/opt/homebrew/bin/gemini",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    private nonisolated static func findCursorPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/cursor.app/contents/macos/cursor",
-                "/cursor.app/contents/frameworks/cursor helper",
-                "/.local/share/cursor-agent/versions/",
-            ],
-            argSubstrings: ["/cursor-agent/index.js"],
-            candidatePids: candidatePids
-        )
-    }
-
-    /// Standalone Cursor CLI agent — must not match the desktop IDE/helper
-    /// processes that `findCursorPids` also covers (#248).
-    private nonisolated static func findCursorCliPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/.local/share/cursor-agent/versions/",
-            ],
-            argSubstrings: ["/cursor-agent/index.js"],
-            candidatePids: candidatePids
-        )
-    }
-
-    /// The IDE's main and helper processes, under either bundle name (#327).
-    /// The executable was renamed alongside the bundle (`Electron` → `Qoder`),
-    /// so the main process is matched by its `MacOS/` directory rather than by
-    /// a binary name that also changed.
-    private nonisolated static func findQoderPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: qoderIDEBundlePrefixes.flatMap {
-                ["\($0)macos/", "\($0)frameworks/qoder helper"]
-            } + ["/.qoder/bin/qodercli/"],
-            candidatePids: candidatePids
-        )
-    }
-
-    /// Standalone Qoder CLI — must not match the desktop IDE/helper (#248).
-    /// Both Qoder CLI builds: the international `qodercli` under ~/.qoder and the
-    /// China build `qoderclicn` under ~/.qoder-cn. Same hook contract, one source
-    /// (#289) — the CN binary is a separate build, so its own paths are needed.
-    private nonisolated static func findQoderCliPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/.qoder/bin/qodercli/",
-                "/@qoder-ai/qodercli",
-                "/.qoder-cn/bin/qoderclicn/",
-                "/@qoder-ai/qoderclicn",
-            ],
-            argSubstrings: [
-                "/opt/homebrew/bin/qodercli",
-                "/usr/local/bin/qodercli",
-                "/.local/bin/qodercli",
-                "/opt/homebrew/bin/qoderclicn",
-                "/usr/local/bin/qoderclicn",
-                "/.local/bin/qoderclicn",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    /// QoderWork desktop app (#249). Bundle layout is assumed from the standard
-    /// /Applications/QoderWork.app install — no public bundle id / binary name
-    /// docs, pending real-install verification. "/qoderwork.app/" never collides
-    /// with the IDE's "/qoder.app/" substrings.
-    private nonisolated static func findQoderWorkPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/qoderwork.app/contents/",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    private nonisolated static func findFactoryPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/factory.app/contents/macos/electron",
-                "/factory.app/contents/frameworks/factory helper",
-                "/.local/bin/droid",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    private nonisolated static func findCodeBuddyPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/codebuddy.app/contents/macos/electron",
-                "/codebuddy.app/contents/frameworks/codebuddy helper",
-            ],
-            argSubstrings: [
-                "/@tencent-ai/codebuddy-code/bin/codebuddy",
-                "/opt/homebrew/bin/codebuddy",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    private nonisolated static func findCodyBuddyCNPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/codebuddycn.app/contents/macos/electron",
-                "/codebuddycn.app/contents/frameworks/codebuddycn helper",
-                "/.codybuddycn/",
-                "/.codebuddycn/",
-            ],
-            argSubstrings: [
-                "/.codybuddycn/",
-                "/.codebuddycn/",
-                "/opt/homebrew/bin/codybuddycn",
-                "/opt/homebrew/bin/codebuddycn",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    private nonisolated static func findStepFunPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/stepfun.app/contents/macos/stepfun",
-                "/.stepfun/",
-            ],
-            argSubstrings: [
-                "/opt/homebrew/bin/stepfun",
-                "/.stepfun/",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    private nonisolated static func findTraePids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/trae.app/contents/macos/trae",
-                "/trae.app/contents/frameworks/trae helper",
-                "/.trae/",
-            ],
-            argSubstrings: [
-                "/opt/homebrew/bin/trae",
-                "/.trae/",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    private nonisolated static func findTraeCNPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: CLIProcessResolver.traeCNBundlePathMarkers + [
-                "/trae-cn.app/contents/macos/trae",
-                "/.traecn/",
-                "/.trae-cn/",
-            ],
-            argSubstrings: [
-                "/opt/homebrew/bin/traecn",
-                "/opt/homebrew/bin/trae-cn",
-                "/.traecn/",
-                "/.trae-cn/",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    private nonisolated static func findTraeCliPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/opt/homebrew/bin/coco",
-                "/opt/homebrew/bin/traecli",
-                "/usr/local/bin/coco",
-                "/usr/local/bin/traecli",
-                "/.local/bin/coco",
-                "/.local/bin/traecli",
-            ],
-            argSubstrings: [
-                "/opt/homebrew/bin/coco",
-                "/opt/homebrew/bin/traecli",
-                "/usr/local/bin/coco",
-                "/usr/local/bin/traecli",
-                "/.local/bin/coco",
-                "/.local/bin/traecli",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    private nonisolated static func findAntiGravityPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/.antigravity/antigravity/bin/antigravity",
-                "/antigravity.app/contents/macos/antigravity",
-            ],
-            argSubstrings: [
-                "/.antigravity/antigravity/bin/antigravity",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    /// Google Antigravity (Gemini-based IDE/CLI, #215). The actionable agent is the
-    /// `agy` CLI (pypi google-antigravity) launched from the IDE's integrated
-    /// terminal; the IDE itself is Antigravity.app (com.google.antigravity).
-    /// We match the IDE app *only* via the Google-specific .app path component to
-    /// avoid colliding with the existing "antigravity" Claude-fork CLI (which lives
-    /// under ~/.antigravity, never in an .app named exactly "antigravity").
-    private nonisolated static func findGoogleAntigravityPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/antigravity.app/contents/macos/",
-                "/bin/agy",
-            ],
-            argSubstrings: [
-                "/google-antigravity/",
-                "/antigravity-cli/",
-                "/bin/agy",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    private nonisolated static func findWorkBuddyPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/workbuddy.app/contents/macos/workbuddy",
-                "/.workbuddy/",
-            ],
-            argSubstrings: [
-                "/opt/homebrew/bin/workbuddy",
-                "/.workbuddy/",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    private nonisolated static func findHermesPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/.local/bin/hermes",
-                "/hermes.app/contents/macos/hermes",
-                "/.hermes/hermes-agent/",
-            ],
-            argSubstrings: [
-                "/.local/bin/hermes",
-                "/.hermes/",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    // Electron app (.dmg distribution) — packaged executable path unverified
-    // on a real machine; best-effort guess pending field report (#245).
-    private nonisolated static func findZcodePids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/zcode.app/contents/",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    private nonisolated static func findQwenPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/.local/bin/qwen",
-                "/.bun/bin/qwen",
-            ],
-            argSubstrings: [
-                "/@qwen-code/qwen-code/",
-                "/.qwen/",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    private nonisolated static func findKimiPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/.kimi-code/bin/kimi",
-                "/.local/bin/kimi",
-                "/.local/share/uv/tools/kimi-cli/",
-            ],
-            argSubstrings: [
-                "/kimi-cli/",
-                "kimi_cli",
-                "/.kimi-code/",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    private nonisolated static func findGrokPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        (candidatePids ?? ProcessTable.allProcessIds()).filter { pid in
-            guard let path = ProcessTable.executablePath(for: pid) else { return false }
-            return CLIProcessResolver.sourceMatchesExecutablePath(path, source: "grok")
-        }
-    }
-
-    private nonisolated static func findMinimaxPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        // mcode is a Node script, so proc_pidpath is the node binary; the
-        // Node runtime renames its process title to `minimax-code`, which is
-        // what argv carries. Match whole arguments, not substrings: helpers
-        // mcode spawns in the session's cwd live under the same package
-        // (bundled ripgrep in .../@minimax-ai/code/node_modules/, the
-        // `mcode-tools` bin), and binding the card to one of those would end
-        // it when the helper exits.
-        (candidatePids ?? ProcessTable.allProcessIds()).filter { pid in
-            ProcessTable.getProcessArgs(pid).map(isMinimaxProcessArgs) ?? false
-        }
-    }
-
-    nonisolated static func isMinimaxProcessArgs(_ args: [String]) -> Bool {
-        args.contains { arg in
-            let lowered = arg.lowercased()
-            return lowered == "minimax-code"
-                || lowered.hasSuffix("/bin/mcode")
-                || lowered.hasSuffix("/@minimax-ai/code/cli.js")
-        }
-    }
-
-    private nonisolated static func findPiPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/pi-coding-agent/",
-                "/.local/bin/pi",
-                "/.local/bin/omp",
-                "/bin/pi",
-                "/bin/omp",
-            ],
-            argSubstrings: [
-                "pi-coding-agent",
-                "/.local/bin/omp",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
     private nonisolated static func md5Hash(of string: String) -> String {
         let digest = Insecure.MD5.hash(data: Data(string.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     private nonisolated static func findActiveKimiSessions(candidatePids: [pid_t]? = nil) -> [DiscoveredSession] {
-        let kimiPids = findKimiPids(candidatePids: candidatePids)
+        let kimiPids = AgentProcessFinder.findKimiPids(candidatePids: candidatePids)
         guard !kimiPids.isEmpty else { return [] }
 
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -6175,7 +5671,7 @@ final class AppState {
     }
 
     private nonisolated static func findActiveGrokSessions(candidatePids: [pid_t]? = nil) -> [DiscoveredSession] {
-        let grokPids = findGrokPids(candidatePids: candidatePids)
+        let grokPids = AgentProcessFinder.findGrokPids(candidatePids: candidatePids)
         guard !grokPids.isEmpty else { return [] }
 
         let fm = FileManager.default
@@ -6274,59 +5770,6 @@ final class AppState {
         )
     }
 
-    private nonisolated static func findCopilotPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [],
-            argSubstrings: [
-                "/@github/copilot/npm-loader.js",
-                "/opt/homebrew/bin/copilot",
-            ],
-            candidatePids: candidatePids
-        )
-    }
-
-    private nonisolated static func findClinePids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        // Cline is a VSCode extension — it has no standalone CLI process.
-        // Do NOT monitor VSCode main process as that causes crashes.
-        // Session discovery still works via file-based scanning (taskHistory.json).
-        return []
-    }
-
-    private nonisolated static func findOpenCodePids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findPids(
-            matchingPathSubstrings: [
-                "/opencode.app/contents/macos/opencode",
-                "/opencode.app/contents/macos/opencode-cli",
-                "/.opencode/bin/opencode",
-            ],
-            candidatePids: candidatePids
-        ).filter { pid in
-            // OpenCode 2's shared background service is the same executable as
-            // the TUI and inherits the first client's cwd, so a cwd match can
-            // land on it. It is not a session's process: it outlives the client
-            // that spawned it, and once reparented to launchd the orphan sweep
-            // would SIGTERM it — every session with it (#332).
-            guard let args = ProcessTable.getProcessArgs(pid) else { return true }
-            return !isOpenCodeSharedService(arguments: args)
-        }
-    }
-
-    /// The `mimo` CLI (MiMo Code). The Xiaomi MiMo desktop app is left out on
-    /// purpose: its engine shares the app's main process, whose cwd is `/`, so
-    /// a cwd match could never pick one of its sessions — its plugin reports
-    /// the process instead.
-    private nonisolated static func findMimoPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        (candidatePids ?? ProcessTable.allProcessIds()).filter { pid in
-            guard let path = ProcessTable.executablePath(for: pid) else { return false }
-            return CLIProcessResolver.isMimoCLIPath(path)
-        }
-    }
-
-    /// `opencode serve --service` — OpenCode 2's per-user shared server.
-    nonisolated static func isOpenCodeSharedService(arguments: [String]) -> Bool {
-        arguments.contains("serve") && arguments.contains("--service")
-    }
-
     private nonisolated static func isSubagentWorktree(_ cwd: String) -> Bool {
         cwd.contains("/.claude/worktrees/agent-") || cwd.contains("/.git/worktrees/agent-")
     }
@@ -6399,7 +5842,7 @@ final class AppState {
     }
 
     private nonisolated static func findActiveGeminiSessions(candidatePids: [pid_t]? = nil) -> [DiscoveredSession] {
-        let geminiPids = findGeminiPids(candidatePids: candidatePids)
+        let geminiPids = AgentProcessFinder.findGeminiPids(candidatePids: candidatePids)
         guard !geminiPids.isEmpty else { return [] }
 
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -6530,7 +5973,7 @@ final class AppState {
     private nonisolated static func findActiveQoderSessions(candidatePids: [pid_t]? = nil) -> [DiscoveredSession] {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return findFlatStoreSessions(
-            pids: findQoderPids(candidatePids: candidatePids),
+            pids: AgentProcessFinder.findQoderPids(candidatePids: candidatePids),
             basePath: "\(home)/.qoder/projects",
             source: "qoder",
             projectEncoder: { $0.claudeProjectDirEncoded() },
@@ -6541,7 +5984,7 @@ final class AppState {
     private nonisolated static func findActiveCodeBuddySessions(candidatePids: [pid_t]? = nil) -> [DiscoveredSession] {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return findFlatStoreSessions(
-            pids: findCodeBuddyPids(candidatePids: candidatePids),
+            pids: AgentProcessFinder.findCodeBuddyPids(candidatePids: candidatePids),
             basePath: "\(home)/.codebuddy/projects",
             source: "codebuddy",
             projectEncoder: { $0.appProjectDirEncoded() },
@@ -6552,7 +5995,7 @@ final class AppState {
     private nonisolated static func findActiveFactorySessions(candidatePids: [pid_t]? = nil) -> [DiscoveredSession] {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return findFlatStoreSessions(
-            pids: findFactoryPids(candidatePids: candidatePids),
+            pids: AgentProcessFinder.findFactoryPids(candidatePids: candidatePids),
             basePath: "\(home)/.factory/sessions",
             source: "droid",
             projectEncoder: { $0.claudeProjectDirEncoded() },
@@ -6561,7 +6004,7 @@ final class AppState {
     }
 
     private nonisolated static func findActiveCursorSessions(candidatePids: [pid_t]? = nil) -> [DiscoveredSession] {
-        let cursorPids = findCursorPids(candidatePids: candidatePids)
+        let cursorPids = AgentProcessFinder.findCursorPids(candidatePids: candidatePids)
         guard !cursorPids.isEmpty else { return [] }
 
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -6620,7 +6063,7 @@ final class AppState {
     }
 
     private nonisolated static func findActiveCopilotSessions(candidatePids: [pid_t]? = nil) -> [DiscoveredSession] {
-        let copilotPids = findCopilotPids(candidatePids: candidatePids)
+        let copilotPids = AgentProcessFinder.findCopilotPids(candidatePids: candidatePids)
         guard !copilotPids.isEmpty else { return [] }
 
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -6826,7 +6269,7 @@ final class AppState {
 
     private nonisolated static func findActiveOpenCodeSessions(candidatePids: [pid_t]? = nil) -> [DiscoveredSession] {
         findActiveOpenCodeStoreSessions(
-            pids: findOpenCodePids(candidatePids: candidatePids),
+            pids: AgentProcessFinder.findOpenCodePids(candidatePids: candidatePids),
             dbPath: openCodeDatabasePath(),
             source: "opencode",
             sessionIdPrefix: "",
@@ -6839,7 +6282,7 @@ final class AppState {
     /// and the plugin's events for it land on one card.
     private nonisolated static func findActiveMimoSessions(candidatePids: [pid_t]? = nil) -> [DiscoveredSession] {
         findActiveOpenCodeStoreSessions(
-            pids: findMimoPids(candidatePids: candidatePids),
+            pids: AgentProcessFinder.findMimoPids(candidatePids: candidatePids),
             dbPath: mimoDatabasePath(),
             source: "mimo",
             sessionIdPrefix: "mimo-",
@@ -7059,50 +6502,6 @@ final class AppState {
 
     // MARK: - Codex Session Discovery
 
-    /// Find running Codex processes.
-    /// Checks both executable path (Desktop app) and command-line args (npm/Homebrew: node script).
-    nonisolated static func isCodexExecutablePath(_ path: String) -> Bool {
-        let executableURL = URL(fileURLWithPath: path).standardizedFileURL
-        let lowerPath = executableURL.path.lowercased()
-        let resourceSuffix = "/contents/resources/codex"
-        guard lowerPath.hasSuffix(resourceSuffix) else { return false }
-
-        let appURL = executableURL
-            .deletingLastPathComponent() // Resources
-            .deletingLastPathComponent() // Contents
-            .deletingLastPathComponent() // *.app
-        return isCodexHostAppBundle(appURL)
-    }
-
-    /// The Codex binary newer ChatGPT releases bundle in place of
-    /// `Contents/Resources/codex`. Desktop's app-server, ChatGPT's terminal
-    /// launcher (`codex-cli/bin/codex`) and its cloud `exec-server` all run
-    /// this one file, so the path says Codex, not Desktop.
-    nonisolated static func isBundledCodexCLIPath(_ path: String) -> Bool {
-        let executableURL = URL(fileURLWithPath: path).standardizedFileURL
-        let suffix = "/" + bundledCodexCLIRelativePath.lowercased()
-        guard executableURL.path.lowercased().hasSuffix(suffix) else { return false }
-        var appURL = executableURL
-        for _ in bundledCodexCLIRelativePath.split(separator: "/") {
-            appURL.deleteLastPathComponent()
-        }
-        return isCodexHostAppBundle(appURL)
-    }
-
-    private nonisolated static func isCodexHostAppBundle(_ appURL: URL) -> Bool {
-        // Since Codex was folded into ChatGPT Desktop, the same com.openai.codex
-        // bundle can now be installed as ChatGPT.app instead of Codex.app. Read
-        // the bundle identifier first so future app renames continue to work.
-        if Bundle(url: appURL)?.bundleIdentifier == AppState.codexAppBundleId {
-            return true
-        }
-
-        // Keep the legacy path check for synthetic/test bundles without an
-        // Info.plist and for older installations whose bundle cannot be read.
-        let appName = appURL.deletingPathExtension().lastPathComponent.lowercased()
-        return appName == "codex" || appName == "chatgpt"
-    }
-
     /// Codex Desktop's shared app-server is launched with `/` as its cwd. Its
     /// rollout metadata contains the project cwd, so desktop discovery must
     /// use that value instead of comparing every transcript to `/`.
@@ -7197,65 +6596,6 @@ final class AppState {
             return .cli
         }
         return .unknown
-    }
-
-    private nonisolated static func findCodexPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
-        findCodexProcesses(candidatePids: candidatePids).map(\.pid)
-    }
-
-    /// Running Codex processes discovery maps rollouts to, and whether each
-    /// is Codex Desktop's shared app-server.
-    nonisolated static func findCodexProcesses(candidatePids: [pid_t]? = nil) -> [(pid: pid_t, isDesktop: Bool)] {
-        var processes: [(pid: pid_t, isDesktop: Bool)] = []
-
-        for pid in candidatePids ?? ProcessTable.allProcessIds() {
-            guard let path = ProcessTable.executablePath(for: pid) else { continue }
-            let pathLower = path.lowercased()
-
-            // Match 1: Codex Desktop app (native binary). The executable may
-            // live under Codex.app or ChatGPT.app depending on the release.
-            if isCodexExecutablePath(path) {
-                processes.append((pid, true))
-                continue
-            }
-
-            // Match 2: the binary newer ChatGPT releases bundle, shared by
-            // Desktop's app-server and Codex CLI; argv and parent tell them apart.
-            if isBundledCodexCLIPath(path) {
-                if let role = bundledCodexProcessRole(pid: pid, executablePath: path) {
-                    processes.append((pid, role == .desktopHost))
-                }
-                continue
-            }
-
-            // Match 3: npm/Homebrew install — node running @openai/codex script.
-            // proc_pidpath returns the node binary, so check command-line args instead.
-            if pathLower.hasSuffix("/node") {
-                if let args = ProcessTable.getProcessArgs(pid),
-                   args.contains(where: { $0.contains("@openai/codex") || $0.contains("openai-codex") }) {
-                    processes.append((pid, false))
-                }
-            }
-        }
-        return processes
-    }
-
-    private nonisolated static func bundledCodexProcessRole(pid: pid_t, executablePath path: String) -> CodexProcessRole? {
-        let parent = ProcessTable.parentPid(of: pid)
-        // CodeIsland's own app-server client runs this binary too, from `/`;
-        // as a session process it would claim every CLI rollout.
-        if parent == getpid() { return nil }
-
-        var ancestry = [ProcessAncestor(pid: pid, executablePath: path, arguments: ProcessTable.getProcessArgs(pid) ?? [])]
-        if let parent, let parentPath = ProcessTable.executablePath(for: parent) {
-            ancestry.append(ProcessAncestor(
-                pid: parent,
-                executablePath: parentPath,
-                bundleIdentifier: HostHarnessResolver.outermostAppBundlePath(forExecutable: parentPath)
-                    .flatMap { Bundle(path: $0)?.bundleIdentifier }
-            ))
-        }
-        return CLIProcessResolver.codexBundledProcessRole(ancestry: ancestry)
     }
 
     /// Scan a rollout backwards in chunks until the latest lifecycle marker is
@@ -7454,7 +6794,7 @@ final class AppState {
 
     /// Find active Codex sessions by matching running processes to session files
     private nonisolated static func findActiveCodexSessions(candidatePids: [pid_t]? = nil) -> [DiscoveredSession] {
-        let codexProcesses = findCodexProcesses(candidatePids: candidatePids)
+        let codexProcesses = AgentProcessFinder.findCodexProcesses(candidatePids: candidatePids)
         guard !codexProcesses.isEmpty else { return [] }
 
         let processes = codexProcesses.map { process in

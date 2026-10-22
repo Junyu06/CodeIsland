@@ -13,24 +13,24 @@ final class TraeCNIDEBundleTests: XCTestCase {
     private let internationalTrae = "/Applications/Trae.app/Contents/MacOS/Electron"
 
     func testRecognisesTheShippedBundleName() {
-        XCTAssertTrue(AppState.isTraeCNIDEBundlePath(mainBinary))
-        XCTAssertTrue(AppState.isTraeCNIDEBundlePath(pluginHelper))
+        XCTAssertTrue(AgentProcessFinder.isTraeCNIDEBundlePath(mainBinary))
+        XCTAssertTrue(AgentProcessFinder.isTraeCNIDEBundlePath(pluginHelper))
     }
 
     /// The product's `nameAlias` is now "TraeCode CN"; a bundle rename to it
     /// must keep working, as must the name this code first assumed.
     func testRecognisesTheAlternativeBundleNames() {
-        XCTAssertTrue(AppState.isTraeCNIDEBundlePath(
+        XCTAssertTrue(AgentProcessFinder.isTraeCNIDEBundlePath(
             "/Applications/TraeCode CN.app/Contents/MacOS/Electron"))
-        XCTAssertTrue(AppState.isTraeCNIDEBundlePath(
+        XCTAssertTrue(AgentProcessFinder.isTraeCNIDEBundlePath(
             "/Applications/TraeCN.app/Contents/MacOS/Electron"))
     }
 
     /// Before #341 `traecn` also matched `/trae.app/`, so an open international
     /// Trae kept Trae CN sessions alive (and vice versa for jump targets).
     func testDoesNotMatchInternationalTrae() {
-        XCTAssertFalse(AppState.isTraeCNIDEBundlePath(internationalTrae))
-        XCTAssertFalse(AppState.isTraeCNIDEBundlePath(
+        XCTAssertFalse(AgentProcessFinder.isTraeCNIDEBundlePath(internationalTrae))
+        XCTAssertFalse(AgentProcessFinder.isTraeCNIDEBundlePath(
             "/Applications/Trae.app/Contents/Frameworks/Trae Helper (Plugin).app/Contents/MacOS/Trae Helper (Plugin)"))
     }
 

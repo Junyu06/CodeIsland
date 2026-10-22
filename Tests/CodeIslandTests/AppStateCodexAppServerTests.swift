@@ -5,13 +5,13 @@ import XCTest
 @MainActor
 final class AppStateCodexAppServerTests: XCTestCase {
     func testCodexExecutablePathRecognizesChatGPTDesktopBundle() {
-        XCTAssertTrue(AppState.isCodexExecutablePath(
+        XCTAssertTrue(AgentProcessFinder.isCodexExecutablePath(
             "/Applications/ChatGPT.app/Contents/Resources/codex"
         ))
     }
 
     func testCodexExecutablePathRejectsUnrelatedResourceBinary() {
-        XCTAssertFalse(AppState.isCodexExecutablePath(
+        XCTAssertFalse(AgentProcessFinder.isCodexExecutablePath(
             "/Applications/OtherAgent.app/Contents/Resources/codex"
         ))
     }
@@ -20,13 +20,13 @@ final class AppStateCodexAppServerTests: XCTestCase {
     /// It also runs Codex CLI, so its path says Codex but not Desktop.
     func testBundledCodexCLIPathIsCodexButNotDesktopByPath() {
         let bundled = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
-        XCTAssertTrue(AppState.isBundledCodexCLIPath(bundled))
-        XCTAssertFalse(AppState.isCodexExecutablePath(bundled))
-        XCTAssertFalse(AppState.isBundledCodexCLIPath(
+        XCTAssertTrue(AgentProcessFinder.isBundledCodexCLIPath(bundled))
+        XCTAssertFalse(AgentProcessFinder.isCodexExecutablePath(bundled))
+        XCTAssertFalse(AgentProcessFinder.isBundledCodexCLIPath(
             "/Applications/OtherAgent.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
         ))
-        XCTAssertFalse(AppState.isBundledCodexCLIPath("/Applications/ChatGPT.app/Contents/Resources/codex"))
-        XCTAssertFalse(AppState.isBundledCodexCLIPath(
+        XCTAssertFalse(AgentProcessFinder.isBundledCodexCLIPath("/Applications/ChatGPT.app/Contents/Resources/codex"))
+        XCTAssertFalse(AgentProcessFinder.isBundledCodexCLIPath(
             "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
         ))
     }
