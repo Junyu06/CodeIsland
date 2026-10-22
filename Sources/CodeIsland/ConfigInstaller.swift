@@ -3832,7 +3832,7 @@ struct ConfigInstaller {
 
     /// Current OpenCode plugin version — bump when codeisland-opencode.js changes
     /// (the MiMo Code copy is the same file, so it follows this too).
-    private static let opencodePluginVersion = "v10"
+    private static let opencodePluginVersion = "v11"
 
     private static func isOpencodePluginInstalled(fm: FileManager) -> Bool {
         guard fm.fileExists(atPath: opencodePluginPath) else { return false }

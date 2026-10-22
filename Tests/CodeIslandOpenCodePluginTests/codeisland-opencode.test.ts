@@ -11,6 +11,8 @@ import plugin, {
   createV2Runtime,
   isPlaceholderTitle,
   permissionReplyFromDecision,
+  tabTitleSequence,
+  terminalTitleText,
   v2BridgeEnv,
   v2FormAnswer,
   v2IsSharedService,
@@ -345,6 +347,39 @@ describe("OpenCode 2 server placement", () => {
 // desktop app, whose engine it is — loads this file through `server()` with the
 // v1 event shapes (`{type, properties}`). CodeIsland installs it with the SOURCE
 // line rewritten (ConfigInstaller.mimoPluginSource), exactly as done here (#355).
+// The tab title written to the terminal (Ghostty, OSC 2) carries the model's
+// title or the prompt's words: plain text only, or a control character in them
+// ends the sequence early and starts one of its own (an OSC 52 clipboard write).
+describe("terminal tab title", () => {
+  const ESC = "\x1b";
+  const BEL = "\x07";
+  const controls = (s: string) => [...s].filter((c) => /[\u0000-\u001f\u007f-\u009f]/.test(c));
+
+  test("control characters in a title become spaces", () => {
+    expect(terminalTitleText("Fix\nthe\r\nbuild")).toBe("Fix the build");
+    expect(terminalTitleText(`a${ESC}]52;c;cm0gLXJmIH4=${BEL}b`)).toBe("a ]52;c;cm0gLXJmIH4= b");
+    expect(terminalTitleText("x\u009b31my\u009cz\u007f\u0000")).toBe("x 31my z ");
+    expect(terminalTitleText("Fix the build · 修复")).toBe("Fix the build · 修复");
+    expect(terminalTitleText(undefined)).toBe("");
+  });
+
+  test("the sequence is one OSC 2 whatever its parts hold", () => {
+    const evil = `t${BEL}${ESC}]52;c;ZWNobyBwd25lZA==${BEL}`;
+    const osc = tabTitleSequence(`proj${ESC}[2J`, evil, `ses${ESC}\\`);
+    expect(osc.startsWith(`${ESC}]2;`)).toBe(true);
+    expect(osc.endsWith(BEL)).toBe(true);
+    expect(controls(osc)).toEqual([ESC, BEL]);
+    expect(tabTitleSequence("proj", null, "ses_1")).toBe(`${ESC}]2;proj · ses_1${BEL}`);
+    expect(tabTitleSequence("proj", "Fix the build", "ses_1")).toBe(`${ESC}]2;proj · Fix the build · ses_1${BEL}`);
+  });
+
+  test("the plugin writes the title only through that sequence", () => {
+    const source = readFileSync(join(import.meta.dir, "../../Sources/CodeIsland/Resources/codeisland-opencode.js"), "utf8");
+    expect(source.split("\\x1b]2;").length).toBe(2);
+    expect(source).toContain("const osc = tabTitleSequence(project, displayTitle, prefix);");
+  });
+});
+
 describe("MiMo Code copy", () => {
   const SOURCE_MARKER = 'const SOURCE = "opencode";';
   const pluginPath = join(import.meta.dir, "../../Sources/CodeIsland/Resources/codeisland-opencode.js");
