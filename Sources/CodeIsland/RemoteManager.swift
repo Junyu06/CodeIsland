@@ -1,8 +1,23 @@
+import AppKit
+import CodeIslandCore
 import Foundation
+import Network
+import os.log
+
+/// The ssh tunnel behind one remote host: `SSHForwarder`, or a stand-in in tests.
+@MainActor
+protocol RemoteTunnel: AnyObject {
+    var onStatusChange: ((SSHForwarder.Status) -> Void)? { get set }
+    func connect(host: RemoteHost, localSocketPath: String, remoteSocketPath: String)
+    func disconnect()
+}
+
+extension SSHForwarder: RemoteTunnel {}
 
 @MainActor
 final class RemoteManager: ObservableObject {
     static let shared = RemoteManager()
+    private static let log = Logger(subsystem: "com.codeisland", category: "RemoteManager")
 
     @Published private(set) var hosts: [RemoteHost] = []
     @Published private(set) var connectionStatus: [String: SSHForwarder.Status] = [:]
@@ -11,35 +26,56 @@ final class RemoteManager: ObservableObject {
 
     var onDisconnect: ((String) -> Void)?
 
-    private var forwarders: [String: SSHForwarder] = [:]
+    private var forwarders: [String: any RemoteTunnel] = [:]
     // Per-user remote socket path resolved at connect time (#193). Keyed by host id;
     // reused by installHooks so the SSH -R forward and the remote hooks agree.
     private var remoteSocketPaths: [String: String] = [:]
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
     private let hostsKey = "remoteHosts"
 
     // Auto-reconnect (#92): when an ssh tunnel drops without the user asking for
-    // it (laptop sleep / network blip / server bounce), schedule a retry with
-    // exponential backoff instead of leaving the host silently disconnected.
+    // it (laptop sleep / network blip / server bounce), retry with backoff
+    // instead of leaving the host silently disconnected. Waking up and the
+    // network coming back restart hosts that are still down (#375). Published
+    // so Settings can tell a failed host that is still trying.
+    @Published private var reconnectPolicy: RemoteReconnectPolicy
     private var reconnectTasks: [String: Task<Void, Never>] = [:]
-    private var reconnectAttempts: [String: Int] = [:]
+    private var recoveryTask: Task<Void, Never>?
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var pathMonitor: NWPathMonitor?
+    // One token per connect. The remote socket-path probe runs before ssh
+    // starts; a Disconnect or a newer connect in the meantime retires it.
+    private var connectTokens: [String: UInt64] = [:]
+    private var lastConnectToken: UInt64 = 0
 
-    private static let reconnectBackoffSeconds: [Int] = [5, 15, 45, 120, 300]
-    private static let reconnectMaxAttempts = 10
+    private let now: () -> Date
+    private let makeTunnel: @MainActor () -> any RemoteTunnel
+    private let probeSocketPath: (RemoteHost) async -> String
+    private let installRemoteHooks: (RemoteHost, String) async -> RemoteInstallResult
 
-    /// Delay (seconds) before the nth reconnect attempt (1-based). Clamped to the
-    /// last entry for attempts beyond the table.
-    static func reconnectDelay(attempt: Int) -> Int {
-        guard attempt >= 1 else { return reconnectBackoffSeconds[0] }
-        let idx = min(attempt - 1, reconnectBackoffSeconds.count - 1)
-        return reconnectBackoffSeconds[idx]
-    }
-
-    private init() {
+    /// Everything after `reconnectPolicy` reaches ssh or the clock; tests pass
+    /// stand-ins.
+    init(
+        defaults: UserDefaults = .standard,
+        reconnectPolicy: RemoteReconnectPolicy = RemoteReconnectPolicy(),
+        now: @escaping () -> Date = Date.init,
+        makeTunnel: @escaping @MainActor () -> any RemoteTunnel = { SSHForwarder() },
+        probeSocketPath: @escaping (RemoteHost) async -> String = { await RemoteInstaller.prepareRemoteSocketPath(host: $0) },
+        installRemoteHooks: @escaping (RemoteHost, String) async -> RemoteInstallResult = {
+            await RemoteInstaller.installAll(host: $0, remoteSocketPath: $1)
+        }
+    ) {
+        self.defaults = defaults
+        self.reconnectPolicy = reconnectPolicy
+        self.now = now
+        self.makeTunnel = makeTunnel
+        self.probeSocketPath = probeSocketPath
+        self.installRemoteHooks = installRemoteHooks
         load()
     }
 
     func startup() {
+        startRecoveryTriggers()
         for host in hosts where host.autoConnect {
             connect(id: host.id)
         }
@@ -77,6 +113,7 @@ final class RemoteManager: ObservableObject {
 
     func removeHost(id: String) {
         disconnect(id: id)
+        reconnectPolicy.forget(id)
         hosts.removeAll { $0.id == id }
         connectionStatus[id] = .disconnected
         installRunning[id] = false
@@ -90,35 +127,58 @@ final class RemoteManager: ObservableObject {
     }
 
     func connect(id: String) {
-        // User-initiated connect (or autoConnect at startup): clear any pending
-        // reconnect countdown and reset the backoff attempt counter.
-        cancelScheduledReconnect(id: id)
-        reconnectAttempts[id] = nil
-        connectInternal(id: id)
+        // User-initiated connect (or autoConnect at startup): the host is wanted
+        // from now on. Drops any pending retry and starts with a fresh backoff.
+        apply(reconnectPolicy.userConnected(id), to: id)
+    }
+
+    /// Whether the user still wants this host connected. A failed host then
+    /// keeps coming back on its own (retries, wake, network) until Disconnect.
+    func wantsConnection(id: String) -> Bool {
+        reconnectPolicy.wantsConnection(id)
+    }
+
+    /// Where the host stands in the reconnect cycle.
+    func reconnectPhase(id: String) -> RemoteReconnectPolicy.Phase {
+        reconnectPolicy.phase(of: id)
     }
 
     private func connectInternal(id: String) {
-        guard let host = hosts.first(where: { $0.id == id }) else { return }
+        guard let host = hosts.first(where: { $0.id == id }) else {
+            reconnectPolicy.forget(id)
+            return
+        }
         guard !host.sshTarget.isEmpty else {
+            reconnectPolicy.connectAborted(id)
             connectionStatus[id] = .failed("invalid host")
             lastMessage[id] = "invalid host"
             return
         }
 
-        let forwarder = forwarders[id] ?? SSHForwarder()
+        let forwarder = forwarders[id] ?? makeTunnel()
         forwarders[id] = forwarder
-        forwarder.onStatusChange = { [weak self] status in
+        forwarder.onStatusChange = { [weak self, weak forwarder] status in
             Task { @MainActor in
-                self?.handleStatusChange(status, for: host)
+                // Late news from a tunnel that Disconnect already dropped (its
+                // own .disconnected included) must not overwrite what replaced it.
+                guard let self, let forwarder, self.forwarders[host.id] === forwarder else { return }
+                self.handleStatusChange(status, for: host)
             }
         }
 
+        lastConnectToken &+= 1
+        let token = lastConnectToken
+        connectTokens[id] = token
         connectionStatus[id] = .connecting
         lastMessage[id] = host.displayAddress
 
         Task {
-            let remoteSocketPath = await RemoteInstaller.prepareRemoteSocketPath(host: host)
+            let remoteSocketPath = await probeSocketPath(host)
             await MainActor.run {
+                // The probe takes seconds. A Disconnect meanwhile must not be
+                // followed by a tunnel nothing can stop any more, and of two
+                // overlapping connects only the newer one starts ssh.
+                guard self.connectTokens[id] == token, self.forwarders[id] === forwarder else { return }
                 self.remoteSocketPaths[host.id] = remoteSocketPath
                 forwarder.connect(host: host, localSocketPath: HookServer.socketPath, remoteSocketPath: remoteSocketPath)
             }
@@ -127,7 +187,10 @@ final class RemoteManager: ObservableObject {
 
     func disconnect(id: String) {
         cancelScheduledReconnect(id: id)
-        reconnectAttempts[id] = nil
+        // An explicit Disconnect: no retry, wake or network change brings the
+        // host back until the user connects again.
+        reconnectPolicy.userDisconnected(id)
+        connectTokens[id] = nil
         forwarders[id]?.disconnect()
         forwarders[id] = nil
         remoteSocketPaths[id] = nil
@@ -141,18 +204,23 @@ final class RemoteManager: ObservableObject {
 
         switch status {
         case .connected:
-            // Tunnel is up again — forget previous failure counter.
-            reconnectAttempts[host.id] = nil
+            reconnectPolicy.tunnelConnected(host.id, now: now())
             cancelScheduledReconnect(id: host.id)
             Task { await installHooks(for: host) }
         case .failed(let message):
             installRunning[host.id] = false
             lastMessage[host.id] = message
             onDisconnect?(host.id)
-            scheduleReconnect(for: host)
+            // Only Auto-connect hosts retry on a timer, so a typo in a manual
+            // host isn't retried over and over (#92).
+            let autoRetry = hosts.first(where: { $0.id == host.id })?.autoConnect ?? false
+            let step = reconnectPolicy.tunnelFailed(host.id, autoRetry: autoRetry, now: now())
+            Self.log.notice("remote \(host.id, privacy: .public) failed (\(message)): \(String(describing: step), privacy: .public)")
+            apply(step, to: host.id)
         case .disconnected:
-            // User-initiated disconnects go through disconnect(id:) which already
-            // cleared reconnect state before we get here.
+            // User-initiated disconnects go through disconnect(id:), which
+            // drops the tunnel before its report arrives; this is the tunnel
+            // resetting itself at the start of a retry.
             installRunning[host.id] = false
             onDisconnect?(host.id)
         case .connecting:
@@ -160,32 +228,38 @@ final class RemoteManager: ObservableObject {
         }
     }
 
-    private func scheduleReconnect(for host: RemoteHost) {
-        // Only auto-reconnect hosts the user opted into; otherwise a failing
-        // manually-triggered connect would keep retrying forever.
-        guard host.autoConnect else { return }
+    // MARK: - Retries
 
-        cancelScheduledReconnect(id: host.id)
-        let nextAttempt = (reconnectAttempts[host.id] ?? 0) + 1
-        guard nextAttempt <= Self.reconnectMaxAttempts else {
-            lastMessage[host.id] = "Gave up after \(Self.reconnectMaxAttempts) reconnect attempts"
-            return
+    /// Carries out what the reconnect policy decided for one host.
+    private func apply(_ step: RemoteReconnectPolicy.Step, to id: String) {
+        let l10n = L10n.shared
+        switch step {
+        case .none:
+            break
+        case .connect:
+            cancelScheduledReconnect(id: id)
+            connectInternal(id: id)
+        case .retry(let delay, let attempt):
+            lastMessage[id] = String(format: l10n["remote_retry_in"], Int(delay), attempt, reconnectPolicy.config.fastAttempts)
+            scheduleRetry(id: id, after: delay)
+        case .retrySlowly(let delay, let failures):
+            lastMessage[id] = String(format: l10n["remote_retry_slow"], failures, max(1, Int(delay / 60)))
+            scheduleRetry(id: id, after: delay)
+        case .waitForNetwork(let recheck):
+            lastMessage[id] = l10n["remote_waiting_network"]
+            scheduleRetry(id: id, after: recheck)
         }
-        reconnectAttempts[host.id] = nextAttempt
-        let delay = Self.reconnectDelay(attempt: nextAttempt)
-        lastMessage[host.id] = "Reconnecting in \(delay)s (attempt \(nextAttempt)/\(Self.reconnectMaxAttempts))"
+    }
 
-        let hostId = host.id
-        reconnectTasks[hostId] = Task { [weak self] in
+    private func scheduleRetry(id: String, after delay: TimeInterval) {
+        cancelScheduledReconnect(id: id)
+        reconnectTasks[id] = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                guard let self else { return }
-                // Task may have been cancelled after the sleep; double-check.
-                guard self.reconnectTasks[hostId] != nil else { return }
-                self.reconnectTasks[hostId] = nil
-                self.connectInternal(id: hostId)
-            }
+            // Cancelled and checked on the main actor, so a timer that was
+            // replaced or cancelled never gets past this line.
+            guard !Task.isCancelled, let self else { return }
+            self.reconnectTasks[id] = nil
+            self.apply(self.reconnectPolicy.retryDue(id), to: id)
         }
     }
 
@@ -194,10 +268,68 @@ final class RemoteManager: ObservableObject {
         reconnectTasks[id] = nil
     }
 
+    // MARK: - Wake and network recovery (#375)
+
+    /// Watches for the Mac waking up and the network coming back. Idempotent.
+    private func startRecoveryTriggers() {
+        guard workspaceObservers.isEmpty else { return }
+        let center = NSWorkspace.shared.notificationCenter
+        // screensDidWake too: after a dark wake (Power Nap) the system is
+        // already up when the lid opens, so the displays coming on may be the
+        // only wake an app sees.
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+            workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.systemDidWake() }
+            })
+        }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let satisfied = path.status == .satisfied
+            MainActor.assumeIsolated { self?.networkPathChanged(satisfied: satisfied) }
+        }
+        monitor.start(queue: .main)
+        pathMonitor = monitor
+    }
+
+    /// The Mac (or its displays) woke up: every wanted host gets a fresh
+    /// backoff, and those still down reconnect once the network has settled.
+    func systemDidWake() {
+        reconnectPolicy.systemWoke()
+        Self.log.notice("wake: recovering remote hosts")
+        scheduleRecovery(after: reconnectPolicy.config.wakeSettle)
+    }
+
+    /// A report from the network path monitor.
+    func networkPathChanged(satisfied: Bool) {
+        let previous = reconnectPolicy.networkSatisfied
+        let cameBack = reconnectPolicy.networkChanged(satisfied: satisfied)
+        if previous != satisfied {
+            Self.log.notice("network \(satisfied ? "up" : "down", privacy: .public)")
+        }
+        if cameBack {
+            scheduleRecovery(after: reconnectPolicy.config.networkSettle)
+        }
+    }
+
+    /// One recovery pass after `delay`. Another wake or network event in the
+    /// meantime restarts the wait, so a burst of them makes a single pass.
+    private func scheduleRecovery(after delay: TimeInterval) {
+        recoveryTask?.cancel()
+        recoveryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self else { return }
+            self.recoveryTask = nil
+            for (id, step) in self.reconnectPolicy.recover() {
+                Self.log.notice("remote \(id, privacy: .public) recovery: \(String(describing: step), privacy: .public)")
+                self.apply(step, to: id)
+            }
+        }
+    }
+
     private func installHooks(for host: RemoteHost) async {
         installRunning[host.id] = true
         let remoteSocketPath = remoteSocketPaths[host.id] ?? host.remoteSocketPath
-        let result = await RemoteInstaller.installAll(host: host, remoteSocketPath: remoteSocketPath)
+        let result = await installRemoteHooks(host, remoteSocketPath)
         installRunning[host.id] = false
         lastMessage[host.id] = result.message
         if !result.ok {

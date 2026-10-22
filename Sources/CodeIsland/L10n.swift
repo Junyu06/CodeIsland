@@ -462,6 +462,9 @@ final class L10n: ObservableObject {
         "remote_disconnected": "Disconnected",
         "remote_disconnect": "Disconnect",
         "remote_remove": "Remove",
+        "remote_retry_in": "Reconnecting in %d s (attempt %d/%d)",
+        "remote_retry_slow": "Still unreachable after %d attempts; trying again in %d min",
+        "remote_waiting_network": "Offline; reconnects when the network is back",
 
         // Buddy
         "buddy": "Buddy",
@@ -1039,6 +1042,9 @@ final class L10n: ObservableObject {
         "remote_disconnected": "Getrennt",
         "remote_disconnect": "Trennen",
         "remote_remove": "Entfernen",
+        "remote_retry_in": "Erneute Verbindung in %d s (Versuch %d/%d)",
+        "remote_retry_slow": "Nach %d Versuchen nicht erreichbar; nächster Versuch in %d Min.",
+        "remote_waiting_network": "Offline – verbindet sich wieder, sobald das Netzwerk zurück ist",
 
         // Buddy
         "buddy": "Buddy",
@@ -1616,6 +1622,9 @@ final class L10n: ObservableObject {
         "remote_disconnected": "未连接",
         "remote_disconnect": "断开",
         "remote_remove": "删除",
+        "remote_retry_in": "%d 秒后重新连接（第 %d/%d 次）",
+        "remote_retry_slow": "已连续失败 %d 次，%d 分钟后再试",
+        "remote_waiting_network": "网络已断开，恢复后自动重新连接",
 
         // Buddy
         "buddy": "Buddy",
@@ -2193,6 +2202,9 @@ final class L10n: ObservableObject {
         "remote_disconnected": "未連線",
         "remote_disconnect": "中斷連線",
         "remote_remove": "刪除",
+        "remote_retry_in": "%d 秒後重新連線（第 %d/%d 次）",
+        "remote_retry_slow": "已連續失敗 %d 次，%d 分鐘後再試",
+        "remote_waiting_network": "網路已中斷，恢復後自動重新連線",
 
         // Buddy
         "buddy": "Buddy",
@@ -2770,6 +2782,9 @@ final class L10n: ObservableObject {
         "remote_disconnected": "未接続",
         "remote_disconnect": "切断",
         "remote_remove": "削除",
+        "remote_retry_in": "%d 秒後に再接続（%d/%d 回目）",
+        "remote_retry_slow": "%d 回続けて失敗しました。%d 分後に再試行します",
+        "remote_waiting_network": "オフライン：ネットワーク復帰後に自動で再接続します",
 
         // Buddy
         "buddy": "Buddy",
@@ -3347,6 +3362,9 @@ final class L10n: ObservableObject {
         "remote_disconnected": "연결 끊김",
         "remote_disconnect": "연결 해제",
         "remote_remove": "삭제",
+        "remote_retry_in": "%d초 후 다시 연결 (%d/%d번째 시도)",
+        "remote_retry_slow": "%d회 연속 실패, %d분 후 다시 시도합니다",
+        "remote_waiting_network": "오프라인: 네트워크가 복구되면 다시 연결합니다",
 
         // Buddy
         "buddy": "Buddy",
@@ -3924,6 +3942,9 @@ final class L10n: ObservableObject {
         "remote_disconnected": "Bağlı Değil",
         "remote_disconnect": "Bağlantıyı Kes",
         "remote_remove": "Kaldır",
+        "remote_retry_in": "%d sn sonra yeniden bağlanılacak (deneme %d/%d)",
+        "remote_retry_slow": "%d denemeden sonra hâlâ ulaşılamıyor; %d dk sonra yeniden denenecek",
+        "remote_waiting_network": "Çevrimdışı; ağ geri geldiğinde yeniden bağlanacak",
 
         // Buddy
         "buddy": "Buddy",

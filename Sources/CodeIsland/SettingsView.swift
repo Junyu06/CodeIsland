@@ -269,6 +269,13 @@ private struct RemoteHostRow: View {
                     Button(l10n["remote_connect"]) {
                         remoteManager.connect(id: host.id)
                     }
+                    // Failed but still wanted: it keeps coming back on its own
+                    // (retries, wake, network) until told to stop.
+                    if remoteManager.wantsConnection(id: host.id) {
+                        Button(l10n["remote_disconnect"]) {
+                            remoteManager.disconnect(id: host.id)
+                        }
+                    }
                 }
 
                 Button(l10n["reinstall"]) {
