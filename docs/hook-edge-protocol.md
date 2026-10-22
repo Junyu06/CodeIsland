@@ -28,9 +28,14 @@ quirk is then fixed once, in HookIntake, for every edge.
   the reply for a short while anyway (the remote hook 2 s, the bridge 1 s):
   losing one left a card behind. A tool step (an event that maps to
   `PreToolUse`, `PostToolUse` or `PostToolUseFailure`) may close at once: it
-  fires on every tool call while the agent waits for the hook to exit, a reply
-  would add a round trip to each of them, and losing one to an older island
-  is harmless.
+  fires on every tool call while the agent waits for the hook to exit, and a
+  reply would add a round trip to each of them. An older island loses nearly
+  every such step — its main thread reached the connection only after the
+  hook had closed — so there the card shows neither the running tool nor
+  the tool history; the lifecycle events, which read their reply, still keep
+  the session's state right. Steps that close at once may also arrive out of
+  order (a long `PostToolUse` after the next `PreToolUse`); the island tells
+  them apart by their tool use id, where the agent gives one.
 - If the island is not running, exit 0 silently.
 
 ## Payload
