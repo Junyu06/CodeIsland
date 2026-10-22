@@ -1,8 +1,88 @@
 import Darwin
 import Foundation
 import os.log
+import CodeIslandCore
 
 private let log = Logger(subsystem: "com.codeisland", category: "HookServer")
+
+/// How much of the island the hooks on one socket may take.
+///
+/// This Mac's hooks are the user's own processes, and keep what they always
+/// had. A remote host's socket is the end of its SSH forward: whoever can
+/// reach the island's socket on that host — every user there, when its
+/// agents run as other users — reaches this one, and must not be able to
+/// hold the island's descriptors (one per connection, from a limit every
+/// socket shares), its memory or its cards. So a host gets a bounded share:
+/// so many connections at once, so many requests waiting on an answer,
+/// smaller requests, and a time by which each must have arrived. What goes
+/// past it is that host's loss alone.
+struct HookSocketLimits: Equatable, Sendable {
+    /// The most one request may be, in bytes.
+    var maxRequestBytes: Int
+    /// How long a hook may send nothing before its request is complete.
+    var readIdleTimeout: TimeInterval
+    /// How long a request may take to arrive in all, however steadily it
+    /// trickles in; nil: as long as it keeps coming.
+    var readDeadline: TimeInterval?
+    /// The most connections open at once; one more is closed the moment it
+    /// is accepted. Nil: no bound.
+    var maxConnections: Int?
+    /// The most bytes of unfinished requests the socket's connections hold
+    /// between them; the connection that would pass it is dropped. Nil: no
+    /// bound.
+    var maxBufferedBytes: Int?
+    /// The most requests held for an answer at once (permission requests,
+    /// questions); one more is answered at once with nothing, so its agent
+    /// asks in its own way. Nil: no bound.
+    var maxHeldRequests: Int?
+
+    /// This Mac's socket: as it always was.
+    static let local = HookSocketLimits(
+        maxRequestBytes: 10_485_760,
+        readIdleTimeout: HookConnection.readIdleTimeout
+    )
+
+    /// A remote host's socket. A hook writes its request at once; the
+    /// deadline leaves a slow SSH link minutes for the largest one.
+    static let remoteHost = HookSocketLimits(
+        maxRequestBytes: 1_048_576,
+        readIdleTimeout: HookConnection.readIdleTimeout,
+        readDeadline: 300,
+        maxConnections: 64,
+        maxBufferedBytes: 8_388_608,
+        maxHeldRequests: 32
+    )
+
+    /// The limits of a socket whose requests come from `origin`.
+    static func `for`(_ origin: HookOrigin) -> HookSocketLimits {
+        if case .remoteHost = origin { return .remoteHost }
+        return .local
+    }
+}
+
+/// The bytes of unfinished requests a socket's connections hold between
+/// them (``HookSocketLimits/maxBufferedBytes``). Used on the listener's
+/// queue only.
+final class HookReadBudget: @unchecked Sendable {
+    let limit: Int
+    private(set) var used = 0
+
+    init(limit: Int) {
+        self.limit = limit
+    }
+
+    /// Takes `count` bytes; false, taking nothing, when that would pass the
+    /// limit.
+    func take(_ count: Int) -> Bool {
+        guard count <= limit - used else { return false }
+        used += count
+        return true
+    }
+
+    func give(_ count: Int) {
+        used -= min(count, used)
+    }
+}
 
 /// The island's end of the hook socket: a Unix-domain stream listener that
 /// accepts and reads every connection on its own queue, off the main thread.
@@ -17,19 +97,33 @@ private let log = Logger(subsystem: "com.codeisland", category: "HookServer")
 final class HookSocketListener: @unchecked Sendable {
     let path: String
     private let queue: DispatchQueue
+    private let maxConnections: Int?
     private let onConnection: @Sendable (HookConnection) -> Void
     // On `queue`, once started.
     private var source: DispatchSourceRead?
     private var paused = false
+    /// Accepted connections not yet closed.
+    private var openConnections = 0
+    /// Connections are being turned away (``maxConnections``): logged once
+    /// each time it starts.
+    private var turningAway = false
     /// The socket file start() made, by device and inode, so that
     /// removeSocketFile() never takes one that has taken its place. Set and
     /// read on the thread that starts and removes the listener.
     private var madeFile: (device: dev_t, inode: ino_t)?
 
-    /// `onConnection` gets each accepted connection, on `queue`.
-    init(path: String, queue: DispatchQueue, onConnection: @escaping @Sendable (HookConnection) -> Void) {
+    /// `onConnection` gets each accepted connection, on `queue`. With
+    /// `maxConnections`, a connection accepted while that many are open is
+    /// closed at once: its hook finds no island.
+    init(
+        path: String,
+        queue: DispatchQueue,
+        maxConnections: Int? = nil,
+        onConnection: @escaping @Sendable (HookConnection) -> Void
+    ) {
         self.path = path
         self.queue = queue
+        self.maxConnections = maxConnections
         self.onConnection = onConnection
     }
 
@@ -125,7 +219,20 @@ final class HookSocketListener: @unchecked Sendable {
         while true {
             let client = accept(listener, nil, nil)
             if client >= 0 {
-                onConnection(HookConnection(fd: client, queue: queue))
+                if let maxConnections, openConnections >= maxConnections {
+                    // Accepted only to be closed: left queued, it would fill
+                    // the backlog for good.
+                    Darwin.close(client)
+                    if !turningAway {
+                        turningAway = true
+                        log.warning("HookServer: \(self.path, privacy: .public) already has \(maxConnections) connections open; turning more away")
+                    }
+                    continue
+                }
+                openConnections += 1
+                let connection = HookConnection(fd: client, queue: queue)
+                connection.onClose { [weak self] in self?.connectionClosed() }
+                onConnection(connection)
                 continue
             }
             let error = errno
@@ -145,6 +252,14 @@ final class HookSocketListener: @unchecked Sendable {
             default:
                 return  // EAGAIN: none left
             }
+        }
+    }
+
+    /// An accepted connection closed. On `queue`.
+    private func connectionClosed() {
+        openConnections -= 1
+        if turningAway, openConnections < (maxConnections ?? .max) {
+            turningAway = false
         }
     }
 
@@ -306,8 +421,12 @@ final class HookConnection: @unchecked Sendable {
         /// The connection failed before a single byte.
         case failed
         /// The hook sent nothing for the idle timeout and did not finish:
-        /// it stalled, or never half-closed. What came is not used.
+        /// it stalled, or never half-closed — or its request was still not
+        /// complete by the read deadline. What came is not used.
         case stalled
+        /// The socket's connections already hold all the unfinished
+        /// requests they may (``HookReadBudget``); the rest is not read.
+        case overBudget
     }
 
     /// How long a hook may send nothing before its request is complete (its
@@ -333,6 +452,8 @@ final class HookConnection: @unchecked Sendable {
     /// is closed only once they are gone.
     private var sourcesOnDescriptor = 0
     private var received = Data()
+    /// The budget `received` counts against, while it is read.
+    private var readBudget: HookReadBudget?
     private var unsent = Data()
     private var answered = false
     private var finishing = false
@@ -355,6 +476,10 @@ final class HookConnection: @unchecked Sendable {
         // cancelled and done — so the descriptor is closed here, once.
         guard !closed else { return }
         if let peerWatchToken { peerWatch.unwatch(peerWatchToken) }
+        if let readBudget, !received.isEmpty {
+            let count = received.count
+            queue.async { readBudget.give(count) }
+        }
         Darwin.close(fd)
         let handlers = closeHandlers
         if !handlers.isEmpty {
@@ -364,16 +489,29 @@ final class HookConnection: @unchecked Sendable {
 
     /// Reads what the hook sends, to its EOF, and hands it to `completion`
     /// on the queue — ``Request/stalled`` once nothing has come for
-    /// `idleTimeout`. Called once, on the queue.
+    /// `idleTimeout`, or the request is still not complete `deadline` after
+    /// the read began; ``Request/overBudget`` once what it sent would pass
+    /// what `budget` has left. Called once, on the queue.
     func readRequest(
         limit: Int,
         idleTimeout: TimeInterval = HookConnection.readIdleTimeout,
+        deadline: TimeInterval? = nil,
+        budget: HookReadBudget? = nil,
         completion: @escaping (Request) -> Void
     ) {
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         let idle = DispatchSource.makeTimerSource(queue: queue)
         reader = source
         readerIdle = idle
+        readBudget = budget
+        // The idle timer, re-armed by every chunk, never past the deadline:
+        // a hook that trickles a byte now and then is still cut off there.
+        let cutoff = deadline.map { DispatchTime.now() + $0 }
+        let nextCheck = { () -> DispatchTime in
+            let idleEnd = DispatchTime.now() + idleTimeout
+            guard let cutoff else { return idleEnd }
+            return min(idleEnd, cutoff)
+        }
         let handOver = { [self] (request: Request) in
             reader?.cancel()
             reader = nil
@@ -381,6 +519,7 @@ final class HookConnection: @unchecked Sendable {
             readerIdle = nil
             // Handed over: a held connection, which may wait for hours,
             // keeps none of its request (up to `limit` bytes).
+            releaseReadBudget()
             received = Data()
             completion(request)
         }
@@ -390,18 +529,28 @@ final class HookConnection: @unchecked Sendable {
             if let request = readAvailable(limit: limit) {
                 handOver(request)
             } else if received.count > before {
-                idle.schedule(deadline: .now() + idleTimeout)
+                idle.schedule(deadline: nextCheck())
             }
         }
         idle.setEventHandler { [self] in
             guard reader != nil else { return }
-            log.warning("HookServer: a hook sent nothing for \(Int(idleTimeout)) s before its EOF; dropping it")
+            if let cutoff, DispatchTime.now() >= cutoff {
+                log.warning("HookServer: a hook's request was still not complete after \(Int(deadline ?? 0)) s; dropping it")
+            } else {
+                log.warning("HookServer: a hook sent nothing for \(Int(idleTimeout)) s before its EOF; dropping it")
+            }
             handOver(.stalled)
         }
         countOnDescriptor(source)
-        idle.schedule(deadline: .now() + idleTimeout)
+        idle.schedule(deadline: nextCheck())
         source.resume()
         idle.resume()
+    }
+
+    /// Gives back what the request read so far took from its budget.
+    private func releaseReadBudget() {
+        readBudget?.give(received.count)
+        readBudget = nil
     }
 
     /// The bytes of its request the connection still keeps. For tests.
@@ -479,8 +628,9 @@ final class HookConnection: @unchecked Sendable {
             while true {
                 let count = read(fd, buffer.baseAddress, buffer.count)
                 if count > 0 {
+                    if received.count + count > limit { return .tooLarge }
+                    if let readBudget, !readBudget.take(count) { return .overBudget }
                     received.append(buffer.baseAddress!.assumingMemoryBound(to: UInt8.self), count: count)
-                    if received.count > limit { return .tooLarge }
                     continue
                 }
                 if count == 0 { return .received(received) }
@@ -552,6 +702,8 @@ final class HookConnection: @unchecked Sendable {
         reader = nil
         readerIdle?.cancel()
         readerIdle = nil
+        releaseReadBudget()
+        received = Data()
         writer?.cancel()
         writer = nil
         if let peerWatchToken {

@@ -76,22 +76,24 @@ final class HookServerTransportTests: XCTestCase {
     }
 
     /// Replaces the server with one on a socket of its own, checking held
-    /// requests' hooks every `heldRequestCheckInterval` and letting a hook
-    /// send nothing for `readIdleTimeout` before its request is complete.
+    /// requests' hooks every `heldRequestCheckInterval`, with a remote
+    /// host's limits as `adjust` changes them.
     private func restartServer(
         heldRequestCheckInterval: TimeInterval = 300,
-        readIdleTimeout: TimeInterval = HookConnection.readIdleTimeout
+        _ adjust: (inout HookSocketLimits) -> Void = { _ in }
     ) {
         server.stop()
         unlink(socketPath)
         socketPath = "/tmp/ci-ht-\(UUID().uuidString.prefix(8)).sock"
+        var limits = HookSocketLimits.remoteHost
+        adjust(&limits)
         server = HookServer(
             appState: appState,
             socketPath: socketPath,
             origin: Self.buildBox,
             hostCwdFilter: { _ in nil },
             heldRequestCheckInterval: heldRequestCheckInterval,
-            readIdleTimeout: readIdleTimeout
+            limits: limits
         )
         XCTAssertTrue(server.start(), "HookServer did not listen on \(socketPath!)")
     }
@@ -199,7 +201,7 @@ final class HookServerTransportTests: XCTestCase {
     /// is let go after the read's idle timeout instead of holding its
     /// socket forever.
     func testAHookThatNeverFinishesItsRequestIsLetGo() throws {
-        restartServer(readIdleTimeout: 0.3)
+        restartServer { $0.readIdleTimeout = 0.3 }
         let hook = try XCTUnwrap(RawHook.connect(to: socketPath))
         hook.writeWithoutFinishing(#"{"hook_event_name":"Stop","#)
 
@@ -213,7 +215,7 @@ final class HookServerTransportTests: XCTestCase {
     /// The read's idle timeout ends with the request: the wait for a held
     /// request's answer that follows is not bound by it.
     func testAHeldRequestIsNotBoundByTheReadTimeout() throws {
-        restartServer(readIdleTimeout: 0.2)
+        restartServer { $0.readIdleTimeout = 0.2 }
         let hook = try XCTUnwrap(RawHook.connect(to: socketPath))
         hook.write(permissionPayload(session: "slow-user", toolUseId: "tu-slow"))
         let answer = hook.readAnswerInBackground()
@@ -394,6 +396,185 @@ final class HookServerTransportTests: XCTestCase {
         XCTAssertNil(appState.pendingPermission)
         hook.close()
     }
+
+    // MARK: - A remote host's share of the island
+
+    /// What one remote host may take, and what this Mac's hooks keep.
+    func testARemoteHostGetsABoundedShareAndThisMacKeepsItsOwn() {
+        XCTAssertEqual(server.limits, .remoteHost, "a remote host's socket takes a remote host's limits")
+        XCTAssertEqual(HookServer(appState: appState, socketPath: "/tmp/ci-unused.sock").limits, .local)
+        XCTAssertEqual(HookSocketLimits.local.maxRequestBytes, 10_485_760, "this Mac's requests stay up to 10 MB")
+        XCTAssertNil(HookSocketLimits.local.maxConnections)
+        XCTAssertNil(HookSocketLimits.local.maxHeldRequests)
+        XCTAssertNil(HookSocketLimits.local.maxBufferedBytes)
+        XCTAssertNil(HookSocketLimits.local.readDeadline)
+        let remote = HookSocketLimits.remoteHost
+        XCTAssertEqual(remote.maxRequestBytes, 1_048_576)
+        XCTAssertNotNil(remote.maxConnections)
+        XCTAssertNotNil(remote.maxHeldRequests)
+        XCTAssertNotNil(remote.maxBufferedBytes)
+        XCTAssertGreaterThanOrEqual(remote.readDeadline ?? 0, 120, "minutes for a slow SSH link")
+        // Many hosts at their caps together stay far from the descriptors
+        // every socket shares.
+        XCTAssertLessThan((remote.maxConnections ?? .max) * 16, Int(HookSocketListener.wantedDescriptorLimit))
+        XCTAssertLessThanOrEqual(remote.maxHeldRequests ?? .max, remote.maxConnections ?? .max)
+    }
+
+    /// A remote host's request may be a megabyte, no more: the rest is not
+    /// read, and nothing reaches a card.
+    func testARemoteHostsRequestOverAMegabyteIsDenied() throws {
+        let hook = try XCTUnwrap(RawHook.connect(to: socketPath))
+        let answer = hook.writeInBackground(Data(repeating: UInt8(ascii: " "), count: 1_048_577), thenRead: true)
+        pump(until: { answer.value != nil }, timeout: 10, "no answer to an oversized request")
+        XCTAssertTrue(String(decoding: answer.value ?? Data(), as: UTF8.self).contains(#""behavior":"deny""#))
+        XCTAssertNil(appState.pendingPermission)
+        hook.close()
+    }
+
+    /// This Mac's hooks keep their 10 MB: a request of several megabytes is
+    /// handled.
+    func testThisMacsHooksStillSendRequestsOfSeveralMegabytes() throws {
+        let local = try startLocalServer()
+        defer { stopLocalServer(local) }
+        let message = String(repeating: "x", count: 3_000_000)
+        let payload = #"{"hook_event_name":"Stop","session_id":"big-local","cwd":"/tmp","_source":"claude","last_assistant_message":"\#(message)"}"#
+        let hook = try XCTUnwrap(RawHook.connect(to: local.socketPath))
+        let answer = hook.writeInBackground(Data(payload.utf8), thenRead: true)
+        pump(until: { answer.value != nil }, timeout: 10, "no answer to a large local request")
+        XCTAssertEqual(String(decoding: answer.value ?? Data(), as: UTF8.self), "{}", "a local request of 3 MB was refused")
+        hook.close()
+    }
+
+    /// A remote host may hold so many connections open at once. One more is
+    /// closed at once — its hook finds no island — while this Mac's socket
+    /// answers as ever; and the host's socket takes connections again once
+    /// one of its own closes.
+    func testARemoteHostMayHoldSoManyConnectionsAndThisMacStillAnswers() throws {
+        restartServer { $0.maxConnections = 3 }
+        // Three hooks that never finish their requests hold the host's share.
+        let holding = try (0..<3).map { _ -> RawHook in
+            let hook = try XCTUnwrap(RawHook.connect(to: socketPath))
+            hook.writeWithoutFinishing(#"{"hook_event_name":"Stop","#)
+            return hook
+        }
+        defer { holding.forEach { $0.close() } }
+        pump(for: 0.3)
+        let turnedAway = try XCTUnwrap(RawHook.connect(to: socketPath))
+        let refused = turnedAway.readAnswerInBackground(timeout: 3)
+        pump(until: { refused.value != nil }, timeout: 6, "a connection past the host's share was kept")
+        XCTAssertFalse(refused.timedOut, "a connection past the host's share was kept waiting")
+        XCTAssertEqual(refused.value, Data())
+        turnedAway.close()
+
+        let local = try startLocalServer()
+        defer { stopLocalServer(local) }
+        let localHook = try XCTUnwrap(RawHook.connect(to: local.socketPath))
+        let localAnswer = localHook.writeInBackground(
+            Data(#"{"hook_event_name":"Stop","session_id":"local-1","cwd":"/tmp","_source":"claude"}"#.utf8),
+            thenRead: true
+        )
+        pump(until: { localAnswer.value != nil }, "this Mac's socket went unanswered")
+        XCTAssertEqual(String(decoding: localAnswer.value ?? Data(), as: UTF8.self), "{}")
+        localHook.close()
+
+        // One of the host's own goes: its socket takes a connection again.
+        holding[0].close()
+        pump(for: 0.3)
+        let next = try XCTUnwrap(RawHook.connect(to: socketPath))
+        let answer = next.writeInBackground(Data(remotePayload("Stop", session: "after").utf8), thenRead: true)
+        pump(until: { answer.value != nil }, "no answer once a connection had closed")
+        XCTAssertEqual(String(decoding: answer.value ?? Data(), as: UTF8.self), "{}")
+        next.close()
+    }
+
+    /// A remote host may have so many requests waiting on an answer. One more
+    /// is answered at once with nothing — no card; its agent asks in its own
+    /// way — and once one is answered the host may hold another.
+    func testARemoteHostMayHoldSoManyRequestsForAnAnswer() throws {
+        restartServer { $0.maxHeldRequests = 2 }
+        let held = try (0..<2).map { index -> (hook: RawHook, answer: RawHook.Box) in
+            let hook = try XCTUnwrap(RawHook.connect(to: socketPath))
+            hook.write(permissionPayload(session: "held-\(index)", toolUseId: "tu-\(index)"))
+            return (hook, hook.readAnswerInBackground())
+        }
+        defer { held.forEach { $0.hook.close() } }
+        pump(until: { self.appState.permissionQueue.count == 2 }, "the host's two requests got no cards")
+
+        let third = try XCTUnwrap(RawHook.connect(to: socketPath))
+        third.write(permissionPayload(session: "held-2", toolUseId: "tu-2"))
+        let thirdAnswer = third.readAnswerInBackground(timeout: 3)
+        pump(until: { thirdAnswer.value != nil }, timeout: 6, "a request past the host's share was held")
+        XCTAssertFalse(thirdAnswer.timedOut)
+        XCTAssertEqual(thirdAnswer.value, Data(), "a request past the host's share got an answer")
+        XCTAssertEqual(appState.permissionQueue.count, 2, "a request past the host's share got a card")
+        third.close()
+
+        appState.approvePermission()
+        pump(until: { held.contains { $0.answer.value != nil } }, "the approval did not reach its hook")
+        let fourth = try XCTUnwrap(RawHook.connect(to: socketPath))
+        fourth.write(permissionPayload(session: "held-3", toolUseId: "tu-3"))
+        let fourthAnswer = fourth.readAnswerInBackground()
+        pump(until: { self.appState.permissionQueue.count == 2 }, "a request within the host's share got no card")
+        pump(for: 0.3)
+        XCTAssertNil(fourthAnswer.value, "a request within the host's share was not held")
+        fourth.close()
+    }
+
+    /// A remote host's unfinished requests share a budget of bytes: the
+    /// connection that would pass it is dropped at once.
+    func testARemoteHostsUnfinishedRequestsShareABudget() throws {
+        restartServer { $0.maxBufferedBytes = 100 }
+        let first = try XCTUnwrap(RawHook.connect(to: socketPath))
+        first.writeWithoutFinishing(String(repeating: " ", count: 80))
+        pump(for: 0.2)
+        let second = try XCTUnwrap(RawHook.connect(to: socketPath))
+        second.writeWithoutFinishing(String(repeating: " ", count: 40))
+        // Well inside the idle timeout (two minutes): only the budget ends it.
+        let dropped = second.readAnswerInBackground(timeout: 3)
+        pump(until: { dropped.value != nil }, timeout: 6, "a request past the host's budget was read on")
+        XCTAssertFalse(dropped.timedOut, "a request past the host's budget was read on")
+        XCTAssertEqual(dropped.value, Data())
+        second.close()
+        first.close()
+    }
+
+    /// A remote host's request must be complete by the read deadline,
+    /// however steadily it trickles in.
+    func testARemoteHostsTrickleIsCutOffAtTheReadDeadline() throws {
+        restartServer {
+            $0.readIdleTimeout = 0.5
+            $0.readDeadline = 1
+        }
+        let hook = try XCTUnwrap(RawHook.connect(to: socketPath))
+        let answer = hook.readAnswerInBackground(timeout: 5)
+        let trickled = Flag()
+        DispatchQueue.global().async {
+            for _ in 0..<40 where answer.value == nil {
+                hook.writeWithoutFinishing(" ")
+                usleep(100_000)  // four seconds in all, never half a second silent
+            }
+            trickled.set()
+        }
+        let started = Date()
+        pump(until: { answer.value != nil }, timeout: 6, "a trickle held its connection")
+        XCTAssertFalse(answer.timedOut, "a trickle held its connection")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 3, "a trickle held its connection past the deadline")
+        pump(until: { trickled.isSet }, "the trickle never stopped")
+        hook.close()
+    }
+
+    /// A server on this Mac's terms, on a socket of its own.
+    private func startLocalServer() throws -> HookServer {
+        let path = "/tmp/ci-ht-\(UUID().uuidString.prefix(8)).sock"
+        let local = HookServer(appState: appState, socketPath: path, hostCwdFilter: { _ in nil })
+        XCTAssertTrue(local.start(), "HookServer did not listen on \(path)")
+        return local
+    }
+
+    private func stopLocalServer(_ local: HookServer) {
+        local.stop()
+        unlink(local.socketPath)
+    }
 }
 
 /// One HookConnection on a socket pair, the hook's end in the test's hands.
@@ -567,6 +748,89 @@ final class HookConnectionTests: XCTestCase {
         connection.cancel()
     }
 
+    /// Steady is not forever: a hook that trickles a byte now and then, never
+    /// silent for the idle timeout, is still cut off at the read deadline.
+    func testATrickleIsCutOffAtTheReadDeadline() throws {
+        let (connection, hook) = try connectionPair()
+        let stalled = Flag()
+        let started = Date()
+        queue.async {
+            connection.readRequest(limit: 1_024, idleTimeout: 0.3, deadline: 0.6) { request in
+                if case .stalled = request { stalled.set() }
+            }
+        }
+        let trickling = Flag()
+        DispatchQueue.global().async {
+            for _ in 0..<30 where !stalled.isSet {
+                _ = "x".withCString { send(hook, $0, 1, MSG_NOSIGNAL) }
+                usleep(100_000)  // three seconds in all
+            }
+            trickling.set()
+        }
+        XCTAssertTrue(wait(for: stalled, timeout: 2), "a trickle held its connection past the read deadline")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.5)
+        XCTAssertEqual(connection.keptRequestBytesForTesting, 0)
+        _ = wait(for: trickling, timeout: 4)
+        connection.cancel()
+    }
+
+    /// The unfinished requests of a socket's connections share one budget:
+    /// the connection that would pass it is dropped, and what a request took
+    /// comes back once it is handed over.
+    func testUnfinishedRequestsShareTheSocketsBudget() throws {
+        let budget = HookReadBudget(limit: 100)
+        let (first, firstHook) = try connectionPair()
+        let (second, secondHook) = try connectionPair()
+        let firstDone = Slot<HookConnection.Request>()
+        let secondDone = Slot<HookConnection.Request>()
+        queue.async {
+            first.readRequest(limit: 1_024, budget: budget) { firstDone.set($0) }
+            second.readRequest(limit: 1_024, budget: budget) { secondDone.set($0) }
+        }
+        _ = String(repeating: "a", count: 80).withCString { send(firstHook, $0, 80, MSG_NOSIGNAL) }
+        let firstHeld = Flag()
+        DispatchQueue.global().async {
+            while self.queue.sync(execute: { budget.used }) < 80 { usleep(5_000) }
+            firstHeld.set()
+        }
+        XCTAssertTrue(wait(for: firstHeld, timeout: 2), "the first request's bytes were not counted")
+        _ = String(repeating: "b", count: 40).withCString { send(secondHook, $0, 40, MSG_NOSIGNAL) }
+        XCTAssertTrue(wait(until: { secondDone.value != nil }, timeout: 2), "a request past the budget was read on")
+        guard case .overBudget = secondDone.value else {
+            return XCTFail("a request past the budget was not dropped: \(String(describing: secondDone.value))")
+        }
+        XCTAssertNil(firstDone.value, "the request within the budget was dropped")
+
+        shutdown(firstHook, SHUT_WR)
+        XCTAssertTrue(wait(until: { firstDone.value != nil }, timeout: 2))
+        guard case .received(let data) = firstDone.value else {
+            return XCTFail("the request within the budget did not get through: \(String(describing: firstDone.value))")
+        }
+        XCTAssertEqual(data.count, 80)
+        XCTAssertEqual(queue.sync { budget.used }, 0, "a handed-over request kept its share of the budget")
+
+        // A connection that closes mid-request gives its share back too.
+        let (third, thirdHook) = try connectionPair()
+        queue.async { third.readRequest(limit: 1_024, budget: budget) { _ in } }
+        _ = String(repeating: "c", count: 90).withCString { send(thirdHook, $0, 90, MSG_NOSIGNAL) }
+        XCTAssertTrue(wait(until: { self.queue.sync { budget.used } == 90 }, timeout: 2))
+        third.cancel()
+        XCTAssertTrue(wait(until: { self.queue.sync { budget.used } == 0 }, timeout: 2),
+                      "a cancelled request kept its share of the budget")
+        first.cancel()
+        second.cancel()
+    }
+
+    /// Waits until `condition` holds; false after `timeout`.
+    private func wait(until condition: () -> Bool, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            guard Date() < deadline else { return false }
+            usleep(10_000)
+        }
+        return true
+    }
+
     /// The first answer is the one: a second, arriving while the first is
     /// still being written, is dropped, not spliced into it.
     func testTheFirstAnswerWins() throws {
@@ -659,6 +923,14 @@ private final class Flag: @unchecked Sendable {
     private var value = false
     var isSet: Bool { lock.withLock { value } }
     func set() { lock.withLock { value = true } }
+}
+
+/// A value set from any thread.
+private final class Slot<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value?
+    var value: Value? { lock.withLock { stored } }
+    func set(_ value: Value) { lock.withLock { stored = value } }
 }
 
 /// A hook client of the island's socket, writing the way hooks do.

@@ -33,6 +33,14 @@ quirk is then fixed once, in HookIntake, for every edge.
   main socket, which no remote edge reaches, answers a request that claims a
   remote host (a non-blank `_remote_host_id` or `_remote_host_name`, or an
   `_edge` with `host`) with nothing.
+- A remote host's socket gives the host a bounded share of the island
+  (`HookSocketLimits.remoteHost`), so whoever reaches the island's socket on
+  that host cannot starve this Mac's hooks of descriptors, memory or cards: a
+  request of at most 1 MB (this Mac's hooks keep 10 MB), complete within
+  5 minutes however steadily it arrives, at most 64 connections open and
+  32 requests waiting on an answer at once, and 8 MB of unfinished requests
+  between them. A connection past that is closed at once, and a request past
+  the held cap is answered with nothing, so its agent asks in its own way.
 - Write one JSON object, then half-close the write side (`shutdown(SHUT_WR)`).
 - A hook that waits for an answer (below) reads it to EOF, as long as it
   takes, prints it to stdout exactly as received (an empty answer means print

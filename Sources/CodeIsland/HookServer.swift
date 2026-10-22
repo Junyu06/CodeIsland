@@ -29,8 +29,9 @@ class HookServer {
     /// How often a held request's hook is checked for being gone: a backstop
     /// to its watch, which sees that at once (``monitorPeerDisconnect``).
     private let heldRequestCheckInterval: TimeInterval
-    /// How long a hook may send nothing before its request is complete.
-    private let readIdleTimeout: TimeInterval
+    /// How much of the island this socket's hooks may take: as much as they
+    /// like on this Mac's, a bounded share on a remote host's.
+    let limits: HookSocketLimits
     private var listener: HookSocketListener?
     /// Hook connections are accepted and read here, off the main thread; only
     /// a complete request is handed to the main actor (``HookSocketListener``).
@@ -41,10 +42,13 @@ class HookServer {
     /// `hostCwdFilter` gives a remote host's cwd allow-list; by default the
     /// one in Settings.
     ///
+    /// `limits` are those of `origin`'s socket unless given
+    /// (``HookSocketLimits/for(_:)``).
+    ///
     /// `socketPath`, `autoApproveTools`, `heldRequestCheckInterval` and
-    /// `readIdleTimeout` are for tests: a socket of their own, the tools
-    /// approved without a card, not read from the settings, a shorter
-    /// backstop and a shorter wait for a stalled hook.
+    /// `limits` are for tests: a socket of their own, the tools approved
+    /// without a card, not read from the settings, a shorter backstop and
+    /// smaller limits.
     init(
         appState: AppState,
         socketPath: String = HookServer.socketPath,
@@ -54,7 +58,7 @@ class HookServer {
         },
         autoApproveTools: Set<String>? = nil,
         heldRequestCheckInterval: TimeInterval = 300,
-        readIdleTimeout: TimeInterval = HookConnection.readIdleTimeout
+        limits: HookSocketLimits? = nil
     ) {
         self.appState = appState
         self.socketPath = socketPath
@@ -62,7 +66,7 @@ class HookServer {
         self.hostCwdFilter = hostCwdFilter
         self.pinnedAutoApproveTools = autoApproveTools
         self.heldRequestCheckInterval = heldRequestCheckInterval
-        self.readIdleTimeout = readIdleTimeout
+        self.limits = limits ?? .for(origin)
     }
 
     /// Which machine this socket's requests come from.
@@ -78,15 +82,29 @@ class HookServer {
     /// Starts listening. False, logged, when the socket cannot be created.
     @discardableResult
     func start() -> Bool {
-        let readIdleTimeout = readIdleTimeout
+        let limits = limits
         let originBox = originBox
-        let listener = HookSocketListener(path: socketPath, queue: connectionQueue) { [weak self] connection in
-            connection.readRequest(limit: Self.maxPayloadSize, idleTimeout: readIdleTimeout) { request in
+        // Shared by this socket's connections, on its queue.
+        let budget = limits.maxBufferedBytes.map(HookReadBudget.init(limit:))
+        let listener = HookSocketListener(
+            path: socketPath,
+            queue: connectionQueue,
+            maxConnections: limits.maxConnections
+        ) { [weak self] connection in
+            connection.readRequest(
+                limit: limits.maxRequestBytes,
+                idleTimeout: limits.readIdleTimeout,
+                deadline: limits.readDeadline,
+                budget: budget
+            ) { request in
                 switch request {
                 case .failed, .stalled:
                     connection.cancel()
+                case .overBudget:
+                    log.warning("HookServer: \(String(describing: originBox.value), privacy: .public) already holds \(limits.maxBufferedBytes ?? 0) bytes of unfinished requests; dropping a connection")
+                    connection.cancel()
                 case .tooLarge:
-                    log.warning("Payload too large (over \(Self.maxPayloadSize) bytes), dropping connection")
+                    log.warning("Payload too large (over \(limits.maxRequestBytes) bytes), dropping connection")
                     connection.respond(Self.oversizedPayloadAnswer)
                 case .received(let data):
                     // The socket names the host, and an edge's facts are
@@ -130,7 +148,6 @@ class HookServer {
         }
     }
 
-    nonisolated private static let maxPayloadSize = 10_485_760  // 10MB safety limit
     nonisolated private static let oversizedPayloadAnswer = Data(
         #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8
     )
@@ -628,7 +645,7 @@ class HookServer {
 
             // AskUserQuestion is a question, not a permission — route to QuestionBar
             if event.toolName == "AskUserQuestion" {
-                let hook = monitorPeerDisconnect(connection: connection)
+                guard let hook = hold(connection) else { return }
                 Task {
                     let responseBody = await withCheckedContinuation { continuation in
                         appState.handleAskUserQuestion(event, continuation: continuation, hookConnectionId: hook)
@@ -643,7 +660,7 @@ class HookServer {
                 return
             }
 
-            let hook = monitorPeerDisconnect(connection: connection)
+            guard let hook = hold(connection) else { return }
             Task {
                 let responseBody = await withCheckedContinuation { continuation in
                     appState.handlePermissionRequest(event, continuation: continuation, hookConnectionId: hook)
@@ -652,7 +669,7 @@ class HookServer {
             }
 
         case .question:
-            let hook = monitorPeerDisconnect(connection: connection)
+            guard let hook = hold(connection) else { return }
             Task {
                 let responseBody = await withCheckedContinuation { continuation in
                     appState.handleQuestion(event, continuation: continuation, hookConnectionId: hook)
@@ -677,6 +694,25 @@ class HookServer {
     }
 
     private var connectionContexts: [ObjectIdentifier: ConnectionContext] = [:]
+
+    /// Requests held for an answer now.
+    private var heldRequests: Int {
+        connectionContexts.values.reduce(0) { $0 + ($1.responded ? 0 : 1) }
+    }
+
+    /// Holds `connection` until its request is answered
+    /// (``monitorPeerDisconnect(connection:)``) and returns its id — or,
+    /// when the socket already holds as many requests as it may
+    /// (``HookSocketLimits/maxHeldRequests``), answers it at once with
+    /// nothing and returns nil: no card, and its agent asks in its own way.
+    private func hold(_ connection: HookConnection) -> UUID? {
+        if let cap = limits.maxHeldRequests, heldRequests >= cap {
+            log.warning("HookServer: \(String(describing: self.origin), privacy: .public) already holds \(cap) requests; answering one more with nothing")
+            sendResponse(connection: connection, data: Data())
+            return nil
+        }
+        return monitorPeerDisconnect(connection: connection)
+    }
 
     /// Watch for bridge process disconnect — indicates the bridge process actually died
     /// (e.g. user Ctrl-C'd Claude Code), NOT a normal half-close.
