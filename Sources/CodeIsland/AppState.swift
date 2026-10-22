@@ -1902,12 +1902,12 @@ final class AppState {
             return
         }
 
-        // "Always allow … this session" on a remote Codex card
-        // (approvePermission): nothing on its host remembers it, so it is
-        // answered here.
+        // "Always allow … this session" on a Codex card that saved no rule
+        // (approvePermission) — a remote Codex's, or a request no rule can
+        // describe: nothing in Codex remembers it, so it is answered here,
+        // for every request of the tool, as the card said.
         if let toolName = event.toolName,
            CodexPermissionRules.isCodexEvent(event),
-           !CodexPermissionRules.alwaysSavesRule(for: event),
            sessions[sessionId]?.alwaysAllowedTools.contains(toolName) == true {
             continuation.resume(returning: Data(
                 #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#.utf8
@@ -2048,7 +2048,8 @@ final class AppState {
                 _ = CodexPermissionRules().persistAlwaysAllowRule(for: pending.event)
             } else if let toolName = pending.event.toolName, !toolName.isEmpty {
                 // A remote Codex reads its rules on its own host, and none
-                // may be written to this Mac's. "Always" holds for this
+                // may be written to this Mac's; and a local request no rule
+                // can describe has none to save. "Always" holds for this
                 // session instead — what the card said — and the island
                 // answers the session's next requests for the tool.
                 sessions[sessionId]?.alwaysAllowedTools.insert(toolName)

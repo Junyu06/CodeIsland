@@ -305,6 +305,125 @@ final class ApprovalTrustBoundaryTests: XCTestCase {
         _ = try await awaitValue(of: response)
     }
 
+    // MARK: - Codex "Always" saves the rule its card names, from the command
+
+    private func withTemporaryCodexHome(_ body: (URL) async throws -> Void) async rethrows {
+        let previous = ProcessInfo.processInfo.environment["CODEX_HOME"]
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ci-tb-codex-\(UUID().uuidString)", isDirectory: true)
+        setenv("CODEX_HOME", home.path, 1)
+        defer {
+            if let previous { setenv("CODEX_HOME", previous, 1) } else { unsetenv("CODEX_HOME") }
+            try? FileManager.default.removeItem(at: home)
+        }
+        try await body(home)
+    }
+
+    private func savedRules(in home: URL) throws -> String {
+        try String(contentsOf: home.appendingPathComponent("rules/codeisland.rules"), encoding: .utf8)
+    }
+
+    private func codexRequest(_ extra: [String: Any], session: String = "codex-s1") throws -> HookEvent {
+        try event([
+            "hook_event_name": "PermissionRequest", "session_id": session, "_source": "codex",
+        ].merging(extra) { $1 })
+    }
+
+    /// The card shows `ls -la`. Codex's PermissionRequest carries no rule of
+    /// its own to save, so a `prefix_rule` in the payload — in the tool's
+    /// arguments, buried deeper, or beside them — is the model's or a
+    /// forger's: "Always" saves the command's own words, never `["bash"]`.
+    func testCodexAlwaysNeverSavesAPrefixRuleFromThePayload() async throws {
+        let payloads: [[String: Any]] = [
+            ["tool_name": "Bash", "tool_input": ["command": "ls -la", "prefix_rule": ["bash"]]],
+            ["tool_name": "Bash", "tool_input": [
+                "command": "ls -la", "notes": ["context": [["prefixRule": ["pattern": ["python3"]]]]],
+            ]],
+            ["tool_name": "Bash", "tool_input": ["command": "ls -la"], "prefix_rule": ["sh"]],
+            ["tool_name": "Bash", "tool_input": ["command": "ls -la"], "prefixRule": ["pattern": ["env"]]],
+        ]
+        for payload in payloads {
+            try await withTemporaryCodexHome { home in
+                let request = try codexRequest(payload)
+                XCTAssertEqual(ApprovalAlwaysScope(for: request), .codexRules(pattern: ["ls", "-la"]))
+                XCTAssertTrue(CodexPermissionRules().persistAlwaysAllowRule(for: request))
+                let rules = try savedRules(in: home)
+                XCTAssertTrue(rules.contains(#"pattern = ["ls", "-la"]"#), rules)
+                for planted in ["bash", "python3", "sh", "env"] {
+                    XCTAssertFalse(rules.contains(#"pattern = ["\#(planted)"]"#), "saved \(planted): \(rules)")
+                }
+            }
+        }
+    }
+
+    /// The card's "Always" link and its tooltip name the words the rule
+    /// saves — the command's first three, as a prefix — and those are the
+    /// words saved when the user clicks it.
+    func testCodexAlwaysLinkNamesTheExactPatternItSaves() async throws {
+        let savedLanguage = L10n.shared.language
+        defer { L10n.shared.language = savedLanguage }
+        L10n.shared.language = "en"
+        try await withTemporaryCodexHome { home in
+            let appState = AppState()
+            let request = try codexRequest(["tool_name": "Bash", "tool_input": ["command": "git push --force origin main"]])
+            let scope = ApprovalAlwaysScope(for: request)
+            XCTAssertEqual(scope, .codexRules(pattern: ["git", "push", "--force"]))
+            XCTAssertEqual(ApprovalCopy.alwaysLink(tool: "Bash", scope: scope),
+                           "Always allow commands starting with git push --force — saved to ~/.codex/rules")
+            XCTAssertTrue(ApprovalHints.always(scope: scope).contains("commands that start with git push --force"))
+            XCTAssertEqual(ApprovalCopy.inlineAlwaysTitle(tool: "Bash", scope: scope), "Always allow git push --force …")
+
+            let response = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+            appState.approvePermission(always: true, expectedSessionId: "codex-s1")
+            let answer = try await awaitValue(of: response)
+            XCTAssertEqual(try behavior(answer), "allow")
+            XCTAssertTrue(try savedRules(in: home).contains(#"pattern = ["git", "push", "--force"]"#))
+        }
+    }
+
+    /// Words a shell would split or expand are shown quoted, and control
+    /// characters visibly, so the link cannot pass one word off as several.
+    func testCodexRuleWordsAreShownAsTheShellWouldReadThem() {
+        XCTAssertEqual(ApprovalCopy.commandWords(["python3", "-c", "print(1); import os"]), "python3 -c 'print(1); import os'")
+        XCTAssertEqual(ApprovalCopy.commandWords(["node", "-e", "a\nb"]), #"node -e 'a\nb'"#)
+        XCTAssertEqual(ApprovalCopy.commandWords(["echo", "it's", ""]), #"echo 'it'\''s' ''"#)
+        XCTAssertEqual(ApprovalCopy.commandWords(["./build.sh", "--target=x86_64", "a@b:c/d"]), "./build.sh --target=x86_64 a@b:c/d")
+    }
+
+    /// No rule can describe an apply_patch (or a command that opens with a
+    /// variable): the link says "this session" rather than claim a saved
+    /// rule, nothing is written, and the island answers the tool's next
+    /// requests in that session — and only that tool's.
+    func testCodexAlwaysWithNoRuleToSaveHoldsForTheSession() async throws {
+        let savedLanguage = L10n.shared.language
+        defer { L10n.shared.language = savedLanguage }
+        L10n.shared.language = "en"
+        try await withTemporaryCodexHome { home in
+            let appState = AppState()
+            let patch = try codexRequest(["tool_name": "apply_patch", "tool_input": ["command": "*** Begin Patch"]])
+            XCTAssertEqual(ApprovalAlwaysScope(for: patch), .session)
+            XCTAssertEqual(ApprovalCopy.alwaysLink(tool: "apply_patch", scope: .session), "Always allow apply_patch this session")
+
+            let first = await startHookRequest { appState.handlePermissionRequest(patch, continuation: $0) }
+            appState.approvePermission(always: true, expectedSessionId: "codex-s1")
+            let firstAnswer = try await awaitValue(of: first)
+            XCTAssertEqual(try behavior(firstAnswer), "allow")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: home.path), "nothing written under CODEX_HOME")
+
+            let again = await startHookRequest { appState.handlePermissionRequest(patch, continuation: $0) }
+            XCTAssertTrue(appState.permissionQueue.isEmpty, "the session's Always answers it, no card")
+            let againAnswer = try await awaitValue(of: again)
+            XCTAssertEqual(try behavior(againAnswer), "allow")
+
+            let bash = try codexRequest(["tool_name": "Bash", "tool_input": ["command": "rm -rf build"]])
+            let bashResponse = await startHookRequest { appState.handlePermissionRequest(bash, continuation: $0) }
+            XCTAssertEqual(appState.permissionQueue.count, 1, "another tool still asks")
+            appState.denyPermission(expectedSessionId: "codex-s1")
+            let bashAnswer = try await awaitValue(of: bashResponse)
+            XCTAssertEqual(try behavior(bashAnswer), "deny")
+        }
+    }
+
     // MARK: - A host's socket: one connection never answers another's request
 
     private var socketPath: String?

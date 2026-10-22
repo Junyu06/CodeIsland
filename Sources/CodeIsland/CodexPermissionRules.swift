@@ -21,10 +21,14 @@ struct CodexPermissionRules {
     }
 
     /// Whether "Always allow" saves a Codex rule (persistAlwaysAllowRule) —
-    /// what the approval card's link says it does. A remote Codex request's
-    /// "Always" holds for its session instead (AppState.approvePermission).
+    /// what the approval card's link says it does: an MCP tool's approval, or
+    /// a command's prefix rule (``prefixPattern(for:)``). A remote Codex
+    /// request's "Always" holds for its session instead
+    /// (AppState.approvePermission), and so does a local one no rule can
+    /// describe — an apply_patch, a command that starts with a variable.
     static func alwaysSavesRule(for event: HookEvent) -> Bool {
         isCodexEvent(event) && !isRemoteEvent(event)
+            && (mcpToolApprovalTarget(for: event) != nil || prefixPattern(for: event) != nil)
     }
 
     /// The Codex root the event's session runs under — its config.toml and
@@ -223,11 +227,19 @@ struct CodexPermissionRules {
         return false
     }
 
+    /// The prefix rule "Always" saves for a command: its first words, up to
+    /// three — what the card's link spells out, and nothing else.
+    ///
+    /// Only the command is read. Codex's PermissionRequest hook input carries
+    /// no rule of its own to save (codex-rs/hooks/schema/generated/
+    /// permission-request.command.input.schema.json has no such field, and
+    /// allows no other), and a command's `tool_input` is just `command` and
+    /// `description`. A `prefix_rule` anywhere in the payload was written by
+    /// the model — an MCP tool's arguments are its own — or by whoever sent
+    /// the hook; Codex itself screens the one its model suggests to it. Taken
+    /// from there, `["bash"]` was saved for a card that showed `ls -la`, and
+    /// allowed every command after it.
     static func prefixPattern(for event: HookEvent) -> [String]? {
-        if let suggested = findSuggestedPrefixRule(in: event.rawJSON) {
-            return suggested
-        }
-
         guard event.toolName == "Bash",
               let command = event.toolInput?["command"] as? String else {
             return nil
@@ -662,41 +674,6 @@ struct CodexPermissionRules {
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         return "\"\(escaped)\""
-    }
-
-    private static func findSuggestedPrefixRule(in value: Any) -> [String]? {
-        if let dictionary = value as? [String: Any] {
-            for key in ["prefix_rule", "prefixRule"] {
-                if let pattern = stringArray(from: dictionary[key]) {
-                    return pattern
-                }
-            }
-
-            for nested in dictionary.values {
-                if let pattern = findSuggestedPrefixRule(in: nested) {
-                    return pattern
-                }
-            }
-        } else if let array = value as? [Any] {
-            for nested in array {
-                if let pattern = findSuggestedPrefixRule(in: nested) {
-                    return pattern
-                }
-            }
-        }
-        return nil
-    }
-
-    private static func stringArray(from value: Any?) -> [String]? {
-        if let pattern = value as? [String], !pattern.isEmpty {
-            return pattern
-        }
-        if let dictionary = value as? [String: Any],
-           let pattern = dictionary["pattern"] as? [String],
-           !pattern.isEmpty {
-            return pattern
-        }
-        return nil
     }
 
     private static func shellPrefix(from command: String, maxTokens: Int) -> [String]? {

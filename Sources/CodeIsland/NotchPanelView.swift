@@ -325,7 +325,7 @@ struct NotchPanelView: View {
                                 session: session,
                                 sessionId: sid,
                                 appState: appState,
-                                alwaysSavesRule: CodexPermissionRules.alwaysSavesRule(for: pending.event),
+                                alwaysScope: ApprovalAlwaysScope(for: pending.event),
                                 onAllow: { appState.approvePermission(always: false, expectedSessionId: sid) },
                                 onAlwaysAllow: { appState.approvePermission(always: true, expectedSessionId: sid) },
                                 onDeny: { appState.denyPermission(expectedSessionId: sid) },
@@ -1488,18 +1488,16 @@ private struct ApprovalToolDetailView: View {
 enum ApprovalHints {
     /// What "Always" commits to differs by agent: Claude-style hooks add a
     /// rule for the rest of the session, Codex gets a rule saved to disk
-    /// (CodexPermissionRules) that outlives it — except a remote Codex, whose
-    /// "Always" lasts the session (CodexPermissionRules.alwaysSavesRule).
-    static func always(savesRule: Bool) -> String {
-        L10n.shared[savesRule ? "always_hint_saved" : "always_hint_session"]
-    }
-
-    /// The same, told apart for a Codex MCP tool, whose approval goes to
-    /// config.toml rather than the rules file.
+    /// (CodexPermissionRules) that outlives it — for the commands that start
+    /// with the words it names or, for an MCP tool, an approval in
+    /// config.toml — except where Codex saves none (a remote Codex, a request
+    /// no rule can describe), whose "Always" lasts the session
+    /// (CodexPermissionRules.alwaysSavesRule).
     static func always(scope: ApprovalAlwaysScope) -> String {
         switch scope {
         case .session: return L10n.shared["always_hint_session"]
-        case .codexRules: return L10n.shared["always_hint_saved"]
+        case .codexRules(let pattern):
+            return String(format: L10n.shared["always_hint_saved"], ApprovalCopy.commandWords(pattern))
         case .codexMCPConfig: return L10n.shared["always_hint_saved_mcp"]
         }
     }
@@ -1509,19 +1507,28 @@ enum ApprovalHints {
 enum ApprovalAlwaysScope: Equatable {
     /// Claude-style hooks: a rule for this tool, for the rest of the session.
     /// A remote Codex gets the same, kept by the island (its rules are on
-    /// its own host).
+    /// its own host), and so does a local Codex request no rule can describe.
     case session
-    /// Codex: a prefix rule in ~/.codex/rules, kept for every session.
-    case codexRules
+    /// Codex: a prefix rule in ~/.codex/rules, kept for every session, for
+    /// the commands that start with `pattern` — the words the link names are
+    /// the words saved (CodexPermissionRules.prefixPattern).
+    case codexRules(pattern: [String])
     /// Codex MCP tool: an approval in ~/.codex/config.toml
     /// (CodexPermissionRules.persistAlwaysAllowRule).
     case codexMCPConfig
 
-    init(savesRule: Bool, tool: String) {
-        if !savesRule {
+    /// Where "Always" puts the rule for `event`.
+    init(for event: HookEvent) {
+        guard CodexPermissionRules.alwaysSavesRule(for: event) else {
             self = .session
+            return
+        }
+        if CodexPermissionRules.mcpToolApprovalTarget(for: event) != nil {
+            self = .codexMCPConfig
+        } else if let pattern = CodexPermissionRules.prefixPattern(for: event) {
+            self = .codexRules(pattern: pattern)
         } else {
-            self = ApprovalCopy.mcpParts(tool) == nil ? .codexRules : .codexMCPConfig
+            self = .session
         }
     }
 
@@ -1633,12 +1640,48 @@ enum ApprovalCopy {
         }
     }
 
-    /// "Always allow Bash this session", or where Codex saves the rule.
+    /// "Always allow Bash this session", or where Codex saves the rule — and
+    /// for a command's rule, the words it covers.
     static func alwaysLink(tool: String, scope: ApprovalAlwaysScope) -> String {
+        if case .codexRules(let pattern) = scope, let path = scope.savedPath {
+            return String(format: L10n.shared["card_always_saved_prefix"], commandWords(pattern), path)
+        }
         if let path = scope.savedPath {
             return String(format: L10n.shared["card_always_saved"], path)
         }
         return String(format: L10n.shared["card_always_session"], displayName(tool))
+    }
+
+    /// The session list's "Always" button: the tool, or the words a Codex
+    /// rule covers.
+    static func inlineAlwaysTitle(tool: String, scope: ApprovalAlwaysScope) -> String {
+        if case .codexRules(let pattern) = scope {
+            return String(format: L10n.shared["session_inline_always_prefix"], commandWords(pattern))
+        }
+        return String(format: L10n.shared["session_inline_always"], ToolNameDisplay.compact(tool))
+    }
+
+    /// A rule's pattern as the card spells it: the command's words, each one a
+    /// shell would split or expand quoted, and control characters made
+    /// visible — so the words shown are the words saved.
+    static func commandWords(_ pattern: [String]) -> String {
+        pattern.map(shellWord).joined(separator: " ")
+    }
+
+    private static let plainShellWordCharacters = CharacterSet(
+        charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+=:,./_-"
+    )
+
+    private static func shellWord(_ word: String) -> String {
+        if !word.isEmpty, word.unicodeScalars.allSatisfy(plainShellWordCharacters.contains) {
+            return word
+        }
+        let visible = word
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
+            .replacingOccurrences(of: "'", with: #"'\''"#)
+        return "'" + visible + "'"
     }
 }
 
@@ -1978,8 +2021,9 @@ private struct ApprovalBar: View {
     let session: SessionSnapshot?
     let sessionId: String
     let appState: AppState
-    /// "Always" persists a Codex rule rather than a session one.
-    var alwaysSavesRule = false
+    /// Where "Always" puts its rule: a session one, or a Codex rule saved
+    /// for the commands its link names.
+    var alwaysScope: ApprovalAlwaysScope = .session
     let onAllow: () -> Void
     let onAlwaysAllow: () -> Void
     let onDeny: () -> Void
@@ -1993,10 +2037,6 @@ private struct ApprovalBar: View {
 
     private var serverName: String? {
         toolInput?["server_name"] as? String
-    }
-
-    private var alwaysScope: ApprovalAlwaysScope {
-        ApprovalAlwaysScope(savesRule: alwaysSavesRule, tool: tool)
     }
 
     /// Same rule as QuestionBar: no local terminal (remote, unknown harness)
@@ -4404,13 +4444,14 @@ private struct SessionCard: View {
     private func inlineApprovalActions(tool: String, event: HookEvent) -> some View {
         let enabled = isActiveApproval
         let queuedHint = enabled ? nil : L10n.shared["session_inline_queued_hint"]
+        let alwaysScope = ApprovalAlwaysScope(for: event)
         return HStack(spacing: 8) {
             SessionInlineButton(
-                title: String(format: L10n.shared["session_inline_always"], ToolNameDisplay.compact(tool)),
+                title: ApprovalCopy.inlineAlwaysTitle(tool: tool, scope: alwaysScope),
                 style: .link,
                 fontSize: buttonFontSize,
                 enabled: enabled,
-                help: queuedHint ?? ApprovalHints.always(savesRule: CodexPermissionRules.alwaysSavesRule(for: event)),
+                help: queuedHint ?? ApprovalHints.always(scope: alwaysScope),
                 action: { appState.approvePermission(always: true, expectedSessionId: sessionId) }
             )
             Spacer(minLength: 8)
