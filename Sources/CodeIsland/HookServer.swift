@@ -84,6 +84,7 @@ class HookServer {
     func start() -> Bool {
         let limits = limits
         let originBox = originBox
+        let path = socketPath
         // Shared by this socket's connections, on its queue.
         let budget = limits.maxBufferedBytes.map(HookReadBudget.init(limit:))
         let listener = HookSocketListener(
@@ -101,7 +102,7 @@ class HookServer {
                 case .failed, .stalled:
                     connection.cancel()
                 case .overBudget:
-                    log.warning("HookServer: \(String(describing: originBox.value), privacy: .public) already holds \(limits.maxBufferedBytes ?? 0) bytes of unfinished requests; dropping a connection")
+                    log.warning("HookServer: \(path, privacy: .public) already holds \(limits.maxBufferedBytes ?? 0) bytes of unfinished requests; dropping a connection")
                     connection.cancel()
                 case .tooLarge:
                     log.warning("Payload too large (over \(limits.maxRequestBytes) bytes), dropping connection")
@@ -710,7 +711,7 @@ class HookServer {
     /// nothing and returns nil: no card, and its agent asks in its own way.
     private func hold(_ connection: HookConnection) -> UUID? {
         if let cap = limits.maxHeldRequests, heldRequests >= cap {
-            log.warning("HookServer: \(String(describing: self.origin), privacy: .public) already holds \(cap) requests; answering one more with nothing")
+            log.warning("HookServer: \(self.socketPath, privacy: .public) already holds \(cap) requests; answering one more with nothing")
             sendResponse(connection: connection, data: Data())
             return nil
         }
