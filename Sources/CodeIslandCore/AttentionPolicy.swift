@@ -15,7 +15,7 @@ import Foundation
 ///
 /// ``decide(_:subject:context:)`` runs both. Each outlet keeps only its own
 /// delivery mechanics: the turn-failure jingle's debounce (SoundManager), the
-/// completion card queue and its tab-level Smart Suppress check (AppState),
+/// completion card queue and Smart Suppress's look as a card shows (AppState),
 /// presence, channels, rate limits and dedupe (PushNotifier, `PushGate`), and
 /// the reminder clock (FollowUpReminderController).
 ///
@@ -108,17 +108,8 @@ public enum AttentionPolicy {
 
     /// What actually happens, given the user's settings and the room.
     ///
-    /// The context's lazy facts are read only when a decision depends on
-    /// them, and Smart Suppress's answer at most once.
+    /// The context's lazy facts are read only when a decision depends on them.
     public static func settle(_ intents: AttentionIntents, context: AttentionContext) -> AttentionDecision {
-        var inFront: Bool?
-        func sessionInFront() -> Bool {
-            if let inFront { return inFront }
-            let answer = context.sessionInFront()
-            inFront = answer
-            return answer
-        }
-
         var decision = AttentionDecision()
         decision.sound = audibleSound(intents.sound, sounds: context.sounds, hold: context.soundHold)
 
@@ -132,11 +123,10 @@ public enum AttentionPolicy {
             case .glance:
                 presentation = .glance
             case .expand:
-                // Smart Suppress: the session's own terminal in front means the
-                // user may already be looking at the reply. Whether its tab is
-                // the one showing takes a check that can block, so the card
-                // waits on it instead of being decided here.
-                presentation = .card(unlessTabVisible: sessionInFront())
+                // Smart Suppress is asked when the card is about to show — at
+                // once, or later from the queue — not now: a card that waits
+                // behind another one is shown into a different moment.
+                presentation = .card
             }
             decision.completion = .init(turnFailed: completion.turnFailed, presentation: presentation)
         }
@@ -144,7 +134,7 @@ public enum AttentionPolicy {
         if let push = intents.push, context.pushEnabled {
             decision.push = .init(
                 kind: push.kind,
-                smartSuppressed: push.smartSuppressible && sessionInFront()
+                smartSuppressed: push.smartSuppressible && context.sessionInFront()
             )
         }
 
@@ -503,10 +493,11 @@ public enum CompletionPresentation: Equatable, Sendable {
     case statusOnly
     /// Completion style "glance": the collapsed island lights its dot.
     case glance
-    /// Completion style "expand": the completion card pops — after a
-    /// tab-level look, when `unlessTabVisible`, that the session's own tab is
-    /// not the one showing.
-    case card(unlessTabVisible: Bool)
+    /// Completion style "expand": the completion card pops, held to Smart
+    /// Suppress when it is about to show (at once or from the queue): with
+    /// the session's terminal in front, it stays down if the session's own
+    /// tab is the one showing.
+    case card
 }
 
 /// Follow-up reminder bookkeeping a moment starts.
@@ -535,7 +526,8 @@ public struct AttentionContext {
     /// Push notifications are switched on.
     public var pushEnabled: Bool
     /// Smart Suppress's app-level answer for the session: the setting is on
-    /// and the session's own terminal (or host app) is in front.
+    /// and the session's own terminal (or host app) is in front. Read only
+    /// for a push, at most once.
     public var sessionInFront: () -> Bool
 
     public init(

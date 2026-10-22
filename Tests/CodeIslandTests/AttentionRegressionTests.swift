@@ -187,4 +187,55 @@ final class AttentionRegressionTests: XCTestCase {
         XCTAssertEqual(played, ["8bit_complete"])
         XCTAssertGreaterThan(probes, 0, "a sound that may play still checks the lock")
     }
+
+    /// A completion that arrived while another card was up used to be queued
+    /// with its Smart Suppress answer thrown away, and later popped with no
+    /// look at the session's tab at all.
+    func testAQueuedCompletionStillHonoursSmartSuppress() async throws {
+        UserDefaults.standard.set(true, forKey: SettingsKey.smartSuppress)
+        // The user is looking at session A's own iTerm tab; B runs elsewhere.
+        TerminalVisibilityDetector.probe = TerminalVisibilityDetector.Probe(
+            isTerminalFrontmost: { $0.termApp == "iTerm.app" },
+            isSessionTabVisible: { $0.termApp == "iTerm.app" }
+        )
+        let appState = appStateWithFollowUps()
+        let request = try event([
+            "hook_event_name": "PermissionRequest", "session_id": "B", "tool_name": "Bash",
+            "tool_input": ["command": "ls"], "tool_use_id": "b1", "_term_app": "Terminal.app",
+        ])
+        pending.append(await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) })
+        XCTAssertEqual(appState.surface, .approvalCard(sessionId: "B"))
+
+        appState.handleEvent(try event(["hook_event_name": "UserPromptSubmit", "session_id": "A", "_term_app": "iTerm.app", "prompt": "go"]))
+        appState.handleEvent(try event(["hook_event_name": "Stop", "session_id": "A", "_term_app": "iTerm.app", "last_assistant_message": "done"]))
+        appState.approvePermission(expectedSessionId: "B")
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertNotEqual(appState.surface, .completionCard(sessionId: "A"),
+                          "A's tab is the one showing: its card must stay suppressed, queued or not")
+        XCTAssertEqual(appState.surface, .collapsed)
+    }
+
+    /// The same queued card pops once the user has moved to another tab of
+    /// the same terminal.
+    func testAQueuedCompletionPopsWhenItsTabIsNotShowing() async throws {
+        UserDefaults.standard.set(true, forKey: SettingsKey.smartSuppress)
+        TerminalVisibilityDetector.probe = TerminalVisibilityDetector.Probe(
+            isTerminalFrontmost: { $0.termApp == "iTerm.app" },
+            isSessionTabVisible: { _ in false }
+        )
+        let appState = appStateWithFollowUps()
+        let request = try event([
+            "hook_event_name": "PermissionRequest", "session_id": "B", "tool_name": "Bash",
+            "tool_input": ["command": "ls"], "tool_use_id": "b1", "_term_app": "Terminal.app",
+        ])
+        pending.append(await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) })
+        appState.handleEvent(try event(["hook_event_name": "UserPromptSubmit", "session_id": "A", "_term_app": "iTerm.app", "prompt": "go"]))
+        appState.handleEvent(try event(["hook_event_name": "Stop", "session_id": "A", "_term_app": "iTerm.app", "last_assistant_message": "done"]))
+        appState.approvePermission(expectedSessionId: "B")
+
+        await waitUntil("the queued card never popped") {
+            appState.surface == .completionCard(sessionId: "A")
+        }
+    }
 }

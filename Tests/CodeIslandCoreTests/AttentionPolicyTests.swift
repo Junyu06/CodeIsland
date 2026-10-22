@@ -445,13 +445,13 @@ final class AttentionPolicyTests: XCTestCase {
         SettleRow(
             rule: "completion style expand pops the card",
             intents: AttentionIntents(completion: .init(turnFailed: false)),
-            expected: AttentionDecision(completion: .init(turnFailed: false, presentation: .card(unlessTabVisible: false)))
+            expected: AttentionDecision(completion: .init(turnFailed: false, presentation: .card))
         ),
         SettleRow(
-            rule: "with the session's terminal in front, the card waits on a look at its tab (Smart Suppress)",
+            rule: "Smart Suppress is asked as the card shows (at once or from the queue), not when it is decided",
             intents: AttentionIntents(completion: .init(turnFailed: false)),
             context: Context().with { $0.sessionInFront = true },
-            expected: AttentionDecision(completion: .init(turnFailed: false, presentation: .card(unlessTabVisible: true)))
+            expected: AttentionDecision(completion: .init(turnFailed: false, presentation: .card))
         ),
         SettleRow(
             rule: "completion style glance lights the dot instead",
@@ -514,7 +514,7 @@ final class AttentionPolicyTests: XCTestCase {
             intents: finishedTurn,
             expected: AttentionDecision(
                 sound: "Stop",
-                completion: .init(turnFailed: false, presentation: .card(unlessTabVisible: false)),
+                completion: .init(turnFailed: false, presentation: .card),
                 push: .init(kind: .completion(isSubagent: false, interrupted: false), smartSuppressed: false),
                 followUp: .trackCompletion(turnFailed: false)
             )
@@ -619,8 +619,12 @@ final class AttentionPolicyTests: XCTestCase {
         XCTAssertEqual(reads, ["quietHours"], "quiet hours already hold it")
 
         reads = []
+        _ = AttentionPolicy.decide(Self.hook("Stop", endedTurn: true), context: context(pushEnabled: false))
+        XCTAssertFalse(reads.contains("inFront"), "a card asks Smart Suppress as it shows, not when it is decided")
+
+        reads = []
         _ = AttentionPolicy.decide(Self.hook("Stop", endedTurn: true), context: context())
-        XCTAssertEqual(reads.filter { $0 == "inFront" }.count, 1, "card and push share one Smart Suppress answer")
+        XCTAssertEqual(reads.filter { $0 == "inFront" }.count, 1, "the push asks once")
 
         reads = []
         _ = AttentionPolicy.decide(.approvalQueued(firstOfBurst: false), context: context(pushEnabled: false))

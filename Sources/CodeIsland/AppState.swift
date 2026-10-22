@@ -379,6 +379,11 @@ final class AppState {
     @ObservationIgnored
     var completionAutoCollapseDelay: TimeInterval = 5
     private var completionQueue: [String] = []
+    /// The queued completion whose card waits on Smart Suppress's look at
+    /// its session's tab (off the main thread). It is the next card on its
+    /// way: nothing else leaves the queue meanwhile.
+    @ObservationIgnored
+    private var queuedCompletionLookingAtTab: String?
     /// Mouse must enter the panel before auto-collapse is allowed (prevents instant dismiss)
     var completionHasBeenEntered = false {
         // The pointer on the completion card is the one proof the turn was seen.
@@ -1339,16 +1344,17 @@ final class AppState {
         case .glance:
             flashGlanceCompletionIndicator()
             return
-        case .card(let unlessTabVisible):
+        case .card:
             // Don't queue duplicates
             if completionQueue.contains(sessionId) || justCompletedSessionId == sessionId { return }
 
-            if isShowingCompletion || isShowingInteractive {
-                // Already showing one — queue this for later
+            // Already showing one, or one is on its way out of the queue —
+            // queue this for later
+            if isShowingCompletion || isShowingInteractive || queuedCompletionLookingAtTab != nil {
                 completionQueue.append(sessionId)
             } else {
                 // Show immediately
-                showCompletion(sessionId, unlessTabVisible: unlessTabVisible)
+                showCompletion(sessionId)
             }
         }
     }
@@ -1549,12 +1555,15 @@ final class AppState {
         )
     }
 
-    /// - `unlessTabVisible`: Smart Suppress found the session's terminal in
-    ///   front (`CompletionPresentation.card`); the card waits on a look at
-    ///   the session's own tab.
-    private func showCompletion(_ sessionId: String, unlessTabVisible: Bool) {
+    /// Fast app-level suppress check (main-thread safe, no blocking): Smart
+    /// Suppress is on and the session's own terminal is in front.
+    private func shouldSuppressAppLevel(for sessionId: String) -> Bool {
+        !shouldAutoOpenPendingSurface(for: sessionId)
+    }
+
+    private func showCompletion(_ sessionId: String) {
         // Fast path: terminal not even frontmost — show immediately
-        guard unlessTabVisible else {
+        guard shouldSuppressAppLevel(for: sessionId) else {
             doShowCompletion(sessionId)
             return
         }
@@ -1600,6 +1609,7 @@ final class AppState {
     func cancelCompletionQueue() {
         autoCollapseTask?.cancel()
         completionQueue.removeAll()
+        queuedCompletionLookingAtTab = nil
         deferCollapseOnMouseLeave = false
     }
 
@@ -3142,16 +3152,61 @@ final class AppState {
         return false
     }
 
-    /// Show the oldest queued completion whose session still exists.
+    /// Show the oldest queued completion whose session still exists, held to
+    /// Smart Suppress as a card shown at once is: with its terminal in front,
+    /// its tab is looked at off the main thread first, and a card whose own
+    /// tab is showing stays down while the queue moves on.
+    ///
+    /// Returns whether a card is on screen or on its way there, so callers
+    /// neither fold the island nor take another card out of the queue.
     private func showNextQueuedCompletion() -> Bool {
+        if queuedCompletionLookingAtTab != nil { return true }
         while let next = completionQueue.first {
             completionQueue.removeFirst()
-            if sessions[next] != nil {
+            guard let session = sessions[next] else { continue }
+            guard shouldSuppressAppLevel(for: next) else {
                 withAnimation(NotchAnimation.pop) { doShowCompletion(next) }
                 return true
             }
+            queuedCompletionLookingAtTab = next
+            let sessionCopy = session
+            Task.detached {
+                let tabVisible = TerminalVisibilityDetector.isSessionTabVisible(sessionCopy)
+                await MainActor.run { [weak self] in
+                    self?.finishLookingAtQueuedCompletionTab(next, tabVisible: tabVisible)
+                }
+            }
+            return true
         }
         return false
+    }
+
+    /// The tab of the queued completion on its way came back: pop its card,
+    /// or move on with the queue.
+    private func finishLookingAtQueuedCompletionTab(_ sessionId: String, tabVisible: Bool) {
+        // The queue was cancelled meanwhile.
+        guard queuedCompletionLookingAtTab == sessionId else { return }
+        queuedCompletionLookingAtTab = nil
+        switch surface {
+        case .approvalCard, .questionCard:
+            // An approval or question took the island meanwhile: the card
+            // waits behind it again, first in line.
+            if sessions[sessionId] != nil { completionQueue.insert(sessionId, at: 0) }
+        case .sessionList:
+            // The user opened the session list, which shows this finished
+            // turn as well: no card over it.
+            break
+        case .collapsed, .completionCard:
+            if sessions[sessionId] != nil, !tabVisible {
+                withAnimation(NotchAnimation.pop) { doShowCompletion(sessionId) }
+            } else if case .completionCard = surface {
+                // Its own tab is in front (or it is gone): the card whose time
+                // ran out moves on to the next one, or folds.
+                showNextCompletionOrCollapse()
+            } else {
+                _ = showNextQueuedCompletion()
+            }
+        }
     }
 
     /// Find the most recently active non-idle session
