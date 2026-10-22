@@ -50,9 +50,19 @@ final class DeclaredSubsessionTests: XCTestCase {
     /// What HookServer hands the reducer in merge mode.
     private func merged(_ payload: [String: Any], into card: String? = nil) -> [String: Any] {
         var raw = payload
-        let child = raw["session_id"] as? String ?? childId
-        XCTAssertTrue(DeclaredSubsession.applyMerge(to: &raw, parentCardId: card ?? parentId, childCardId: child))
+        guard let link = DeclaredSubsession.link(in: raw) else {
+            XCTFail("a declared child: \(payload)")
+            return raw
+        }
+        XCTAssertTrue(SubsessionRouter.fold(&raw, link: link, into: card ?? parentId))
         return raw
+    }
+
+    /// Fold a payload the way Merge does, as the declared child it names.
+    @discardableResult
+    private func fold(_ raw: inout [String: Any], into card: String) -> Bool {
+        guard let link = DeclaredSubsession.link(in: raw) else { return false }
+        return SubsessionRouter.fold(&raw, link: link, into: card)
     }
 
     private func sounds(_ effects: [SideEffect]) -> [String] {
@@ -113,30 +123,28 @@ final class DeclaredSubsessionTests: XCTestCase {
 
     func testMergeRewritesOntoTheParentAndDropsTheDeclaration() {
         var raw = childPayload("PreToolUse", ["tool_name": "Bash"])
-        XCTAssertTrue(DeclaredSubsession.applyMerge(to: &raw, parentCardId: parentId, childCardId: childId))
+        XCTAssertTrue(fold(&raw, into: parentId))
         XCTAssertEqual(raw["session_id"] as? String, parentId)
         XCTAssertEqual(raw["agent_id"] as? String, childId)
         XCTAssertEqual(raw["agent_type"] as? String, "worker")
-        XCTAssertEqual(raw[DeclaredSubsession.mergedKey] as? Bool, true)
+        XCTAssertEqual(raw[SubsessionRouter.foldedKey] as? String, SubsessionLink.Kind.declared.rawValue)
         XCTAssertNil(raw[DeclaredSubsession.parentKey], "it described the old session_id")
 
         var unnamed: [String: Any] = ["session_id": childId, "_parent_session_id": parentId]
-        DeclaredSubsession.applyMerge(to: &unnamed, parentCardId: parentId, childCardId: childId)
-        XCTAssertEqual(unnamed["agent_type"] as? String, DeclaredSubsession.defaultAgentType)
+        fold(&unnamed, into: parentId)
+        XCTAssertEqual(unnamed["agent_type"] as? String, SubsessionLink.Kind.declared.defaultAgentType)
     }
 
     func testMergeOnlyLandsOnACardThePayloadCanAddress() {
         var remote: [String: Any] = ["session_id": childId, "_parent_session_id": parentId, "_remote_host_id": "devbox"]
-        XCTAssertTrue(DeclaredSubsession.applyMerge(
-            to: &remote,
-            parentCardId: "remote:devbox:\(parentId)",
-            childCardId: "remote:devbox:\(childId)"
-        ))
+        XCTAssertEqual(DeclaredSubsession.link(in: remote)?.childCardId, "remote:devbox:\(childId)")
+        XCTAssertTrue(fold(&remote, into: "remote:devbox:\(parentId)"))
         XCTAssertEqual(remote["session_id"] as? String, parentId, "HookEvent re-adds the host prefix")
+        XCTAssertEqual(remote["agent_id"] as? String, "remote:devbox:\(childId)", "a declared row goes by the child's card id")
 
         var strayRemote: [String: Any] = ["session_id": childId, "_parent_session_id": parentId, "_remote_host_id": "devbox"]
         let before = strayRemote.count
-        XCTAssertFalse(DeclaredSubsession.applyMerge(to: &strayRemote, parentCardId: parentId, childCardId: childId))
+        XCTAssertFalse(fold(&strayRemote, into: parentId))
         XCTAssertEqual(strayRemote.count, before)
         XCTAssertEqual(strayRemote["session_id"] as? String, childId, "left untouched")
 
@@ -144,13 +152,13 @@ final class DeclaredSubsessionTests: XCTestCase {
             "session_id": "child-thread", "_parent_session_id": "parent-thread",
             "_source": "codex", "_term_bundle": "com.openai.codex",
         ]
-        XCTAssertFalse(DeclaredSubsession.applyMerge(to: &desktop, parentCardId: "parent-thread", childCardId: "codexapp:child-thread"))
-        XCTAssertTrue(DeclaredSubsession.applyMerge(to: &desktop, parentCardId: "codexapp:parent-thread", childCardId: "codexapp:child-thread"))
+        XCTAssertFalse(fold(&desktop, into: "parent-thread"))
+        XCTAssertTrue(fold(&desktop, into: "codexapp:parent-thread"))
 
         // TRAE stamps every hook with the running agent's id, so `agent_id`
         // cannot mark a folded child there.
         var trae: [String: Any] = ["session_id": childId, "_parent_session_id": parentId, "_source": "trae"]
-        XCTAssertFalse(DeclaredSubsession.applyMerge(to: &trae, parentCardId: parentId, childCardId: childId))
+        XCTAssertFalse(fold(&trae, into: parentId))
     }
 
     // MARK: - Separate cards: children stay quiet

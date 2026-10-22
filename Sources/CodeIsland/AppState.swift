@@ -92,6 +92,12 @@ struct CodexDesktopThreadRecord: Sendable {
     let subagentStatus: String?
 }
 
+/// AppState's answers to the Agent Sub-Sessions resolvers, taken on the main
+/// actor for one hook (``AppState/subsessionContext``).
+struct AppSubsessionContext: SubsessionContext {
+    let cards: [String: SessionSnapshot]
+}
+
 @MainActor
 @Observable
 final class AppState {
@@ -2114,7 +2120,7 @@ final class AppState {
         sessions[sessionId]?.currentTool = event.activityLabel
         sessions[sessionId]?.toolDescription = event.toolDescription
         sessions[sessionId]?.lastActivity = Date()
-        markMergedSubagentWaiting(sessionId: sessionId, agentId: event.agentId, status: .waitingApproval)
+        markMergedSubagentWaiting(sessionId: sessionId, event: event, status: .waitingApproval)
         // Backfill tool name/description from cached PreToolUse when the payload is thin.
         enrichPermissionRequestFromCache(sessionId: sessionId, event: event)
 
@@ -2431,11 +2437,6 @@ final class AppState {
             .first?.key
     }
 
-    /// The card a subagent with this id is folded into, if any.
-    func sessionId(hostingSubagent agentId: String) -> String? {
-        sessions.first { $0.value.subagents[agentId] != nil }?.key
-    }
-
     func findSessionId(providerSessionId: String) -> String? {
         if sessions[providerSessionId] != nil {
             return providerSessionId
@@ -2470,6 +2471,11 @@ final class AppState {
                 && snapshot.providerSessionId == providerSessionId
                 && snapshot.isNativeAppMode == childIsDesktop
         })?.key
+    }
+
+    /// What Agent Sub-Sessions needs from the island to route one hook.
+    var subsessionContext: AppSubsessionContext {
+        AppSubsessionContext(cards: sessions)
     }
 
     func denyPermission(expectedSessionId: String? = nil) {
@@ -2550,7 +2556,7 @@ final class AppState {
 
         sessions[sessionId]?.status = .waitingQuestion
         sessions[sessionId]?.lastActivity = Date()
-        markMergedSubagentWaiting(sessionId: sessionId, agentId: event.agentId, status: .waitingQuestion)
+        markMergedSubagentWaiting(sessionId: sessionId, event: event, status: .waitingQuestion)
 
         let request = QuestionRequest(event: event, question: question, continuation: continuation)
         questionQueue.append(request)
@@ -2674,7 +2680,7 @@ final class AppState {
 
         sessions[sessionId]?.status = .waitingQuestion
         sessions[sessionId]?.lastActivity = Date()
-        markMergedSubagentWaiting(sessionId: sessionId, agentId: event.agentId, status: .waitingQuestion)
+        markMergedSubagentWaiting(sessionId: sessionId, event: event, status: .waitingQuestion)
 
         let askState = AskUserQuestionState(items: askItems, answers: [:])
         let request = QuestionRequest(
@@ -4530,15 +4536,30 @@ final class AppState {
 
     private func markMergedSubagentWaiting(
         sessionId: String,
-        agentId: String?,
+        event: HookEvent,
         status: AgentStatus
     ) {
-        guard let agentId else { return }
+        guard let agentId = event.agentId else { return }
         guard var session = sessions[sessionId] else { return }
+        // A row the request creates goes by the hook's own `agent_type` (a
+        // Codex thread's role, a pi child's agent). A child session Agent
+        // Sub-Sessions folded here is marked as one, so its later hooks
+        // follow this row.
+        let foldedKind = SubsessionRouter.foldedKind(of: event)
+        let agentType = (event.rawJSON["agent_type"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         var subagent = session.subagents[agentId]
-            ?? SubagentState(agentId: agentId, agentType: "cursor-subagent")
+            ?? SubagentState(
+                agentId: agentId,
+                agentType: agentType.flatMap { $0.isEmpty ? nil : $0 }
+                    ?? foldedKind?.defaultAgentType
+                    ?? "cursor-subagent"
+            )
         subagent.status = status
         subagent.lastActivity = Date()
+        if let foldedKind {
+            subagent.subsessionKind = foldedKind
+        }
         session.subagents[agentId] = subagent
         sessions[sessionId] = session
     }

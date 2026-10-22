@@ -184,10 +184,12 @@ public struct SessionSnapshot: Sendable {
     public var sessionTitle: String?
     public var sessionTitleSource: SessionTitleSource?
     public var providerSessionId: String?
-    /// The session this one works for, when it said so (`_parent_session_id`,
-    /// see ``DeclaredSubsession``): a pi-subagents child on a card of its own.
-    /// Its turns are part of the parent's, so none of them rings, pops a
-    /// completion card or sends a push; approvals and questions still do.
+    /// The card of the session this one works for: a child session on a card
+    /// of its own (``SubsessionLink`` — a Codex subagent thread, a Cursor
+    /// Task, a pi-subagents child, …), as Agent Sub-Sessions routed it or the
+    /// child declared it (`_parent_session_id`). Its turns are part of the
+    /// parent's, so none of them rings, pops a completion card or sends a
+    /// push; approvals and questions still do. Persisted.
     public var parentSessionId: String?
     /// AiWork/Agentix `client_type` from `sessions.get` (e.g. `DTCoderGUI`, `AiWorkGUI`).
     /// Prefer this over the `acp:`/`cli:` session-id prefix — modern TUI also uses `acp:`.
@@ -1238,6 +1240,7 @@ private func applyHookEvent(
             effects: &effects
         )
         recordSubagentModel(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event)
+        recordFoldedSubsession(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event)
         if handled { return effects }
     }
 
@@ -1617,7 +1620,7 @@ private func applyHookEvent(
            !sessionTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             sessions[sessionId]?.sessionTitle = sessionTitle
         }
-        sessions[sessionId]?.parentSessionId = DeclaredSubsession.parentSessionId(in: event.rawJSON)
+        sessions[sessionId]?.parentSessionId = SubsessionRouter.parentCardId(in: event.rawJSON)
         if !isRemote {
             effects.append(.tryMonitorSession(sessionId: sessionId))
         }
@@ -1869,6 +1872,13 @@ public func fillMissingParentMetadataFromSubagentEvent(
        let hostId = claudeDesktopSessionId(in: event) {
         sessions[sessionId]?.claudeDesktopSessionId = hostId
     }
+    // A child on a card of its own whose hooks also carry an `agent_id`
+    // (Codex has sent a thread's own id as one) is still linked to its
+    // parent. A hook folded into its parent's card carries no link.
+    if sessions[sessionId]?.parentSessionId == nil,
+       let parentSessionId = SubsessionRouter.parentCardId(in: event.rawJSON) {
+        sessions[sessionId]?.parentSessionId = parentSessionId
+    }
 }
 
 /// The Claude Desktop Code-tab id the bridge forwarded from
@@ -1884,9 +1894,11 @@ private func shouldReopenSubagentOnPrompt(event: HookEvent, session: SessionSnap
     if (event.rawJSON["_cursor_subagent"] as? Bool) == true {
         return true
     }
-    // A folded declared child (a pi-subagents child) starts every turn with a
-    // prompt; one sent after its last Stop is a new turn of the same child.
-    if DeclaredSubsession.isMergedEvent(event) {
+    // A child session folded into its parent's card (a Cursor Task, a Codex
+    // thread, a pi-subagents child) starts every turn with a prompt, and none
+    // sends a SubagentStart: one sent after its last Stop is a new turn of
+    // the same child.
+    if SubsessionRouter.foldedKind(of: event) != nil {
         return true
     }
     let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String)
@@ -2077,7 +2089,7 @@ public func extractMetadata(into sessions: inout [String: SessionSnapshot], sess
        !sessionTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         sessions[sessionId]?.sessionTitle = sessionTitle
     }
-    if let parentSessionId = DeclaredSubsession.parentSessionId(in: event.rawJSON) {
+    if let parentSessionId = SubsessionRouter.parentCardId(in: event.rawJSON) {
         sessions[sessionId]?.parentSessionId = parentSessionId
     }
 }
@@ -2206,6 +2218,21 @@ private func recordSubagentModel(
               .trimmingCharacters(in: .whitespacesAndNewlines),
           !model.isEmpty else { return }
     sessions[sessionId]?.subagents[agentId]?.model = model
+}
+
+/// Mark the row of a child session Agent Sub-Sessions folded into this card
+/// (``SubagentState/subsessionKind``), so the child's later hooks follow it
+/// here. A row the agent's own SubagentStart rebuilt is marked again by the
+/// child's next folded hook.
+private func recordFoldedSubsession(
+    sessions: inout [String: SessionSnapshot],
+    sessionId: String,
+    agentId: String,
+    event: HookEvent
+) {
+    guard let kind = SubsessionRouter.foldedKind(of: event),
+          sessions[sessionId]?.subagents[agentId] != nil else { return }
+    sessions[sessionId]?.subagents[agentId]?.subsessionKind = kind
 }
 
 /// Handle subagent events. Returns true if the event was consumed.

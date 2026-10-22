@@ -385,8 +385,16 @@ public struct HookEvent {
     public let rawJSON: [String: Any]  // Full payload for event-specific fields
 
     public init?(from data: Data) {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let eventName = HookEvent.firstString(in: json, keys: ["hook_event_name", "hookEventName", "event_name", "eventName"]) else {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        self.init(json: json)
+    }
+
+    /// A hook from its payload already parsed (HookServer parses one once to
+    /// route it under Agent Sub-Sessions).
+    public init?(json: [String: Any]) {
+        guard let eventName = HookEvent.firstString(in: json, keys: ["hook_event_name", "hookEventName", "event_name", "eventName"]) else {
             return nil
         }
         self.eventName = eventName
@@ -808,6 +816,10 @@ public struct SubagentState: Sendable {
     /// since a Task routinely runs on a different model than its caller.
     public var model: String?
     public var reasoningEffort: String?
+    /// Set when this row is a child session folded into the card (see
+    /// ``SubsessionLink``) rather than the agent's own subagent; the child's
+    /// later hooks follow it here.
+    public var subsessionKind: SubsessionLink.Kind?
 
     public init(agentId: String, agentType: String) {
         self.agentId = agentId
