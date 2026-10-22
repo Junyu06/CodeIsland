@@ -156,7 +156,9 @@ extension AppState {
     /// - `errorDetail`: the failure's own text, from the event that reported
     ///   it. Never the session's last reply — that can be the previous
     ///   turn's; with nothing better the push says only that it failed.
-    func pushTurnEnded(sessionId: String, failed: Bool, errorDetail: String? = nil) {
+    /// - `smartSuppressed`: Smart Suppress's answer as `AttentionPolicy`
+    ///   gave it; nil asks Smart Suppress now.
+    func pushTurnEnded(sessionId: String, failed: Bool, errorDetail: String? = nil, smartSuppressed: Bool? = nil) {
         let notifier = PushNotifier.shared
         guard notifier.isEnabled else { return }
         let session = sessions[sessionId]
@@ -166,7 +168,7 @@ extension AppState {
         notifier.notify(
             content,
             subject: pushSubject(for: sessionId),
-            smartSuppressed: !self.shouldAutoOpenPendingSurface(for: sessionId)
+            smartSuppressed: smartSuppressed ?? !self.shouldAutoOpenPendingSurface(for: sessionId)
         )
     }
 

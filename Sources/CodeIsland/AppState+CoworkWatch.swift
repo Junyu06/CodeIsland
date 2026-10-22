@@ -290,22 +290,18 @@ extension AppState {
            activeSessionId == nil || sessions[activeSessionId ?? ""]?.status == .idle {
             activeSessionId = key
         }
-        // One cue per turn boundary, reusing the hook event names so the
-        // existing per-event sound toggles apply unchanged.
+        // One moment per turn boundary. The policy rings the cues hook events
+        // ring, so the per-event sound switches apply unchanged.
         if update.turnsCompleted > 0, snapshot.status == .idle {
             // Stopped with Claude Desktop's Stop button: the user is right
-            // there and knows. Like an AiWork abort — no jingle, no completion
-            // card (so no follow-up), no push; the card just reads interrupted.
-            guard !update.audit.lastTurnInterrupted else { return }
-            SoundManager.shared.handleEvent(
-                update.audit.lastTurnFailed ? EventSoundRouting.turnFailed : "Stop",
-                sessionId: key
-            )
-            enqueueCompletion(key, turnFailed: update.audit.lastTurnFailed)
+            // there and knows — no jingle, no completion card (so no
+            // follow-up), no push; the card just reads interrupted.
+            let end: TurnEnd = update.audit.lastTurnInterrupted ? .stopped
+                : update.audit.lastTurnFailed ? .failed : .completed
             // A failed turn's `result` record carries the error text.
-            pushTurnEnded(
+            attend(
+                .turnEnded(end, host: .claudeDesktop),
                 sessionId: key,
-                failed: update.audit.lastTurnFailed,
                 errorDetail: update.audit.lastTurnFailed ? update.audit.lastResultText : nil
             )
         } else if update.permissionsRequested > 0,
@@ -313,10 +309,10 @@ extension AppState {
             // Display-only wait, like Cursor's in-IDE question (#265): the sound
             // and the waiting status say Cowork is blocked; nothing is queued,
             // since the answer can only be given in Claude Desktop.
-            SoundManager.shared.handleEvent("PermissionRequest")
+            attend(.requestRaisedElsewhere, sessionId: key)
         } else if update.promptsStarted > 0 {
             let isFreshSession = isNew && metadata.createdAt.map { Date().timeIntervalSince($0) < 120 } == true
-            SoundManager.shared.handleEvent(isFreshSession ? "SessionStart" : "UserPromptSubmit")
+            attend(.turnStarted(newSession: isFreshSession), sessionId: key)
         }
     }
 

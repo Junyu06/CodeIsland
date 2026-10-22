@@ -420,15 +420,14 @@ final class FollowUpReminderController {
         if hinted { hintPulse += 1 }
 
         // Same sound as the original event, once per kind per tick — a turn
-        // that died rings the error jingle again, not "done". The regular
-        // gates (master switch, per-event toggle) still apply.
+        // that died rings the error jingle again, not "done" (AttentionPolicy's
+        // `.reminderDue`). The regular gates (master switch, per-event toggle)
+        // still apply: SoundManager holds the cue to the policy's sound rules.
         var sounds: [String] = []
         for reminder in reminders {
-            let sound: String
-            switch reminder.kind {
-            case .approval, .question: sound = "PermissionRequest"
-            case .completion: sound = reminder.turnFailed ? EventSoundRouting.turnFailed : "Stop"
-            }
+            guard let sound = AttentionPolicy.intents(
+                for: .reminderDue(reminder.kind, turnFailed: reminder.turnFailed)
+            ).sound else { continue }
             if !sounds.contains(sound) { sounds.append(sound) }
         }
         sounds.forEach(playSound)

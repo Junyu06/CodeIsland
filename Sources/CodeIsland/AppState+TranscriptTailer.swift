@@ -319,7 +319,7 @@ extension AppState {
                 questionStateChanged = true
             }
             if application == .markedWaiting(fresh: true) {
-                SoundManager.shared.handleEvent("PermissionRequest")
+                attend(.requestRaisedElsewhere, sessionId: delta.sessionId)
             }
         }
 

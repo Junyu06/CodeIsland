@@ -71,28 +71,29 @@ extension AppState {
             displayOnlyWaitAsks.removeValue(forKey: sessionId)
         }
         guard began else { return }
-        followUps.displayOnlyWaitsChanged(began: FollowUpReminderScheduler.Key(current, sessionId))
-        if announce {
-            pushDisplayOnlyWait(sessionId: sessionId)
+        let attention = decideAttention(.displayOnlyWaitBegan(current, announce: announce), sessionId: sessionId)
+        if case .restartWait(let kind)? = attention.followUp {
+            followUps.displayOnlyWaitsChanged(began: FollowUpReminderScheduler.Key(kind, sessionId))
+        }
+        if let push = attention.push {
+            pushDisplayOnlyWait(sessionId: sessionId, smartSuppressed: push.smartSuppressed)
         }
     }
 
     // MARK: - Push
 
-    /// The first push for a display-only wait. Same gates as a queued
-    /// approval: only while away, Smart Suppress while present, dedupe, rate
-    /// limit, per-channel kind filter.
+    /// The first push for a display-only wait, as `AttentionPolicy` decided
+    /// it. Same gates as a queued approval from here: only while away, Smart
+    /// Suppress while present, dedupe, rate limit, per-channel kind filter.
     @discardableResult
-    func pushDisplayOnlyWait(sessionId: String) -> PushDecision {
-        let notifier = PushNotifier.shared
-        guard notifier.isEnabled else { return .disabled }
+    func pushDisplayOnlyWait(sessionId: String, smartSuppressed: Bool) -> PushDecision {
         guard let content = displayOnlyWaitPushContent(forSession: sessionId) else {
             return .skipped(.nothingPending)
         }
-        return notifier.notify(
+        return PushNotifier.shared.notify(
             content,
             subject: pushSubject(for: sessionId),
-            smartSuppressed: !self.shouldAutoOpenPendingSurface(for: sessionId),
+            smartSuppressed: smartSuppressed,
             request: pushRequest(forDisplayOnlyWait: sessionId, asking: content)
         )
     }

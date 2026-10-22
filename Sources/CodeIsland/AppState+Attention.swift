@@ -45,6 +45,34 @@ extension AppState {
         )
     }
 
+    /// Decide `moment` and carry the decision out at once — for turns and
+    /// requests from sources the hook reducer never sees (Claude Desktop,
+    /// AiWork, Cursor's in-IDE question), which have nothing to interleave
+    /// with it.
+    ///
+    /// - `errorDetail`: what the source itself said went wrong, for the push
+    ///   of a failed turn.
+    @discardableResult
+    func attend(_ moment: AttentionMoment, sessionId: String, errorDetail: String? = nil) -> AttentionDecision {
+        let decision = decideAttention(moment, sessionId: sessionId)
+        if let push = decision.push {
+            switch push.kind {
+            case .error, .completion:
+                pushTurnEnded(
+                    sessionId: sessionId,
+                    failed: push.kind == .error,
+                    errorDetail: errorDetail,
+                    smartSuppressed: push.smartSuppressed
+                )
+            case .approval, .question, .displayOnlyWait:
+                assertionFailure("\(moment) pushes from where its request is queued or its wait noticed")
+            }
+        }
+        announceCompletion(decision, sessionId: sessionId)
+        playAttentionSound(decision, sessionId: sessionId)
+        return decision
+    }
+
     /// Plays the decided sound. `sessionId` scopes the turn-failure jingle's
     /// debounce.
     func playAttentionSound(_ decision: AttentionDecision, sessionId: String) {
