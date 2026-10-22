@@ -3994,6 +3994,9 @@ final class AppState {
                 if applyDiscoveredMetadata(info, to: info.sessionId) {
                     didMutate = true
                 }
+                if linkDiscoveredChild(info) {
+                    didMutate = true
+                }
                 attachTranscriptTailerIfNeeded(sessionId: info.sessionId)
                 tryMonitorSession(info.sessionId)
                 refreshProviderTitle(
@@ -4094,6 +4097,7 @@ final class AppState {
                 session.lastAssistantMessage = last.text
             }
             session.transcriptPath = info.transcriptPath
+            session.parentSessionId = discoveredParentCardId(info)
             sessions[info.sessionId] = session
             refreshProviderTitle(
                 for: info.sessionId,
@@ -4196,6 +4200,40 @@ final class AppState {
             sessions[sessionId] = session
         }
         return mutated
+    }
+
+    /// Link the discovered thread's own card to its parent (see
+    /// ``discoveredParentCardId(_:)``). Never a card the discovery was merged
+    /// into as a duplicate: a Codex CLI discovery names no provider thread, so
+    /// that can be another thread's card — a root, which a link would silence.
+    @discardableResult
+    private func linkDiscoveredChild(_ info: DiscoveredSession) -> Bool {
+        guard sessions[info.sessionId]?.parentSessionId == nil,
+              let parent = discoveredParentCardId(info) else {
+            return false
+        }
+        sessions[info.sessionId]?.parentSessionId = parent
+        return true
+    }
+
+    /// The card a discovered Codex subagent thread works for: its parent
+    /// thread's card, or the card that thread's hooks would build. Agent
+    /// Sub-Sessions shows it on a card of its own only in Show separately (or
+    /// while Merge has no parent card to fold it into), where it stays quiet.
+    private func discoveredParentCardId(_ info: DiscoveredSession) -> String? {
+        guard info.source == "codex",
+              let parentThreadId = info.parentSessionId,
+              !parentThreadId.isEmpty else {
+            return nil
+        }
+        let parent = findCodexParentSessionId(
+            providerSessionId: parentThreadId,
+            childTermBundleId: info.termBundleId
+        ) ?? Self.codexDiscoveryIdentity(
+            rawSessionId: parentThreadId,
+            isDesktop: info.termBundleId == Self.codexAppBundleId
+        ).sessionId
+        return parent == info.sessionId ? nil : parent
     }
 
     @discardableResult
@@ -4853,6 +4891,8 @@ final class AppState {
                 child.currentTool = subagent.currentTool
                 child.toolDescription = subagent.toolDescription ?? subagent.agentType
                 child.lastActivity = subagent.lastActivity
+                // Still the parent's child, on a card of its own: quiet.
+                child.parentSessionId = child.parentSessionId ?? parent.sessionId
 
                 let transcriptMetadata = child.transcriptPath.flatMap {
                     Self.codexSubagentMetadata(inTranscriptPath: $0)
@@ -4961,6 +5001,8 @@ final class AppState {
                 child.currentTool = subagent.currentTool
                 child.toolDescription = subagent.toolDescription ?? subagent.agentType
                 child.lastActivity = subagent.lastActivity
+                // Still the chat's Task, on a card of its own: quiet.
+                child.parentSessionId = child.parentSessionId ?? parent.sessionId
                 if child.sessionTitle == nil {
                     child.sessionTitle = subagent.toolDescription ?? subagent.agentType
                 }

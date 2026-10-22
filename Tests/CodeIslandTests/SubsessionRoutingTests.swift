@@ -528,4 +528,99 @@ final class SubsessionRoutingTests: XCTestCase {
         XCTAssertEqual(routed.sessionId, "opencode-main")
         XCTAssertNil(routed.raw["agent_id"])
     }
+
+    // MARK: - Every known child shown separately is linked
+
+    func testShowingFoldedChildrenSeparatelyLinksTheirNewCards() throws {
+        let appState = AppState()
+        var codexParent = SessionSnapshot()
+        codexParent.source = "codex"
+        codexParent.status = .running
+        codexParent.subagents[childThread] = SubagentState(agentId: childThread, agentType: "worker")
+        appState.sessions[parentThread] = codexParent
+        var chat = SessionSnapshot()
+        chat.source = "cursor"
+        chat.status = .running
+        chat.providerSessionId = cursorChat
+        chat.subagents[cursorTask] = SubagentState(agentId: cursorTask, agentType: "cursor-subagent")
+        appState.sessions[cursorChat] = chat
+
+        appState.applyCurrentPluginSessionMode(persist: false)
+
+        XCTAssertEqual(appState.sessions[childThread]?.parentSessionId, parentThread)
+        XCTAssertEqual(appState.sessions[cursorTask]?.parentSessionId, cursorChat)
+        XCTAssertNil(appState.sessions[parentThread]?.parentSessionId)
+        XCTAssertNil(appState.sessions[cursorChat]?.parentSessionId)
+    }
+
+    func testDiscoveredCodexChildShownSeparatelyIsLinked() {
+        let appState = AppState()
+        appState.integrateDiscovered([AppState.DiscoveredSession(
+            sessionId: childThread,
+            cwd: "/repo",
+            tty: nil,
+            model: nil,
+            pid: nil,
+            modifiedAt: Date(),
+            recentMessages: [],
+            source: "codex",
+            parentSessionId: parentThread,
+            agentType: "worker",
+            status: .processing,
+            providerSessionId: childThread
+        )])
+        XCTAssertEqual(appState.sessions[childThread]?.parentSessionId, parentThread)
+
+        appState.integrateDiscovered([AppState.DiscoveredSession(
+            sessionId: parentThread,
+            cwd: "/repo",
+            tty: nil,
+            model: nil,
+            pid: nil,
+            modifiedAt: Date(),
+            recentMessages: [],
+            source: "codex",
+            status: .processing,
+            providerSessionId: parentThread
+        )])
+        XCTAssertNil(appState.sessions[parentThread]?.parentSessionId)
+    }
+
+    /// A Codex CLI discovery names no provider thread, so discovery can merge
+    /// it into another card of the same cwd and process as a duplicate — a
+    /// root's. That card is not the discovered thread's and is never linked:
+    /// the root keeps ringing.
+    func testDiscoveryNeverLinksTheCardADuplicateWasMergedInto() throws {
+        let appState = AppState()
+        var root = SessionSnapshot()
+        root.source = "codex"
+        root.cwd = "/repo"
+        root.status = .processing
+        root.cliPid = getpid()
+        root.lastActivity = Date(timeIntervalSinceNow: -60)
+        appState.sessions[parentThread] = root
+
+        let grandchild = "019a0000-0000-7000-8000-0000000000cc"
+        appState.integrateDiscovered([AppState.DiscoveredSession(
+            sessionId: grandchild,
+            cwd: "/repo",
+            tty: nil,
+            model: nil,
+            pid: getpid(),
+            modifiedAt: Date(),
+            recentMessages: [],
+            source: "codex",
+            parentSessionId: childThread,
+            status: .processing
+        )])
+        XCTAssertNil(appState.sessions[grandchild], "merged into the root's card as a duplicate")
+        XCTAssertNil(appState.sessions[parentThread]?.parentSessionId)
+
+        appState.handleEvent(try XCTUnwrap(HookEvent(json: [
+            "hook_event_name": "Stop", "session_id": parentThread, "_source": "codex", "cwd": "/repo",
+            "last_assistant_message": "done",
+        ])))
+        XCTAssertEqual(appState.justCompletedSessionId, parentThread)
+        XCTAssertEqual(played, ["8bit_complete"])
+    }
 }
