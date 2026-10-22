@@ -607,7 +607,7 @@ final class PushNotifierTests: XCTestCase {
         let appState = AppState()
         appState.sessions["push-no-text"] = SessionSnapshot()
         appState.sessions["push-no-text"]?.lastAssistantMessage = "Reply from the turn before"
-        appState.pushTurnEnded(sessionId: "push-no-text", failed: true)
+        appState.pushTurnEnded(.init(kind: .error, smartSuppressed: false), sessionId: "push-no-text")
         await waitForRequests(1)
         let body = try XCTUnwrap(sentBodies().first)
         XCTAssertEqual(body["body"] as? String, L10n.shared["push_msg_error"])

@@ -56,17 +56,7 @@ extension AppState {
     func attend(_ moment: AttentionMoment, sessionId: String, errorDetail: String? = nil) -> AttentionDecision {
         let decision = decideAttention(moment, sessionId: sessionId)
         if let push = decision.push {
-            switch push.kind {
-            case .error, .completion:
-                pushTurnEnded(
-                    sessionId: sessionId,
-                    failed: push.kind == .error,
-                    errorDetail: errorDetail,
-                    smartSuppressed: push.smartSuppressed
-                )
-            case .approval, .question, .displayOnlyWait:
-                assertionFailure("\(moment) pushes from where its request is queued or its wait noticed")
-            }
+            pushTurnEnded(push, sessionId: sessionId, errorDetail: errorDetail)
         }
         announceCompletion(decision, sessionId: sessionId)
         playAttentionSound(decision, sessionId: sessionId)

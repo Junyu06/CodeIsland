@@ -98,16 +98,27 @@ extension AppState {
         }
     }
 
-    /// A hook event's push, as `AttentionPolicy` decided it: the error a turn
-    /// stopped on, or the turn's completion. Runs once the event has settled
-    /// and before the completion card, with this turn's reply as the summary.
-    func pushHookEvent(_ push: AttentionDecision.Push?, facts: HookEventFacts, sessionId: String) {
-        guard let push else { return }
+    /// A turn's end, pushed as `AttentionPolicy` decided it: the error it
+    /// stopped on, or its completion with this turn's reply as the summary
+    /// and the subagent / interrupted flags for the push gate. Hook turns and
+    /// those of the sources that bypass the hook reducer (AiWork, Claude
+    /// Desktop Cowork) alike.
+    ///
+    /// - `errorType` / `errorDetail`: what the failure itself said — a hook's
+    ///   StopFailure fields, the text an AiWork or Cowork failure carried.
+    ///   Never the session's last reply: that can be the previous turn's;
+    ///   with nothing better the push says only that it failed.
+    func pushTurnEnded(
+        _ push: AttentionDecision.Push,
+        sessionId: String,
+        errorType: String? = nil,
+        errorDetail: String? = nil
+    ) {
         let notifier = PushNotifier.shared
         switch push.kind {
         case .error:
             notifier.notify(
-                .error(type: facts.turnError?.type, detail: facts.turnError?.detail),
+                .error(type: errorType, detail: errorDetail),
                 subject: pushSubject(for: sessionId),
                 smartSuppressed: push.smartSuppressed
             )
@@ -121,7 +132,7 @@ extension AppState {
             )
         case .approval, .question, .displayOnlyWait:
             // Requests and waits push from where they are queued or noticed.
-            assertionFailure("a hook event pushes its turn's end only")
+            assertionFailure("only a turn's end is pushed here, not \(push.kind)")
         }
     }
 
@@ -138,28 +149,6 @@ extension AppState {
         return candidates.lazy
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first { !$0.isEmpty }
-    }
-
-    /// A turn ended in a source that bypasses the hook reducer (AiWork,
-    /// Claude Desktop Cowork): its completion, or its error when it failed.
-    ///
-    /// - `errorDetail`: the failure's own text, from the event that reported
-    ///   it. Never the session's last reply — that can be the previous
-    ///   turn's; with nothing better the push says only that it failed.
-    /// - `smartSuppressed`: Smart Suppress's answer as `AttentionPolicy`
-    ///   gave it; nil asks Smart Suppress now.
-    func pushTurnEnded(sessionId: String, failed: Bool, errorDetail: String? = nil, smartSuppressed: Bool? = nil) {
-        let notifier = PushNotifier.shared
-        guard notifier.isEnabled else { return }
-        let session = sessions[sessionId]
-        let content: PushContent = failed
-            ? .error(type: nil, detail: errorDetail)
-            : .completion(summary: Self.pushCompletionSummary(session))
-        notifier.notify(
-            content,
-            subject: pushSubject(for: sessionId),
-            smartSuppressed: smartSuppressed ?? !self.shouldAutoOpenPendingSurface(for: sessionId)
-        )
     }
 
     /// Subscribes the push channels to follow-up reminders. Called once at launch.

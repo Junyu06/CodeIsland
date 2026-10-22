@@ -1899,7 +1899,14 @@ final class AppState {
             subject.isChild = true
         }
         let attention = decideAttention(.hookEvent(reduction.facts), sessionId: sessionId, subject: subject)
-        pushHookEvent(attention.push, facts: reduction.facts, sessionId: sessionId)
+        if let push = attention.push {
+            pushTurnEnded(
+                push,
+                sessionId: sessionId,
+                errorType: reduction.facts.turnError?.type,
+                errorDetail: reduction.facts.turnError?.detail
+            )
+        }
         announceCompletion(attention, sessionId: sessionId)
         for effect in reduction.effects {
             executeEffect(effect, sessionId: sessionId)
@@ -2048,7 +2055,7 @@ final class AppState {
         case .playSound, .enqueueCompletion:
             // Attention is AttentionPolicy's to decide; `reduceHookEvent`
             // never emits these (only the `reduceEvent` composition does).
-            break
+            assertionFailure("\(effect) reached executeEffect: attention goes through AttentionPolicy")
         }
     }
 
