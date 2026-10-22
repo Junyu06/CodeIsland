@@ -133,8 +133,8 @@ final class HookSocketListener: @unchecked Sendable {
 }
 
 /// One accepted hook connection. Its state lives on the listener's queue;
-/// ``respond(_:)``, ``cancel()``, ``onClose(_:)`` and
-/// ``closeWhenPeerLeaves()`` may be called from any thread.
+/// ``respond(_:)``, ``cancel()``, ``onClose(_:)``, ``closeWhenPeerLeaves()``
+/// and ``closeIfPeerGone()`` may be called from any thread.
 final class HookConnection: @unchecked Sendable {
     /// What the hook sent.
     enum Request {
@@ -256,6 +256,15 @@ final class HookConnection: @unchecked Sendable {
         }
     }
 
+    /// Closes the connection if the hook at the other end is gone; while it
+    /// is there — half-closed, waiting for its answer — nothing happens.
+    func closeIfPeerGone() {
+        queue.async { [self] in
+            guard !finishing, peerIsGone() else { return }
+            finish()
+        }
+    }
+
     // MARK: - On the queue
 
     /// What has arrived; the request once it is complete, else nil.
@@ -279,6 +288,14 @@ final class HookConnection: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    /// Whether the hook has closed its end for good: nothing can be sent to
+    /// it any more (POLLHUP on the write side). Its half-close is not that.
+    private func peerIsGone() -> Bool {
+        var check = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        guard poll(&check, 1, 0) > 0 else { return false }
+        return check.revents & Int16(POLLHUP | POLLERR) != 0
     }
 
     private func writeUnsent() {

@@ -19,17 +19,27 @@ class HookServer {
     let socketPath: String
     /// The tools a test approves without a card; nil reads the user's settings.
     private let pinnedAutoApproveTools: Set<String>?
+    /// How often a held request's hook is checked for being gone: a backstop
+    /// to its watch, which sees that at once (``monitorPeerDisconnect``).
+    private let heldRequestCheckInterval: TimeInterval
     private var listener: HookSocketListener?
     /// Hook connections are accepted and read here, off the main thread; only
     /// a complete request is handed to the main actor (``HookSocketListener``).
     private let connectionQueue = DispatchQueue(label: "com.codeisland.hook-server", qos: .userInitiated)
 
-    /// `socketPath` and `autoApproveTools` are for tests: a socket of their
-    /// own, and the tools approved without a card, not read from the settings.
-    init(appState: AppState, socketPath: String = HookServer.socketPath, autoApproveTools: Set<String>? = nil) {
+    /// `socketPath`, `autoApproveTools` and `heldRequestCheckInterval` are for
+    /// tests: a socket of their own, the tools approved without a card, not
+    /// read from the settings, and a shorter backstop.
+    init(
+        appState: AppState,
+        socketPath: String = HookServer.socketPath,
+        autoApproveTools: Set<String>? = nil,
+        heldRequestCheckInterval: TimeInterval = 300
+    ) {
         self.appState = appState
         self.socketPath = socketPath
         self.pinnedAutoApproveTools = autoApproveTools
+        self.heldRequestCheckInterval = heldRequestCheckInterval
     }
 
     /// Starts listening. False, logged, when the socket cannot be created.
@@ -528,8 +538,6 @@ class HookServer {
 
         switch Self.routeKind(for: event) {
         case .permission:
-            let sessionId = event.sessionId ?? "default"
-
             // Auto-approve safe internal tools without showing UI
             if let toolName = event.toolName, autoApproveTools.contains(toolName) {
                 let response = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
@@ -550,7 +558,7 @@ class HookServer {
 
             // AskUserQuestion is a question, not a permission — route to QuestionBar
             if event.toolName == "AskUserQuestion" {
-                let hook = monitorPeerDisconnect(connection: connection, sessionId: sessionId)
+                let hook = monitorPeerDisconnect(connection: connection)
                 Task {
                     let responseBody = await withCheckedContinuation { continuation in
                         appState.handleAskUserQuestion(event, continuation: continuation, hookConnectionId: hook)
@@ -565,7 +573,7 @@ class HookServer {
                 return
             }
 
-            let hook = monitorPeerDisconnect(connection: connection, sessionId: sessionId)
+            let hook = monitorPeerDisconnect(connection: connection)
             Task {
                 let responseBody = await withCheckedContinuation { continuation in
                     appState.handlePermissionRequest(event, continuation: continuation, hookConnectionId: hook)
@@ -574,8 +582,7 @@ class HookServer {
             }
 
         case .question:
-            let questionSessionId = event.sessionId ?? "default"
-            let hook = monitorPeerDisconnect(connection: connection, sessionId: questionSessionId)
+            let hook = monitorPeerDisconnect(connection: connection)
             Task {
                 let responseBody = await withCheckedContinuation { continuation in
                     appState.handleQuestion(event, continuation: continuation, hookConnectionId: hook)
@@ -609,11 +616,12 @@ class HookServer {
     /// taken for a disconnect, every PermissionRequest was auto-drained as `deny`
     /// before its card was even visible. ``HookConnection/closeWhenPeerLeaves()``
     /// closes the connection only on real teardown, and a connection that closes
-    /// without an answer — its hook gone, or the safety net below — drops its
-    /// card, and no other: each held request has a hook of its own.
+    /// without an answer — its hook gone, seen by that watch or by the safety
+    /// net below — drops its card, and no other: each held request has a hook
+    /// of its own.
     ///
     /// Returns the connection's id, for its request (`hookConnectionId`).
-    private func monitorPeerDisconnect(connection: HookConnection, sessionId: String) -> UUID {
+    private func monitorPeerDisconnect(connection: HookConnection) -> UUID {
         let context = ConnectionContext()
         let connId = ObjectIdentifier(connection)
         connectionContexts[connId] = context
@@ -634,16 +642,18 @@ class HookServer {
         }
         connection.closeWhenPeerLeaves()
 
-        // Safety net: if the connection context is still around after 5 minutes
-        // (e.g. stuck continuation, the connection never closes), clean it up.
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 300_000_000_000)  // 5 minutes
-            guard let self = self else { return }
-            if self.connectionContexts.removeValue(forKey: connId) != nil {
-                log.warning("Connection context for session \(sessionId) timed out — cleaning up")
-                if !context.responded {
-                    connection.cancel()
-                }
+        // Safety net, should the watch ever miss its hook leaving: now and
+        // then, a held request whose hook is gone is closed, and its card
+        // dropped. A hook still there is never cut off: it waits as long as
+        // its agent lets it (the bridge up to 86400 s), for someone who
+        // stepped away (#306), and its request stays answerable.
+        let interval = UInt64(heldRequestCheckInterval * 1_000_000_000)
+        Task { @MainActor [weak self, weak connection] in
+            while (try? await Task.sleep(nanoseconds: interval)) != nil {
+                guard let self, let connection,
+                      self.connectionContexts[connId] === context,
+                      !context.responded else { return }
+                connection.closeIfPeerGone()
             }
         }
         return context.id

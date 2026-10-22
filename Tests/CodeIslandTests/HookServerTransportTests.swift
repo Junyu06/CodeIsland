@@ -70,6 +70,15 @@ final class HookServerTransportTests: XCTestCase {
         }
     }
 
+    /// Replaces the server with one on a socket of its own, checking held
+    /// requests' hooks every `heldRequestCheckInterval`.
+    private func restartServer(heldRequestCheckInterval: TimeInterval) {
+        server.stop()
+        socketPath = "/tmp/ci-ht-\(UUID().uuidString.prefix(8)).sock"
+        server = HookServer(appState: appState, socketPath: socketPath, heldRequestCheckInterval: heldRequestCheckInterval)
+        XCTAssertTrue(server.start(), "HookServer did not listen on \(socketPath!)")
+    }
+
     /// A hook that does not wait for an answer writes its event and closes at
     /// once — while the island's main thread is busy (rendering, a
     /// synchronous read). NWListener dropped such a connection whenever its
@@ -145,6 +154,27 @@ final class HookServerTransportTests: XCTestCase {
         pump(until: { answer.value != nil }, "the answer did not reach the hook")
         let text = String(decoding: answer.value ?? Data(), as: UTF8.self)
         XCTAssertTrue(text.contains(#""behavior":"allow""#), text)
+        hook.close()
+    }
+
+    /// A held request stays answerable for as long as its hook waits — the
+    /// bridge waits up to a day for someone who stepped away (#306). The
+    /// safety net that checks held requests now and then never cuts off a
+    /// hook that is still there.
+    func testAHeldRequestOutlivesTheSafetyNet() throws {
+        restartServer(heldRequestCheckInterval: 0.1)
+        let hook = try XCTUnwrap(RawHook.connect(to: socketPath))
+        hook.write(permissionPayload(session: "away", toolUseId: "tu-away"))
+        let answer = hook.readAnswerInBackground()
+
+        pump(until: { self.appState.pendingPermission != nil }, "no card for the request")
+        pump(for: 1)  // ten rounds of the safety net
+        XCTAssertNotNil(appState.pendingPermission, "the safety net dropped a request whose hook still waits")
+        XCTAssertNil(answer.value, "the safety net cut off a waiting hook")
+
+        appState.approvePermission()
+        pump(until: { answer.value != nil }, "the answer did not reach the hook")
+        XCTAssertTrue(String(decoding: answer.value ?? Data(), as: UTF8.self).contains(#""behavior":"allow""#))
         hook.close()
     }
 
@@ -233,6 +263,69 @@ final class HookServerTransportTests: XCTestCase {
         XCTAssertNil(appState.pendingPermission)
         hook.close()
     }
+}
+
+/// One HookConnection on a socket pair, the hook's end in the test's hands.
+final class HookConnectionTests: XCTestCase {
+    private let queue = DispatchQueue(label: "HookConnectionTests")
+    private var hookEnds: [Int32] = []
+
+    override func tearDown() {
+        hookEnds.forEach { Darwin.close($0) }
+        hookEnds = []
+        super.tearDown()
+    }
+
+    /// A connection and the hook's end of it.
+    private func connectionPair() throws -> (HookConnection, hook: Int32) {
+        var fds: [Int32] = [0, 0]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else {
+            throw XCTSkip("socketpair: \(String(cString: strerror(errno)))")
+        }
+        hookEnds.append(fds[1])
+        return (HookConnection(fd: fds[0], queue: queue), fds[1])
+    }
+
+    /// Set once `connection` closes.
+    private func closing(_ connection: HookConnection) -> Flag {
+        let closed = Flag()
+        connection.onClose { closed.set() }
+        return closed
+    }
+
+    /// Waits until `flag` is set; false after `timeout`.
+    private func wait(for flag: Flag, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !flag.isSet {
+            guard Date() < deadline else { return false }
+            usleep(10_000)
+        }
+        return true
+    }
+
+    /// The safety net's check closes a held connection only once its hook
+    /// is gone: a hook that half-closed and waits for its answer stays.
+    func testThePeerCheckLeavesAWaitingHookAlone() throws {
+        let (connection, hook) = try connectionPair()
+        let closed = closing(connection)
+        shutdown(hook, SHUT_WR)  // the request is written; the hook waits
+
+        connection.closeIfPeerGone()
+        XCTAssertFalse(wait(for: closed, timeout: 0.3), "the check cut off a waiting hook")
+
+        Darwin.close(hook)
+        hookEnds.removeAll { $0 == hook }
+        connection.closeIfPeerGone()
+        XCTAssertTrue(wait(for: closed, timeout: 2), "the check missed a hook that is gone")
+    }
+}
+
+/// Set once, from any thread.
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
 }
 
 /// A hook client of the island's socket, writing the way hooks do.
