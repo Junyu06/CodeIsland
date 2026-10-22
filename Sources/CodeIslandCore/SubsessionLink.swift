@@ -184,13 +184,15 @@ public enum SubsessionCards {
         in cards: [String: SessionSnapshot],
         now: Date = Date()
     ) -> String? {
+        // Past pid_t's range it names no process; converting it would trap.
+        guard let pid = pid_t(exactly: ppid) else { return nil }
         let normalized = SessionSnapshot.normalizedSupportedSource(source)
         let cutoff = now.addingTimeInterval(-samePidActivityWindow)
         return cards
             .filter { cardId, snap in
                 let snapSource = SessionSnapshot.normalizedSupportedSource(snap.source)
                 return snapSource == normalized
-                    && snap.cliPid == pid_t(ppid)
+                    && snap.cliPid == pid
                     && snap.lastActivity >= cutoff
                     && cardId != excludedCardId
                     && (!requireActive || snap.status != .idle)

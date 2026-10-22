@@ -1540,8 +1540,7 @@ private func applyHookEvent(
             sessions[sessionId]?.model = model
             sessions[sessionId]?.modelReportedAt = Date()
         }
-        if let ppid = event.rawJSON["_ppid"] as? Int, ppid > 0 {
-            let newPid = pid_t(ppid)
+        if let newPid = hookProcessId(event) {
             if sessions[sessionId]?.cliPid != newPid {
                 sessions[sessionId]?.cliPid = newPid
                 sessions[sessionId]?.cliStartTime = nil
@@ -1851,8 +1850,8 @@ public func fillMissingParentMetadataFromSubagentEvent(
     }
 
     if sessions[sessionId]?.cliPid == nil,
-       let ppid = event.rawJSON["_ppid"] as? Int, ppid > 0 {
-        sessions[sessionId]?.cliPid = pid_t(ppid)
+       let pid = hookProcessId(event) {
+        sessions[sessionId]?.cliPid = pid
     }
 
     if sessions[sessionId]?.herdrPaneId == nil,
@@ -1879,6 +1878,14 @@ public func fillMissingParentMetadataFromSubagentEvent(
        let parentSessionId = SubsessionRouter.parentCardId(in: event.rawJSON) {
         sessions[sessionId]?.parentSessionId = parentSessionId
     }
+}
+
+/// The CLI process the bridge found for the hook (`_ppid`). A number past
+/// pid_t's range comes only from a malformed payload; converting it would
+/// trap.
+private func hookProcessId(_ event: HookEvent) -> pid_t? {
+    guard let ppid = event.rawJSON["_ppid"] as? Int, ppid > 0 else { return nil }
+    return pid_t(exactly: ppid)
 }
 
 /// The Claude Desktop Code-tab id the bridge forwarded from
@@ -1998,8 +2005,7 @@ public func extractMetadata(into sessions: inout [String: SessionSnapshot], sess
     if let env = event.rawJSON["_env"] as? [String: String] {
         applyEnvMetadata(into: &sessions, sessionId: sessionId, env: env)
     }
-    if let ppid = event.rawJSON["_ppid"] as? Int, ppid > 0 {
-        let newPid = pid_t(ppid)
+    if let newPid = hookProcessId(event) {
         if sessions[sessionId]?.cliPid != newPid {
             sessions[sessionId]?.cliPid = newPid
             sessions[sessionId]?.cliStartTime = nil

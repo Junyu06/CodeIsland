@@ -65,6 +65,25 @@ final class SubsessionReducerTests: XCTestCase {
         XCTAssertNil(sessions[child]?.parentSessionId)
     }
 
+    /// A `_ppid` past pid_t's range comes only from a malformed payload. The
+    /// router ignores it, and so does the reducer, where converting it
+    /// trapped: on SessionStart, on every other hook, and on a subagent's
+    /// hook filling in its parent's process.
+    func testProcessIdOutsidePidRangeIsIgnored() throws {
+        var sessions: [String: SessionSnapshot] = [:]
+        for event in ["SessionStart", "PreToolUse"] {
+            try apply(["hook_event_name": event, "session_id": parent, "_source": "codex", "_ppid": 9_999_999_999], to: &sessions)
+            XCTAssertNil(sessions[parent]?.cliPid, event)
+        }
+        try apply([
+            "hook_event_name": "PreToolUse", "session_id": parent, "_source": "claude",
+            "agent_id": child, "_ppid": 9_999_999_999,
+        ], to: &sessions)
+        XCTAssertNil(sessions[parent]?.cliPid)
+        try apply(["hook_event_name": "PreToolUse", "session_id": parent, "_source": "codex", "_ppid": 4242], to: &sessions)
+        XCTAssertEqual(sessions[parent]?.cliPid, 4242)
+    }
+
     func testChildWhoseHooksNameItselfAsAgentIsStillLinked() throws {
         var sessions: [String: SessionSnapshot] = [:]
         try apply(linked("PreToolUse", source: "codex", ["agent_id": child, "tool_name": "exec_command"]), to: &sessions)

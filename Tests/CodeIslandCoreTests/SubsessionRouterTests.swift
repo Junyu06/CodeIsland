@@ -416,6 +416,9 @@ final class SubsessionRouterTests: XCTestCase {
                 "hook_event_name": "PreToolUse", "session_id": cursorTask, "_source": source, "_ppid": "99999999999",
             ], context: context), source)
         }
+        // Nor does the public lookup trap on one handed to it.
+        XCTAssertNil(SubsessionCards.samePidCard(source: "codex", ppid: 9_999_999_999, in: context.cards))
+        XCTAssertEqual(SubsessionCards.samePidCard(source: "codex", ppid: 4242, in: context.cards), parent)
     }
 
     func testUnknownSettingReadsAsShowSeparately() {

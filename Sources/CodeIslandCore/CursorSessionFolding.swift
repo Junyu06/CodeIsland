@@ -297,12 +297,13 @@ public enum CursorSubsessionRouter {
         activeSince cutoff: Date,
         in cards: [String: SessionSnapshot]
     ) -> String? {
+        guard let pid = pid_t(exactly: ppid) else { return nil }
         let normalized = SessionSnapshot.normalizedSupportedSource(source)
         let candidates: [(sessionId: String, status: AgentStatus, startTime: Date, isMain: Bool, isTask: Bool)] =
             cards.compactMap { sessionId, snap in
                 let snapSource = SessionSnapshot.normalizedSupportedSource(snap.source)
                 guard snapSource == normalized,
-                      snap.cliPid == pid_t(ppid),
+                      snap.cliPid == pid,
                       sessionId != excludedSessionId else {
                     return nil
                 }
