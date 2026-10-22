@@ -19,7 +19,6 @@ class SoundManager {
         (EventSoundRouting.turnFailed, "8bit_error", SettingsKey.soundTaskError, "任务错误"),
         ("PermissionRequest", "8bit_approval",  SettingsKey.soundApprovalNeeded, "需要审批"),
         ("UserPromptSubmit",  "8bit_submit",    SettingsKey.soundPromptSubmit,   "任务确认"),
-        (SoundCue.launch,     "8bit_boot",      SettingsKey.soundBoot,           "启动音效"),
     ]
 
     private var soundCache: [String: NSSound] = [:]
@@ -81,8 +80,15 @@ class SoundManager {
 
     /// Play boot sound on app launch
     func playBoot() {
+        // The launch cue has its own switch and stays out of `eventSounds`:
+        // event cues are hook event names, and no hook may ring the boot chime.
         guard let cue = AttentionPolicy.intents(for: .appLaunched).sound else { return }
-        handleEvent(cue)
+        let sounds = SoundPreferences(
+            enabled: defaults.bool(forKey: SettingsKey.soundEnabled),
+            audibleCues: defaults.bool(forKey: SettingsKey.soundBoot) ? [cue] : []
+        )
+        guard AttentionPolicy.audibleSound(cue, sounds: sounds, hold: hold) != nil else { return }
+        emit("8bit_boot")
     }
 
     // MARK: - Settings, for the policy
@@ -101,7 +107,9 @@ class SoundManager {
     }
 
     /// What may hold event sounds back right now. The clock and the lock
-    /// state are read only when a sound is actually on the table.
+    /// state are read only for a cue with the master switch on — before the
+    /// cue's own switch, as they always were (the lock read also catches a
+    /// lock notification that went missing).
     var hold: SoundHold {
         SoundHold(
             quietHours: { self.quietHoursActive },

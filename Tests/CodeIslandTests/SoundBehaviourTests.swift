@@ -20,6 +20,7 @@ final class SoundBehaviourTests: XCTestCase {
         SettingsKey.quietHoursEnd,
         SettingsKey.smartSuppress,
         SettingsKey.autoExpandOnPermission,
+        SettingsKey.soundBoot,
     ]
 
     override func setUp() {
@@ -143,6 +144,21 @@ final class SoundBehaviourTests: XCTestCase {
     func testUnknownEventNameProducesNoSound() {
         SoundManager.shared.handleEvent("SomethingElse")
         XCTAssertEqual(played, [])
+    }
+
+    /// The launch chime answers to its own switch, and a hook event that
+    /// happens to carry the launch cue's name rings nothing.
+    func testOnlyTheLaunchRingsTheLaunchChime() {
+        UserDefaults.standard.set(true, forKey: SettingsKey.soundBoot)
+        SoundManager.shared.handleEvent(SoundCue.launch)
+        XCTAssertEqual(played, [])
+
+        SoundManager.shared.playBoot()
+        XCTAssertEqual(played, ["8bit_boot"])
+
+        UserDefaults.standard.set(false, forKey: SettingsKey.soundBoot)
+        SoundManager.shared.playBoot()
+        XCTAssertEqual(played, ["8bit_boot"])
     }
 
     // MARK: - Helpers
