@@ -35,8 +35,10 @@ quirk is then fixed once, in HookIntake, for every edge.
   and an edge then uses a socket that user owns instead.
 - **The socket names the host, not the payload.** On the Mac, each remote
   host's forward ends at a socket the island bound for that host alone
-  (`<main socket without .sock>-hosts/h-<digest>.sock`, in a folder only the
-  Mac's user can enter), never at the main socket. Every request arriving
+  (`codeisland-hosts/h-<digest>.sock` in the user's own temporary folder,
+  `/var/folders/…/T/`, which only the Mac's user can enter and nobody can
+  make first; an island on a `$CODEISLAND_SOCKET_PATH` of its own keeps them
+  in `<that path without .sock>-hosts/`), never at the main socket. Every request arriving
   there is filed under that host: its `_remote_host_id`, `_remote_host_name`
   and `_edge.host` are replaced with the host's own before anything reads
   them, so an edge that names another host, or none, changes nothing. The

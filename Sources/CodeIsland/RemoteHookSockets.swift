@@ -48,36 +48,47 @@ protocol RemoteHookSocketProviding: AnyObject {
 /// says — and a forward never ends at a path the island did not just bind:
 /// not at the main socket, which another user may have taken first.
 ///
-/// The sockets live in a folder only this user can enter, beside the main
-/// socket: `/tmp/codeisland-<uid>-hosts/` for `/tmp/codeisland-<uid>.sock`.
-/// An island on a socket of its own (`CODEISLAND_SOCKET_PATH`) keeps its
-/// hosts apart too. Each is named after a digest of its host's id
-/// (`h-<16 hex>.sock`): the same on every connect, short enough for
-/// `sun_path` whatever the id, and nothing an id can steer out of the
-/// folder. A socket goes when its host disconnects or is removed, or the
-/// island quits; one a crash left behind goes at the next launch
-/// (``removeStale()``).
+/// The sockets live in a folder only this user can enter: `codeisland-hosts`
+/// in the user's own temporary folder (`/var/folders/…/T/`), which nobody
+/// else can enter or make anything in first — not a predictable name in
+/// /tmp, where another user could take it and keep every host from
+/// connecting. An island on a socket of its own (`CODEISLAND_SOCKET_PATH`,
+/// an isolated instance) keeps its hosts apart beside that socket instead.
+/// Each is named after a digest of its host's id (`h-<16 hex>.sock`): the
+/// same on every connect, short enough for `sun_path` whatever the id, and
+/// nothing an id can steer out of the folder. A socket goes when its host
+/// disconnects or is removed, or the island quits; one a crash left behind
+/// goes at the next launch (``removeStale()``), and so does the folder in
+/// /tmp an earlier version used.
 @MainActor
 final class RemoteHookSockets: RemoteHookSocketProviding {
     /// The folder the sockets are in.
     let directory: String
+    /// The folder an earlier version put them in, when it is another:
+    /// emptied of its sockets and removed (``removeStale()``).
+    let legacyDirectory: String?
     private let makeServer: (_ path: String, _ origin: HookOrigin) -> HookServer
     /// By host id.
     private var servers: [String: HookServer] = [:]
 
     /// `makeServer` makes the server for a host's socket; it is started
     /// here.
-    init(directory: String, makeServer: @escaping (_ path: String, _ origin: HookOrigin) -> HookServer) {
+    init(
+        directory: String,
+        legacyDirectory: String? = nil,
+        makeServer: @escaping (_ path: String, _ origin: HookOrigin) -> HookServer
+    ) {
         self.directory = directory
+        self.legacyDirectory = legacyDirectory == directory ? nil : legacyDirectory
         self.makeServer = makeServer
     }
 
     /// The island's: each host's server hands what it receives to `appState`.
     convenience init(
         appState: AppState,
-        directory: String = RemoteHookSockets.directory(forMainSocket: HookServer.socketPath)
+        folders: (directory: String, legacy: String?) = RemoteHookSockets.defaultFolders()
     ) {
-        self.init(directory: directory) { path, origin in
+        self.init(directory: folders.directory, legacyDirectory: folders.legacy) { path, origin in
             HookServer(appState: appState, socketPath: path, origin: origin)
         }
     }
@@ -87,6 +98,41 @@ final class RemoteHookSockets: RemoteHookSocketProviding {
     nonisolated static func directory(forMainSocket path: String) -> String {
         let base = path.hasSuffix(".sock") ? String(path.dropLast(".sock".count)) : path
         return base + "-hosts"
+    }
+
+    /// Where the island's host sockets go, and the folder an earlier version
+    /// put them in when that is another: `codeisland-hosts` in the user's
+    /// temporary folder, then, and the one beside the main socket in /tmp.
+    /// Beside the main socket when `CODEISLAND_SOCKET_PATH` names one of its
+    /// own, or the temporary folder is unknown or too long a path for a
+    /// socket in it.
+    nonisolated static func defaultFolders(
+        mainSocket: String = HookServer.socketPath,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        userTemporaryDirectory: String? = RemoteHookSockets.userTemporaryDirectory()
+    ) -> (directory: String, legacy: String?) {
+        let beside = directory(forMainSocket: mainSocket)
+        guard environment["CODEISLAND_SOCKET_PATH"] == nil,
+              let userTemporaryDirectory, userTemporaryDirectory.hasPrefix("/") else {
+            return (beside, nil)
+        }
+        let own = (userTemporaryDirectory == "/" ? "" : userTemporaryDirectory) + "/codeisland-hosts"
+        // sun_path holds 104 bytes, its NUL among them.
+        let longestSocket = own.utf8.count + 1 + socketName(forHostId: "").utf8.count
+        guard longestSocket < 104 else { return (beside, nil) }
+        return (own, beside)
+    }
+
+    /// This user's own temporary folder (`confstr(_CS_DARWIN_USER_TEMP_DIR)`),
+    /// without its trailing slash; nil when there is none.
+    nonisolated static func userTemporaryDirectory() -> String? {
+        let size = confstr(_CS_DARWIN_USER_TEMP_DIR, nil, 0)
+        guard size > 1 else { return nil }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard confstr(_CS_DARWIN_USER_TEMP_DIR, &buffer, size) == size else { return nil }
+        var path = String(cString: buffer)
+        while path.count > 1, path.hasSuffix("/") { path.removeLast() }
+        return path.isEmpty ? nil : path
     }
 
     /// The socket name for the host `id`: `h-` and the first 8 bytes of the
@@ -154,7 +200,9 @@ final class RemoteHookSockets: RemoteHookSocketProviding {
     /// Removes the host sockets an earlier run left behind (a crash, or a
     /// quit that never closed them). Only in the folder, and only while it is
     /// still one only this user can use; only sockets of this user's, under
-    /// a name a host socket takes, and never one of this run's.
+    /// a name a host socket takes, and never one of this run's. The folder an
+    /// earlier version used (``legacyDirectory``) is emptied the same way and
+    /// removed, should nothing else be left in it.
     func removeStale() {
         removeStale(uid: getuid())
     }
@@ -162,11 +210,25 @@ final class RemoteHookSockets: RemoteHookSocketProviding {
     /// ``removeStale()`` as the user `uid`: for tests, which cannot make a
     /// file another user owns.
     func removeStale(uid: uid_t) {
-        guard let folder = Self.openPrivateFolder(directory, creating: false, uid: uid) else { return }
-        defer { Darwin.close(folder) }
         let open = Set(servers.values.map { ($0.socketPath as NSString).lastPathComponent })
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
-        for name in names where Self.isSocketName(name) && !open.contains(name) {
+        Self.removeSockets(in: directory, uid: uid, keeping: open)
+        if let legacyDirectory, Self.removeSockets(in: legacyDirectory, uid: uid, keeping: []),
+           rmdir(legacyDirectory) == 0 {
+            // A folder of this user's in sticky /tmp: nobody else can have
+            // put another in its place since it was checked.
+            log.info("Removed the old remote host socket folder \(legacyDirectory, privacy: .public)")
+        }
+    }
+
+    /// Removes the host sockets in the folder at `path` but those named in
+    /// `keeping`; false, touching nothing, when it is not a private folder of
+    /// `uid`'s, or not there.
+    @discardableResult
+    nonisolated private static func removeSockets(in path: String, uid: uid_t, keeping: Set<String>) -> Bool {
+        guard let folder = openPrivateFolder(path, creating: false, uid: uid) else { return false }
+        defer { Darwin.close(folder) }
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
+        for name in names where isSocketName(name) && !keeping.contains(name) {
             // Relative to the folder checked above, never followed.
             var info = stat()
             guard fstatat(folder, name, &info, AT_SYMLINK_NOFOLLOW) == 0,
@@ -176,6 +238,7 @@ final class RemoteHookSockets: RemoteHookSocketProviding {
                 log.info("Removed a stale remote host socket: \(name, privacy: .public)")
             }
         }
+        return true
     }
 
     // MARK: - The folder

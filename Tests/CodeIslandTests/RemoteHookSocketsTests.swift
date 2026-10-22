@@ -33,10 +33,11 @@ final class RemoteHookSocketsTests: XCTestCase {
 
     private func makeSockets(
         in directory: String? = nil,
+        legacy: String? = nil,
         cwdFilter: @escaping @MainActor (String) -> String? = { _ in nil }
     ) -> RemoteHookSockets {
         let appState = appState!
-        let made = RemoteHookSockets(directory: directory ?? folder) { path, origin in
+        let made = RemoteHookSockets(directory: directory ?? folder, legacyDirectory: legacy) { path, origin in
             HookServer(appState: appState, socketPath: path, origin: origin, hostCwdFilter: cwdFilter)
         }
         sockets = made
@@ -278,5 +279,93 @@ final class RemoteHookSocketsTests: XCTestCase {
     func testTheHostsFolderSitsBesideTheMainSocket() {
         XCTAssertEqual(RemoteHookSockets.directory(forMainSocket: "/tmp/codeisland-501.sock"), "/tmp/codeisland-501-hosts")
         XCTAssertEqual(RemoteHookSockets.directory(forMainSocket: "/tmp/ci/island"), "/tmp/ci/island-hosts")
+    }
+
+    // MARK: - Where the folder is
+
+    /// The island's hosts folder is in the user's own temporary folder, not
+    /// a name in /tmp another user could take first; the one in /tmp an
+    /// earlier version used is the one to clear away.
+    func testTheHostsFolderIsInTheUsersOwnTemporaryFolder() {
+        let folders = RemoteHookSockets.defaultFolders(
+            mainSocket: "/tmp/codeisland-501.sock",
+            environment: [:],
+            userTemporaryDirectory: "/var/folders/ab/cdefgh0123456789abcdefghijk/T"
+        )
+        XCTAssertEqual(folders.directory, "/var/folders/ab/cdefgh0123456789abcdefghijk/T/codeisland-hosts")
+        XCTAssertEqual(folders.legacy, "/tmp/codeisland-501-hosts")
+    }
+
+    /// An island on a socket of its own (an isolated instance) keeps its
+    /// hosts beside it, apart from the installed island's; and an unknown,
+    /// or too long, temporary folder leaves them beside the main socket too.
+    func testAnIsolatedIslandKeepsItsHostsBesideItsSocket() {
+        let isolated = RemoteHookSockets.defaultFolders(
+            mainSocket: "/tmp/ci-dev/island.sock",
+            environment: ["CODEISLAND_SOCKET_PATH": "/tmp/ci-dev/island.sock"],
+            userTemporaryDirectory: "/var/folders/ab/cd/T"
+        )
+        XCTAssertEqual(isolated.directory, "/tmp/ci-dev/island-hosts")
+        XCTAssertNil(isolated.legacy)
+
+        let unknown = RemoteHookSockets.defaultFolders(mainSocket: "/tmp/codeisland-501.sock", environment: [:], userTemporaryDirectory: nil)
+        XCTAssertEqual(unknown.directory, "/tmp/codeisland-501-hosts")
+        XCTAssertNil(unknown.legacy)
+
+        let long = "/var/folders/" + String(repeating: "x", count: 70)
+        let tooLong = RemoteHookSockets.defaultFolders(mainSocket: "/tmp/codeisland-501.sock", environment: [:], userTemporaryDirectory: long)
+        XCTAssertEqual(tooLong.directory, "/tmp/codeisland-501-hosts", "a socket there would not fit sun_path")
+    }
+
+    /// This Mac's own temporary folder is this user's alone, and a host
+    /// socket in the folder made there fits sun_path.
+    func testThisMacsTemporaryFolderHoldsTheHostSockets() throws {
+        let temporary = try XCTUnwrap(RemoteHookSockets.userTemporaryDirectory())
+        XCTAssertFalse(temporary.hasSuffix("/"))
+        let info = try XCTUnwrap(SocketPath.lstat(temporary))
+        XCTAssertEqual(info.st_mode & S_IFMT, S_IFDIR)
+        XCTAssertEqual(info.st_uid, getuid())
+        XCTAssertEqual(info.st_mode & 0o077, 0, "others may enter \(temporary)")
+        let folders = RemoteHookSockets.defaultFolders(mainSocket: "/tmp/codeisland-501.sock", environment: [:])
+        XCTAssertEqual(folders.directory, temporary + "/codeisland-hosts")
+        XCTAssertLessThan((folders.directory + "/" + RemoteHookSockets.socketName(forHostId: "any")).utf8.count, 104)
+    }
+
+    /// The folder an earlier version used in /tmp goes: its stale sockets
+    /// first, then the folder itself, once nothing else is left in it.
+    func testTheOldFolderInTmpIsClearedAway() throws {
+        let legacy = base + "/old-hosts"
+        XCTAssertTrue(RemoteHookSockets.preparePrivateFolder(legacy))
+        try leaveSocket(at: legacy + "/h-0123456789abcdef.sock")
+        try leaveSocket(at: legacy + "/h-1111111111111111.sock")
+
+        makeSockets(legacy: legacy).removeStale()
+        XCTAssertNil(SocketPath.lstat(legacy), "the old folder was left")
+
+        // Something else in it: the sockets go, the folder and the rest stay.
+        XCTAssertTrue(RemoteHookSockets.preparePrivateFolder(legacy))
+        try leaveSocket(at: legacy + "/h-0123456789abcdef.sock")
+        XCTAssertTrue(FileManager.default.createFile(atPath: legacy + "/notes.txt", contents: Data()))
+        makeSockets(legacy: legacy).removeStale()
+        XCTAssertNil(SocketPath.lstat(legacy + "/h-0123456789abcdef.sock"))
+        XCTAssertNotNil(SocketPath.lstat(legacy + "/notes.txt"))
+        XCTAssertNotNil(SocketPath.lstat(legacy))
+    }
+
+    /// Only an old folder of this user's is cleared: another user's, or a
+    /// symlink where it was, is left as it is.
+    func testAnOldFolderThatIsNotOursIsLeftAlone() throws {
+        let legacy = base + "/old-hosts"
+        XCTAssertTrue(RemoteHookSockets.preparePrivateFolder(legacy))
+        let stale = legacy + "/h-0123456789abcdef.sock"
+        try leaveSocket(at: stale)
+        makeSockets(legacy: legacy).removeStale(uid: getuid() + 1)
+        XCTAssertNotNil(SocketPath.lstat(stale), "another user's old folder was cleared")
+
+        let link = base + "/linked-hosts"
+        XCTAssertEqual(symlink(legacy, link), 0)
+        makeSockets(legacy: link).removeStale()
+        XCTAssertNotNil(SocketPath.lstat(stale), "cleared through a symlink")
+        XCTAssertNotNil(SocketPath.lstat(link))
     }
 }

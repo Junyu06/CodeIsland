@@ -179,7 +179,7 @@ final class RemoteManager: ObservableObject {
         // the host to everything they reach (HookOrigin); its tunnel ends
         // there and nowhere else. Without one, nothing is forwarded.
         let opened = hookSockets?.open(for: host)
-            ?? .failure(.cannotListen(path: RemoteHookSockets.directory(forMainSocket: HookServer.socketPath)))
+            ?? .failure(.cannotListen(path: RemoteHookSockets.defaultFolders().directory))
         let localSocketPath: String
         switch opened {
         case .success(let path):
