@@ -1698,7 +1698,7 @@ private func applyHookEvent(
 
     // Switch display to the session that just had activity
     if eventName == "Stop" {
-        // Stop event: keep activeSessionId on completed session (set by enqueueCompletion)
+        // Stop event: keep activeSessionId on completed session (set when its completion card shows)
     } else if sessions[sessionId]?.status != .idle {
         effects.append(.setActiveSession(sessionId: sessionId))
     }

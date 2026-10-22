@@ -349,8 +349,9 @@ extension AppState {
         case .idle:
             snapshot.status = .idle
             snapshot.interrupted = state.lastTurnInterrupted
-            // Cowork has no prompt hook to clear it, and a stopped turn skips
-            // enqueueCompletion: the log's own verdict on the last turn rules.
+            // Cowork has no prompt hook to clear it, and a stopped turn
+            // announces no completion: the log's own verdict on the last
+            // turn rules.
             snapshot.lastTurnFailed = state.lastTurnFailed
             snapshot.currentTool = nil
             snapshot.toolDescription = nil

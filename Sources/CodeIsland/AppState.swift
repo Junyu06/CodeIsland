@@ -1912,7 +1912,7 @@ final class AppState {
         if sessions[sessionId]?.status == .idle && activeSessionId == sessionId {
             // A Stop keeps its session up for the completion card. A child's
             // Stop pops none (#378), so it hands the spot on like any event.
-            if normalizedEventName != "Stop" || sessions[sessionId]?.parentSessionId != nil {
+            if normalizedEventName != "Stop" || attentionSubject.isChild {
                 activeSessionId = mostActiveSessionId()
             }
         }

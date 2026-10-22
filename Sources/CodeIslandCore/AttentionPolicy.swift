@@ -368,7 +368,7 @@ public struct HookEventFacts: Equatable, Sendable {
 
 /// What the rules read about the session a moment happened to.
 public struct AttentionSubject: Equatable, Sendable {
-    /// Another agent spawned the session and named itself its parent
+    /// The session is a child another agent spawned, working for its parent
     /// (`SessionSnapshot.parentSessionId`).
     public var isChild: Bool
     /// The user stopped the session's turn (Esc / Ctrl-C).
@@ -390,7 +390,7 @@ public struct AttentionSubject: Equatable, Sendable {
 
 // MARK: - Intents and decisions
 
-/// How a push is about to be sent.
+/// What a push is about.
 public enum AttentionPushKind: Equatable, Sendable {
     /// The turn ended on an error.
     case error
