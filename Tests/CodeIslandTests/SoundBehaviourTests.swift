@@ -148,9 +148,12 @@ final class SoundBehaviourTests: XCTestCase {
 
     /// The launch chime answers to its own switch, and a hook event that
     /// happens to carry the launch cue's name rings nothing.
-    func testOnlyTheLaunchRingsTheLaunchChime() {
+    func testOnlyTheLaunchRingsTheLaunchChime() throws {
         UserDefaults.standard.set(true, forKey: SettingsKey.soundBoot)
-        SoundManager.shared.handleEvent(SoundCue.launch)
+        let appState = AppState()
+        appState.handleEvent(try XCTUnwrap(HookEvent(from: JSONSerialization.data(withJSONObject: [
+            "hook_event_name": SoundCue.launch, "session_id": "snd-launch-named-hook",
+        ]))))
         XCTAssertEqual(played, [])
 
         SoundManager.shared.playBoot()

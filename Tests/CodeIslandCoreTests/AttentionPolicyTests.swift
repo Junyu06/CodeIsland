@@ -82,6 +82,11 @@ final class AttentionPolicyTests: XCTestCase {
             expected: AttentionIntents()
         ),
         IntentRow(
+            rule: "a hook event carrying the launch cue's name rings nothing: that cue is the app's own",
+            moment: hook(SoundCue.launch),
+            expected: AttentionIntents()
+        ),
+        IntentRow(
             rule: "a finished turn rings, pops its completion, pushes it and is followed up",
             moment: hook("Stop", endedTurn: true),
             expected: finished(sound: "Stop", push: finishedPush)

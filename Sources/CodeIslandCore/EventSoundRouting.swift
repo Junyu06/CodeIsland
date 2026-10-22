@@ -22,6 +22,9 @@ public enum EventSoundRouting {
     /// before that fold.
     public static func soundEvent(rawEventName: String, normalizedEventName: String) -> String? {
         if normalizedEventName == "PostToolUseFailure" { return nil }
+        // The launch chime's cue is the app's own: a hook event that happens
+        // to carry its name rings nothing.
+        if normalizedEventName == SoundCue.launch { return nil }
         if rawEventName == "StopFailure" || rawEventName == "stop_failure" { return turnFailed }
         return normalizedEventName
     }
