@@ -29,6 +29,14 @@ final class HookSocketListener: @unchecked Sendable {
         self.onConnection = onConnection
     }
 
+    deinit {
+        // Dropped without stop(): the socket must not stay open. Nothing else
+        // can be running: every handler holds the listener weakly.
+        guard let source else { return }
+        if paused { source.resume() }
+        source.cancel()
+    }
+
     /// Creates the socket file, readable by this user only, and starts
     /// accepting. False, logged, when the socket cannot be created.
     func start() -> Bool {
@@ -152,7 +160,7 @@ final class HookConnection: @unchecked Sendable {
     private var unsent = Data()
     private var finishing = false
     private var closed = false
-    private var closeHandlers: [() -> Void] = []
+    private var closeHandlers: [@Sendable () -> Void] = []
 
     init(fd: Int32, queue: DispatchQueue) {
         self.fd = fd
@@ -192,7 +200,7 @@ final class HookConnection: @unchecked Sendable {
 
     /// Runs `handler` on the queue once the connection is closed: answered,
     /// cancelled, or its hook gone (``closeWhenPeerLeaves()``).
-    func onClose(_ handler: @escaping () -> Void) {
+    func onClose(_ handler: @escaping @Sendable () -> Void) {
         queue.async { [self] in
             if closed {
                 handler()
