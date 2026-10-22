@@ -69,8 +69,8 @@ final class AppStateCodexSubsessionTests: XCTestCase {
 
     func testCodexDesktopDiscoveryChannelsShareOneIdentityWhileCLIStaysRaw() {
         let rawId = "desktop-thread"
-        let desktop = AppState.codexDiscoveryIdentity(rawSessionId: rawId, isDesktop: true)
-        let cli = AppState.codexDiscoveryIdentity(rawSessionId: rawId, isDesktop: false)
+        let desktop = CodexDiscovery.codexDiscoveryIdentity(rawSessionId: rawId, isDesktop: true)
+        let cli = CodexDiscovery.codexDiscoveryIdentity(rawSessionId: rawId, isDesktop: false)
 
         XCTAssertEqual(desktop.sessionId, "codexapp:\(rawId)")
         XCTAssertEqual(desktop.providerSessionId, rawId)
@@ -82,7 +82,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
 
     func testLegacyDesktopRestoreCanonicalizesWithoutChangingCLIKey() {
         XCTAssertEqual(
-            AppState.canonicalRestoredCodexSessionId(
+            CodexDiscovery.canonicalRestoredCodexSessionId(
                 sessionId: "legacy-thread",
                 source: "codex",
                 providerSessionId: "legacy-thread",
@@ -91,7 +91,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
             "codexapp:legacy-thread"
         )
         XCTAssertEqual(
-            AppState.canonicalRestoredCodexSessionId(
+            CodexDiscovery.canonicalRestoredCodexSessionId(
                 sessionId: "cli-thread",
                 source: "codex",
                 providerSessionId: "cli-thread",
@@ -104,11 +104,11 @@ final class AppStateCodexSubsessionTests: XCTestCase {
     func testSequentialDesktopRolloutAndDatabaseScansKeepOneCardAndRejectStaleStatus() {
         let appState = AppState()
         let rawId = "same-provider-thread"
-        let identity = AppState.codexDiscoveryIdentity(rawSessionId: rawId, isDesktop: true)
+        let identity = CodexDiscovery.codexDiscoveryIdentity(rawSessionId: rawId, isDesktop: true)
         let firstActivity = Date()
         let newerActivity = firstActivity.addingTimeInterval(2)
 
-        appState.integrateDiscovered([AppState.DiscoveredSession(
+        appState.integrateDiscovered([DiscoveredSession(
             sessionId: identity.sessionId,
             cwd: "/fallback/repo",
             tty: nil,
@@ -122,7 +122,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
             termBundleId: identity.termBundleId,
             providerSessionId: identity.providerSessionId
         )])
-        appState.integrateDiscovered([AppState.DiscoveredSession(
+        appState.integrateDiscovered([DiscoveredSession(
             sessionId: identity.sessionId,
             cwd: "/database/repo",
             tty: nil,
@@ -142,7 +142,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         XCTAssertEqual(appState.sessions[identity.sessionId]?.lastActivity, newerActivity)
 
         // Simulate the slower generic FSEvent scan arriving after the DB poll.
-        appState.integrateDiscovered([AppState.DiscoveredSession(
+        appState.integrateDiscovered([DiscoveredSession(
             sessionId: identity.sessionId,
             cwd: "/stale/repo",
             tty: nil,
@@ -171,11 +171,11 @@ final class AppStateCodexSubsessionTests: XCTestCase {
     func testDesktopAndCLIWithSameCwdRemainSeparateCards() {
         let appState = AppState()
         let rawId = "desktop-thread"
-        let desktop = AppState.codexDiscoveryIdentity(rawSessionId: rawId, isDesktop: true)
+        let desktop = CodexDiscovery.codexDiscoveryIdentity(rawSessionId: rawId, isDesktop: true)
         let now = Date()
 
         appState.integrateDiscovered([
-            AppState.DiscoveredSession(
+            DiscoveredSession(
                 sessionId: desktop.sessionId,
                 cwd: "/same/repo",
                 tty: nil,
@@ -188,7 +188,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
                 termBundleId: desktop.termBundleId,
                 providerSessionId: desktop.providerSessionId
             ),
-            AppState.DiscoveredSession(
+            DiscoveredSession(
                 sessionId: "cli-thread",
                 cwd: "/same/repo",
                 tty: nil,
@@ -229,7 +229,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         appState.sessions["parent-thread"] = cliParent
 
         appState.integrateDiscovered([
-            AppState.DiscoveredSession(
+            DiscoveredSession(
                 sessionId: "codexapp:desktop-child",
                 cwd: "/repo",
                 tty: nil,
@@ -244,7 +244,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
                 termBundleId: AppState.codexAppBundleId,
                 providerSessionId: "desktop-child"
             ),
-            AppState.DiscoveredSession(
+            DiscoveredSession(
                 sessionId: "cli-child",
                 cwd: "/repo",
                 tty: nil,
@@ -358,7 +358,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         let currentPid = getpid()
 
         appState.integrateDiscovered([
-            AppState.DiscoveredSession(
+            DiscoveredSession(
                 sessionId: "codexapp:desktop",
                 cwd: "/same/repo",
                 tty: nil,
@@ -370,7 +370,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
                 termBundleId: AppState.codexAppBundleId,
                 providerSessionId: "desktop"
             ),
-            AppState.DiscoveredSession(
+            DiscoveredSession(
                 sessionId: "codex-cli",
                 cwd: "/same/repo",
                 tty: nil,
@@ -380,7 +380,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
                 recentMessages: [],
                 source: "codex"
             ),
-            AppState.DiscoveredSession(
+            DiscoveredSession(
                 sessionId: "other-native",
                 cwd: "/same/repo",
                 tty: nil,
@@ -426,7 +426,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         )
         appState.sessions["codexapp:parent-thread"] = parent
 
-        appState.integrateDiscovered([AppState.DiscoveredSession(
+        appState.integrateDiscovered([DiscoveredSession(
             sessionId: "codexapp:child-thread",
             cwd: "/same/repo",
             tty: nil,
@@ -476,7 +476,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         """
         try (line + "\n").write(to: file, atomically: true, encoding: .utf8)
 
-        let metadata = try XCTUnwrap(AppState.codexSubagentMetadata(inTranscriptPath: file.path))
+        let metadata = try XCTUnwrap(CodexDiscovery.codexSubagentMetadata(inTranscriptPath: file.path))
 
         XCTAssertEqual(metadata.parentThreadId, "parent")
         XCTAssertEqual(metadata.agentType, "worker")
@@ -496,7 +496,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         """
         try (line + "\n").write(to: file, atomically: true, encoding: .utf8)
 
-        let metadata = try XCTUnwrap(AppState.codexSubagentMetadata(inTranscriptPath: file.path))
+        let metadata = try XCTUnwrap(CodexDiscovery.codexSubagentMetadata(inTranscriptPath: file.path))
 
         XCTAssertEqual(metadata.parentThreadId, "parent-thread")
         XCTAssertEqual(metadata.threadId, "guardian-thread")
@@ -521,12 +521,12 @@ final class AppStateCodexSubsessionTests: XCTestCase {
 
         """.write(to: orphan, atomically: true, encoding: .utf8)
 
-        let metadata = try XCTUnwrap(AppState.codexSubagentMetadata(inTranscriptPath: review.path))
+        let metadata = try XCTUnwrap(CodexDiscovery.codexSubagentMetadata(inTranscriptPath: review.path))
         XCTAssertEqual(metadata.parentThreadId, "parent-thread")
         XCTAssertEqual(metadata.agentType, "review")
         XCTAssertNil(metadata.agentNickname)
         // No parent and no spawn edge: stays a root card, as before.
-        XCTAssertNil(AppState.codexSubagentMetadata(
+        XCTAssertNil(CodexDiscovery.codexSubagentMetadata(
             threadId: "review-thread",
             transcriptPath: orphan.path,
             statePath: dir.appendingPathComponent("missing.sqlite").path
@@ -610,7 +610,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         """
         XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
 
-        let metadata = try XCTUnwrap(AppState.codexSubagentMetadata(
+        let metadata = try XCTUnwrap(CodexDiscovery.codexSubagentMetadata(
             threadId: "child-thread",
             transcriptPath: nil,
             statePath: statePath
@@ -643,7 +643,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
             INSERT INTO thread_spawn_edges VALUES ('stale-parent', 'root-thread', 'open');
             """, nil, nil, nil), SQLITE_OK)
 
-        XCTAssertNil(AppState.codexSubagentMetadata(
+        XCTAssertNil(CodexDiscovery.codexSubagentMetadata(
             threadId: "root-thread",
             transcriptPath: transcript.path,
             statePath: statePath

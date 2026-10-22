@@ -54,7 +54,7 @@ final class ConfigRootEnvironmentTests: XCTestCase {
 
     func testAChildsConfigRootVariablesAreReadFromItsOwnEnvironment() throws {
         let pid = try spawnOrdinary(environment: ["PATH": "/usr/bin:/bin", "CODEX_HOME": "/acct/codex-work"])
-        guard let environment = AppState.configRootEnvironment(for: pid) else {
+        guard let environment = SessionDiscovery.configRootEnvironment(for: pid) else {
             throw XCTSkip("this kernel withholds even an ordinary binary's environment")
         }
         XCTAssertEqual(environment, ["CODEX_HOME": "/acct/codex-work"])
@@ -68,7 +68,7 @@ final class ConfigRootEnvironmentTests: XCTestCase {
 
     func testAnUnsetVariableReadsAsUnsetNotUnknown() throws {
         let pid = try spawnOrdinary(environment: ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory()])
-        guard let environment = AppState.configRootEnvironment(for: pid) else {
+        guard let environment = SessionDiscovery.configRootEnvironment(for: pid) else {
             throw XCTSkip("this kernel withholds even an ordinary binary's environment")
         }
         XCTAssertEqual(environment, [:])
@@ -81,14 +81,14 @@ final class ConfigRootEnvironmentTests: XCTestCase {
     /// default root.
     func testAWithheldEnvironmentIsUnknown() throws {
         let pid = try spawn("/bin/sleep", environment: ["PATH": "/usr/bin:/bin", "CODEX_HOME": "/acct/codex-work"])
-        guard AppState.configRootEnvironment(for: pid) == nil else {
+        guard SessionDiscovery.configRootEnvironment(for: pid) == nil else {
             throw XCTSkip("this kernel shows /bin/sleep's environment; nothing withheld to test")
         }
         XCTAssertEqual(codexScan().lookup(pid: pid), .unknown)
     }
 
     func testOwnProcessAndAMissingProcess() {
-        XCTAssertNotNil(AppState.configRootEnvironment(for: getpid()))
-        XCTAssertNil(AppState.configRootEnvironment(for: 0x3FFF_FFFF), "no such process: unknown")
+        XCTAssertNotNil(SessionDiscovery.configRootEnvironment(for: getpid()))
+        XCTAssertNil(SessionDiscovery.configRootEnvironment(for: 0x3FFF_FFFF), "no such process: unknown")
     }
 }

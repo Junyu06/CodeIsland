@@ -328,7 +328,7 @@ final class SubsessionRoutingTests: XCTestCase {
         XCTAssertEqual(appState.sessions[childThread]?.parentSessionId, parentThread)
 
         appState.applyCodexSubsessionModeToKnownSessions(statePath: missingStatePath)
-        appState.integrateDiscovered([AppState.DiscoveredSession(
+        appState.integrateDiscovered([DiscoveredSession(
             sessionId: childThread,
             cwd: "/repo",
             tty: nil,
@@ -740,7 +740,7 @@ final class SubsessionRoutingTests: XCTestCase {
 
     func testDiscoveredCodexChildShownSeparatelyIsLinked() {
         let appState = AppState()
-        appState.integrateDiscovered([AppState.DiscoveredSession(
+        appState.integrateDiscovered([DiscoveredSession(
             sessionId: childThread,
             cwd: "/repo",
             tty: nil,
@@ -756,7 +756,7 @@ final class SubsessionRoutingTests: XCTestCase {
         )])
         XCTAssertEqual(appState.sessions[childThread]?.parentSessionId, parentThread)
 
-        appState.integrateDiscovered([AppState.DiscoveredSession(
+        appState.integrateDiscovered([DiscoveredSession(
             sessionId: parentThread,
             cwd: "/repo",
             tty: nil,
@@ -786,7 +786,7 @@ final class SubsessionRoutingTests: XCTestCase {
         appState.sessions[parentThread] = root
 
         let grandchild = "019a0000-0000-7000-8000-0000000000cc"
-        appState.integrateDiscovered([AppState.DiscoveredSession(
+        appState.integrateDiscovered([DiscoveredSession(
             sessionId: grandchild,
             cwd: "/repo",
             tty: nil,

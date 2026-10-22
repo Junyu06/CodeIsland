@@ -270,6 +270,6 @@ final class AppStateModelLabelTests: XCTestCase {
             #"{"timestamp":"t","type":"event_msg","payload":{"type":"user_message","message":"go"}}"#,
         ], name: "rollout.jsonl")
 
-        XCTAssertEqual(AppState.readRecentFromCodexTranscript(path: path).0, "gpt-5.6-sol")
+        XCTAssertEqual(CodexDiscovery.readRecentFromCodexTranscript(path: path).0, "gpt-5.6-sol")
     }
 }

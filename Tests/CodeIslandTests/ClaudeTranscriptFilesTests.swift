@@ -15,7 +15,7 @@ final class ClaudeTranscriptFilesTests: XCTestCase {
         }
         try fm.createDirectory(atPath: "\(dir)/subdir.jsonl.d", withIntermediateDirectories: true)
 
-        let files = try XCTUnwrap(AppState.claudeTranscriptFiles(in: dir, fm: fm))
+        let files = try XCTUnwrap(ClaudeDiscovery.claudeTranscriptFiles(in: dir, fm: fm))
 
         XCTAssertEqual(Set(files.map(\.name)), ["a.jsonl", "b.jsonl"])
         for file in files {
@@ -42,7 +42,7 @@ final class ClaudeTranscriptFilesTests: XCTestCase {
         try fm.createSymbolicLink(atPath: linked, withDestinationPath: real)
 
         let files = try XCTUnwrap(
-            AppState.claudeTranscriptFiles(in: linked, fm: fm),
+            ClaudeDiscovery.claudeTranscriptFiles(in: linked, fm: fm),
             "contentsOfDirectory(atPath:), which this replaced, follows a symlinked dir"
         )
 
@@ -54,6 +54,6 @@ final class ClaudeTranscriptFilesTests: XCTestCase {
     }
 
     func testMissingProjectDirIsNil() {
-        XCTAssertNil(AppState.claudeTranscriptFiles(in: "/nonexistent-\(UUID().uuidString)", fm: .default))
+        XCTAssertNil(ClaudeDiscovery.claudeTranscriptFiles(in: "/nonexistent-\(UUID().uuidString)", fm: .default))
     }
 }

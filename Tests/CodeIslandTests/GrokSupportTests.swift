@@ -42,7 +42,7 @@ final class GrokSupportTests: XCTestCase {
 
     func testGrokEncodedCwdEscapesSlashesAndSpaces() {
         XCTAssertEqual(
-            AppState.grokEncodedCwd("/Users/test/My Project"),
+            GrokDiscovery.grokEncodedCwd("/Users/test/My Project"),
             "%2FUsers%2Ftest%2FMy%20Project"
         )
     }
@@ -53,13 +53,13 @@ final class GrokSupportTests: XCTestCase {
         let newProcessStart = now.addingTimeInterval(-5)
         let sessionCreatedAt = now.addingTimeInterval(-4)
 
-        XCTAssertNil(AppState.grokSessionProcessMatchScore(
+        XCTAssertNil(GrokDiscovery.grokSessionProcessMatchScore(
             createdAt: sessionCreatedAt,
             activityAt: now,
             processStart: oldProcessStart,
             now: now
         ))
-        XCTAssertNotNil(AppState.grokSessionProcessMatchScore(
+        XCTAssertNotNil(GrokDiscovery.grokSessionProcessMatchScore(
             createdAt: sessionCreatedAt,
             activityAt: now,
             processStart: newProcessStart,
@@ -69,7 +69,7 @@ final class GrokSupportTests: XCTestCase {
 
     func testGrokProcessMatchingIsOneToOneForParallelSameCwdSessions() {
         let base = Date(timeIntervalSince1970: 20_000)
-        let mapping = AppState.matchGrokSessionsToProcesses(
+        let mapping = GrokDiscovery.matchGrokSessionsToProcesses(
             processes: [
                 (pid: 101, startedAt: base),
                 (pid: 202, startedAt: base.addingTimeInterval(30)),
@@ -96,7 +96,7 @@ final class GrokSupportTests: XCTestCase {
 
     func testGrokProcessMatchingUsesAugmentingPathToKeepEveryViableSession() {
         let base = Date(timeIntervalSince1970: 30_000)
-        let mapping = AppState.matchGrokSessionsToProcesses(
+        let mapping = GrokDiscovery.matchGrokSessionsToProcesses(
             processes: [
                 (pid: 101, startedAt: base),
                 (pid: 202, startedAt: base.addingTimeInterval(100)),
@@ -132,12 +132,12 @@ final class GrokSupportTests: XCTestCase {
             (id: "alpha", createdAt: base, activityAt: base.addingTimeInterval(10)),
         ]
 
-        let first = AppState.matchGrokSessionsToProcesses(
+        let first = GrokDiscovery.matchGrokSessionsToProcesses(
             processes: processes,
             sessions: sessions,
             now: base.addingTimeInterval(10)
         )
-        let second = AppState.matchGrokSessionsToProcesses(
+        let second = GrokDiscovery.matchGrokSessionsToProcesses(
             processes: Array(processes.reversed()),
             sessions: Array(sessions.reversed()),
             now: base.addingTimeInterval(10)
@@ -217,12 +217,12 @@ final class GrokSupportTests: XCTestCase {
     }
 
     func testSessionCreationTimeComesFromUUIDv7Only() throws {
-        let created = try XCTUnwrap(AppState.grokSessionCreationDate(
+        let created = try XCTUnwrap(GrokDiscovery.grokSessionCreationDate(
             fromSessionId: "01a05ffe-e470-76b1-b227-cedb9ae65aea"
         ))
         XCTAssertEqual(created.timeIntervalSince1970, 1_788_316_935.280, accuracy: 0.0005)
-        XCTAssertNil(AppState.grokSessionCreationDate(fromSessionId: "3f2504e0-4f89-41d3-9a0c-0305e82c3301"))
-        XCTAssertNil(AppState.grokSessionCreationDate(fromSessionId: "my-custom-session"))
+        XCTAssertNil(GrokDiscovery.grokSessionCreationDate(fromSessionId: "3f2504e0-4f89-41d3-9a0c-0305e82c3301"))
+        XCTAssertNil(GrokDiscovery.grokSessionCreationDate(fromSessionId: "my-custom-session"))
     }
 
     /// #318's timeline: the resumed session was created 148 s before the TUI
@@ -230,15 +230,15 @@ final class GrokSupportTests: XCTestCase {
     /// `created_at`), the UUIDv7 time keeps it on the resumed-session branch.
     func testUUIDCreationTimeScoresAResumedIndexOnlySession() throws {
         let processStart = Date(timeIntervalSince1970: 1_788_317_083) // 2026-09-02T02:44:43Z
-        let createdAt = AppState.grokSessionCreationDate(fromSessionId: "01a05ffe-e470-76b1-b227-cedb9ae65aea")
+        let createdAt = GrokDiscovery.grokSessionCreationDate(fromSessionId: "01a05ffe-e470-76b1-b227-cedb9ae65aea")
 
-        XCTAssertNotNil(AppState.grokSessionProcessMatchScore(
+        XCTAssertNotNil(GrokDiscovery.grokSessionProcessMatchScore(
             createdAt: createdAt,
             activityAt: processStart.addingTimeInterval(57),
             processStart: processStart,
             now: processStart.addingTimeInterval(60)
         ))
-        XCTAssertNil(AppState.grokSessionProcessMatchScore(
+        XCTAssertNil(GrokDiscovery.grokSessionProcessMatchScore(
             createdAt: createdAt,
             activityAt: processStart.addingTimeInterval(600),
             processStart: processStart,
@@ -263,7 +263,7 @@ final class GrokSupportTests: XCTestCase {
         XCTAssertGreaterThan(walSize?.intValue ?? 0, 0, "fixture rows must live in the WAL")
         let mainFileBefore = try Data(contentsOf: URL(fileURLWithPath: indexPath))
 
-        let rows = AppState.grokIndexedSessions(databasePath: indexPath, cwd: "/work/app")
+        let rows = GrokDiscovery.grokIndexedSessions(databasePath: indexPath, cwd: "/work/app")
 
         XCTAssertEqual(rows.map(\.sessionId), [
             "01a05ffe-e470-76b1-b227-cedb9ae65aea",
@@ -273,7 +273,7 @@ final class GrokSupportTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: indexPath)), mainFileBefore)
 
         let missing = root.appendingPathComponent("absent.sqlite").path
-        XCTAssertTrue(AppState.grokIndexedSessions(databasePath: missing, cwd: "/work/app").isEmpty)
+        XCTAssertTrue(GrokDiscovery.grokIndexedSessions(databasePath: missing, cwd: "/work/app").isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: missing), "a read-only open never creates the index")
     }
 
@@ -289,7 +289,7 @@ final class GrokSupportTests: XCTestCase {
             """, nil, nil, nil), SQLITE_OK)
         sqlite3_close_v2(db)
 
-        XCTAssertTrue(AppState.grokIndexedSessions(databasePath: indexPath, cwd: "/work/app").isEmpty)
+        XCTAssertTrue(GrokDiscovery.grokIndexedSessions(databasePath: indexPath, cwd: "/work/app").isEmpty)
     }
 
     /// Both layouts on one machine: a session with a per-session directory
@@ -303,7 +303,7 @@ final class GrokSupportTests: XCTestCase {
         let legacyId = "01a0226f-1be5-7591-9031-cab500723788"
         let indexOnlyId = "01a05ffe-e470-76b1-b227-cedb9ae65aea"
 
-        let legacyDirectory = "\(sessionsRoot)/\(try XCTUnwrap(AppState.grokEncodedCwd(cwd)))/\(legacyId)"
+        let legacyDirectory = "\(sessionsRoot)/\(try XCTUnwrap(GrokDiscovery.grokEncodedCwd(cwd)))/\(legacyId)"
         try FileManager.default.createDirectory(atPath: legacyDirectory, withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: [
             "info": ["id": legacyId, "cwd": cwd],
@@ -319,7 +319,7 @@ final class GrokSupportTests: XCTestCase {
         ])
         defer { sqlite3_close_v2(writer) }
 
-        let candidates = AppState.grokSessionCandidates(cwd: cwd, sessionsRoot: sessionsRoot)
+        let candidates = GrokDiscovery.grokSessionCandidates(cwd: cwd, sessionsRoot: sessionsRoot)
         let byId = Dictionary(uniqueKeysWithValues: candidates.map { ($0.sessionId, $0) })
 
         XCTAssertEqual(Set(byId.keys), [legacyId, indexOnlyId])
@@ -331,10 +331,10 @@ final class GrokSupportTests: XCTestCase {
         XCTAssertEqual(byId[indexOnlyId]?.activityAt, Date(timeIntervalSince1970: 1_788_317_140))
         XCTAssertEqual(
             byId[indexOnlyId]?.createdAt,
-            AppState.grokSessionCreationDate(fromSessionId: indexOnlyId)
+            GrokDiscovery.grokSessionCreationDate(fromSessionId: indexOnlyId)
         )
 
-        let directoryOnly = AppState.grokSessionCandidates(cwd: cwd, sessionsRoot: sessionsRoot, includeIndex: false)
+        let directoryOnly = GrokDiscovery.grokSessionCandidates(cwd: cwd, sessionsRoot: sessionsRoot, includeIndex: false)
         XCTAssertEqual(directoryOnly.map(\.sessionId), [legacyId])
     }
 
@@ -344,7 +344,7 @@ final class GrokSupportTests: XCTestCase {
         let sessionsRoot = root.appendingPathComponent("sessions").path
         let cwd = "/work/app"
         let sessionId = "01a0226f-1be5-7591-9031-cab500723788"
-        let directory = "\(sessionsRoot)/\(try XCTUnwrap(AppState.grokEncodedCwd(cwd)))/\(sessionId)"
+        let directory = "\(sessionsRoot)/\(try XCTUnwrap(GrokDiscovery.grokEncodedCwd(cwd)))/\(sessionId)"
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
         // No created_at: the UUIDv7 time fills in.
         try JSONSerialization.data(withJSONObject: [
@@ -352,11 +352,11 @@ final class GrokSupportTests: XCTestCase {
             "updated_at": "2026-09-02T02:45:00Z",
         ]).write(to: URL(fileURLWithPath: "\(directory)/summary.json"))
 
-        let candidates = AppState.grokSessionCandidates(cwd: cwd, sessionsRoot: sessionsRoot)
+        let candidates = GrokDiscovery.grokSessionCandidates(cwd: cwd, sessionsRoot: sessionsRoot)
 
         XCTAssertEqual(candidates.map(\.sessionId), [sessionId])
         XCTAssertEqual(candidates.first?.directory, directory)
-        XCTAssertEqual(candidates.first?.createdAt, AppState.grokSessionCreationDate(fromSessionId: sessionId))
+        XCTAssertEqual(candidates.first?.createdAt, GrokDiscovery.grokSessionCreationDate(fromSessionId: sessionId))
     }
 
     private func makeTemporaryDirectory(_ prefix: String) throws -> URL {

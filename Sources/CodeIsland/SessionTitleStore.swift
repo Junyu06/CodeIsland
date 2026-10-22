@@ -30,7 +30,7 @@ enum SessionTitleStore {
 
     static func codexThreadName(sessionId: String) -> String? {
         // Each Codex root (CODEX_HOME / account) keeps its own thread index.
-        for root in AppState.codexStateRoots() {
+        for root in SessionDiscovery.codexStateRoots() {
             let path = root + "/session_index.jsonl"
             guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
             if let title = try? codexThreadName(sessionId: sessionId, indexContents: contents) {

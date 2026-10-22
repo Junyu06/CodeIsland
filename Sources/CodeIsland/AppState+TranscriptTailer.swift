@@ -25,11 +25,11 @@ extension AppState {
         let messages: [ChatMessage]
         if let source = sessions[sessionId]?.source,
            source == "cursor" || source == "cursor-cli" {
-            messages = Self.readRecentFromCursorTranscript(path: path).1
+            messages = CursorDiscovery.readRecentFromCursorTranscript(path: path).1
         } else if sessions[sessionId]?.source == "codex" {
-            messages = Self.readRecentFromCodexTranscript(path: path).1
+            messages = CodexDiscovery.readRecentFromCodexTranscript(path: path).1
         } else {
-            messages = Self.readRecentFromTranscript(path: path).1
+            messages = ClaudeDiscovery.readRecentFromTranscript(path: path).1
         }
         if !messages.isEmpty, var session = sessions[sessionId] {
             session.recentMessages = messages
@@ -56,7 +56,7 @@ extension AppState {
         }
 
         if sessions[sessionId]?.source == "codex",
-           let turnStatus = Self.latestCodexTurnStatus(path: path),
+           let turnStatus = CodexDiscovery.latestCodexTurnStatus(path: path),
            var session = sessions[sessionId] {
             switch turnStatus {
             case .processing:

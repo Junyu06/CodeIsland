@@ -18,7 +18,7 @@ struct ConfigRootScan {
     func lookup(pid: pid_t) -> ProcessConfigRoot {
         snapshot.lookup(ExtraConfigDirs.processRoot(
             cli: cli,
-            environment: AppState.configRootEnvironment(for: pid),
+            environment: SessionDiscovery.configRootEnvironment(for: pid),
             homeDir: FileManager.default.homeDirectoryForCurrentUser.path,
             defaultRoot: defaultRoot
         ))
@@ -34,11 +34,11 @@ struct ConfigRootScan {
 /// root it actually uses, read from its own `CLAUDE_CONFIG_DIR` / `CODEX_HOME`
 /// / `GROK_HOME` (`ConfigRootDiscovery.run`). Only when that environment
 /// cannot be read does a process fall back to the known roots, one at a time.
-extension AppState {
+extension SessionDiscovery {
     /// The config-root variables of a running process, or nil when its
     /// environment cannot be read in full (then the root is unknown, not
     /// "default").
-    nonisolated static func configRootEnvironment(for pid: pid_t) -> [String: String]? {
+    static func configRootEnvironment(for pid: pid_t) -> [String: String]? {
         var mib = [CTL_KERN, KERN_PROCARGS2, pid]
         var size = 0
         guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return nil }
@@ -50,7 +50,7 @@ extension AppState {
 
     /// `cli`'s roots for one discovery scan: identities resolved once here,
     /// not per process.
-    nonisolated static func configRootScan(for cli: ConfigDirCLI) -> ConfigRootScan {
+    static func configRootScan(for cli: ConfigDirCLI) -> ConfigRootScan {
         let defaultRoot: String
         switch cli {
         case .claude: defaultRoot = ClaudeConfigPaths.defaultDirForUnsetEnvironment()
@@ -70,19 +70,19 @@ extension AppState {
     }
 
     /// Root a Codex process without `$CODEX_HOME` uses.
-    nonisolated static var defaultCodexRoot: String {
+    static var defaultCodexRoot: String {
         FileManager.default.homeDirectoryForCurrentUser.path + "/.codex"
     }
 
     /// Root a Grok process without `$GROK_HOME` uses.
-    nonisolated static var defaultGrokRoot: String {
+    static var defaultGrokRoot: String {
         FileManager.default.homeDirectoryForCurrentUser.path + "/.grok"
     }
 
     /// Session stores of the extra roots, for the discovery watcher. The
     /// primary stores are listed by `discoveryWatchRoots` itself, which also
     /// drops a store that is one of those under another spelling.
-    nonisolated static func extraConfigDirWatchRoots() -> [(source: String, path: String)] {
+    static func extraConfigDirWatchRoots() -> [(source: String, path: String)] {
         ExtraConfigDirs.load()
             .filter(\.enabled)
             .map { ($0.cli.source, "\($0.path)/\($0.cli.sessionStoreSubdirectory)") }
@@ -92,7 +92,7 @@ extension AppState {
     /// thread. `~/.codex` stays first — it is where these lookups always looked
     /// and where Codex Desktop keeps its state — followed by CodeIsland's own
     /// `$CODEX_HOME` (when launched from a shell) and the extra roots.
-    nonisolated static func codexStateRoots() -> [String] {
+    static func codexStateRoots() -> [String] {
         ExtraConfigDirs.roots(primary: defaultCodexRoot, extras: ConfigInstaller.codexHomes())
     }
 }

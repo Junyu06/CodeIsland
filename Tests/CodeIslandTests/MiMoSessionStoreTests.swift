@@ -39,8 +39,8 @@ final class MiMoSessionStoreTests: XCTestCase {
     }
 
     private func recent(rootSessionsOnly: Bool) -> String? {
-        AppState.withSQLiteDatabase(at: dbPath) { db in
-            AppState.findRecentOpenCodeSession(
+        SQLiteReader.withSQLiteDatabase(at: dbPath) { db in
+            OpenCodeDiscovery.findRecentOpenCodeSession(
                 in: db, cwd: "/Users/u/proj", after: nil, rootSessionsOnly: rootSessionsOnly
             )?.sessionId
         }
@@ -59,7 +59,7 @@ final class MiMoSessionStoreTests: XCTestCase {
     /// must not lend it theirs. Without a known row, the cwd match decides.
     func testModelComesFromTheCardsOwnStoreRow() {
         func model(_ storeSessionId: String?) -> String? {
-            AppState.readModelFromOpenCodeStore(
+            OpenCodeDiscovery.readModelFromOpenCodeStore(
                 cwd: "/Users/u/proj", processStart: nil, dbPath: dbPath,
                 rootSessionsOnly: true, storeSessionId: storeSessionId
             )
@@ -72,7 +72,7 @@ final class MiMoSessionStoreTests: XCTestCase {
 
     func testStorePaths() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        XCTAssertEqual(AppState.mimoDatabasePath(), home + "/.local/share/mimocode/mimocode.db")
-        XCTAssertEqual(AppState.openCodeDatabasePath(), home + "/.local/share/opencode/opencode.db")
+        XCTAssertEqual(OpenCodeDiscovery.mimoDatabasePath(), home + "/.local/share/mimocode/mimocode.db")
+        XCTAssertEqual(OpenCodeDiscovery.openCodeDatabasePath(), home + "/.local/share/opencode/opencode.db")
     }
 }

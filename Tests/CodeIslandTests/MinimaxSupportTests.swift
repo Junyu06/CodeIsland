@@ -381,7 +381,7 @@ final class MinimaxSupportTests: XCTestCase {
         try (lines.joined(separator: "\n") + "\n").write(toFile: path, atomically: true, encoding: .utf8)
         addTeardownBlock { try? FileManager.default.removeItem(atPath: path) }
 
-        let messages = AppState.readRecentFromTranscript(path: path).1
+        let messages = ClaudeDiscovery.readRecentFromTranscript(path: path).1
         XCTAssertEqual(messages.map(\.isUser), [true, false])
         XCTAssertEqual(messages.map(\.text), ["你好", "你好！有什么我可以帮你的吗？"])
     }

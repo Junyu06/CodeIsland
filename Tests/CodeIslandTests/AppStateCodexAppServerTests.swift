@@ -32,30 +32,30 @@ final class AppStateCodexAppServerTests: XCTestCase {
     }
 
     func testCodexDiscoveryUsesTranscriptCwdForDesktopProcess() {
-        XCTAssertTrue(AppState.codexDiscoveryUsesTranscriptCwd(processCwd: nil))
-        XCTAssertTrue(AppState.codexDiscoveryUsesTranscriptCwd(processCwd: "/"))
-        XCTAssertFalse(AppState.codexDiscoveryUsesTranscriptCwd(
+        XCTAssertTrue(CodexDiscovery.codexDiscoveryUsesTranscriptCwd(processCwd: nil))
+        XCTAssertTrue(CodexDiscovery.codexDiscoveryUsesTranscriptCwd(processCwd: "/"))
+        XCTAssertFalse(CodexDiscovery.codexDiscoveryUsesTranscriptCwd(
             processCwd: "/Users/haoo/Documents/project"
         ))
     }
 
     func testCodexPlaceholderHookIsIgnoredButProjectHookIsKept() {
-        XCTAssertTrue(AppState.isCodexPlaceholderHook(
+        XCTAssertTrue(CodexDiscovery.isCodexPlaceholderHook(
             source: "codex",
             cwd: "/",
             hasTranscriptPath: false
         ))
-        XCTAssertTrue(AppState.isCodexPlaceholderHook(
+        XCTAssertTrue(CodexDiscovery.isCodexPlaceholderHook(
             source: "codex",
             cwd: nil,
             hasTranscriptPath: false
         ))
-        XCTAssertFalse(AppState.isCodexPlaceholderHook(
+        XCTAssertFalse(CodexDiscovery.isCodexPlaceholderHook(
             source: "codex",
             cwd: "/Users/haoo/Documents/project",
             hasTranscriptPath: false
         ))
-        XCTAssertFalse(AppState.isCodexPlaceholderHook(
+        XCTAssertFalse(CodexDiscovery.isCodexPlaceholderHook(
             source: "codex",
             cwd: "/",
             hasTranscriptPath: true
@@ -88,7 +88,7 @@ final class AppStateCodexAppServerTests: XCTestCase {
         XCTAssertEqual(Set(appState.sessions.keys), [sessionId])
         XCTAssertEqual(appState.sessions[sessionId]?.providerSessionId, rawId)
 
-        appState.integrateDiscovered([AppState.DiscoveredSession(
+        appState.integrateDiscovered([DiscoveredSession(
             sessionId: sessionId,
             cwd: "/desktop/repo",
             tty: nil,
@@ -165,7 +165,7 @@ final class AppStateCodexAppServerTests: XCTestCase {
         try data.write(to: url)
 
         XCTAssertEqual(
-            AppState.codexSessionCwd(path: url.path),
+            CodexDiscovery.codexSessionCwd(path: url.path),
             "/Users/haoo/Documents/project"
         )
     }
@@ -296,7 +296,7 @@ final class AppStateCodexAppServerTests: XCTestCase {
 
         // A result already captured by the independent DB poll must not recreate
         // the just-closed card.
-        appState.integrateDiscovered([AppState.DiscoveredSession(
+        appState.integrateDiscovered([DiscoveredSession(
             sessionId: sessionId,
             cwd: "/repo",
             tty: nil,
@@ -314,7 +314,7 @@ final class AppStateCodexAppServerTests: XCTestCase {
 
         // A final terminal DB/file flush can be newer than the close callback;
         // idle is not evidence of a resumed generation.
-        appState.integrateDiscovered([AppState.DiscoveredSession(
+        appState.integrateDiscovered([DiscoveredSession(
             sessionId: sessionId,
             cwd: "/repo",
             tty: nil,

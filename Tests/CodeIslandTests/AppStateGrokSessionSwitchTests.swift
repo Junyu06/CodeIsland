@@ -67,8 +67,8 @@ final class AppStateGrokSessionSwitchTests: XCTestCase {
         XCTAssertEqual(appState.sessions[sessionId]?.status, .idle)
     }
 
-    private func resumedDiscovery(modifiedAt: Date = Date()) -> AppState.DiscoveredSession {
-        AppState.grokDiscoveredSession(
+    private func resumedDiscovery(modifiedAt: Date = Date()) -> DiscoveredSession {
+        GrokDiscovery.grokDiscoveredSession(
             sessionId: resumedId,
             cwd: cwd,
             model: "grok-4.6",
@@ -123,7 +123,7 @@ final class AppStateGrokSessionSwitchTests: XCTestCase {
         XCTAssertEqual(Array(appState.sessions.keys), [resumedId])
 
         // A later scan still maps the live TUI's PID to the previous session.
-        appState.integrateDiscovered([AppState.grokDiscoveredSession(
+        appState.integrateDiscovered([GrokDiscovery.grokDiscoveredSession(
             sessionId: previousId,
             cwd: cwd,
             model: "grok-4.6",
