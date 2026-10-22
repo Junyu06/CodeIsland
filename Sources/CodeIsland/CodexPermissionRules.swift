@@ -51,6 +51,15 @@ struct CodexPermissionRules {
             return isAutoReviewReviewer(reviewer)
         }
 
+        // A remote Codex reads its own host's config.toml and writes its
+        // rollout there; this Mac's say nothing about it (a remote rollout is
+        // never read here either). With no reviewer in the request itself,
+        // nothing tells the island that Codex would review it, so the request
+        // is not handed back: the user decides on the card. A wrong hand-back
+        // would leave it waiting in a terminal on the other machine, while a
+        // card can always be answered.
+        guard !isRemoteEvent(event) else { return false }
+
         // Desktop selections and per-turn overrides need not be written to
         // config.toml or included in PermissionRequest. The matching rollout
         // turn_context records the effective reviewer, including an explicit

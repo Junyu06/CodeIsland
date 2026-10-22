@@ -195,6 +195,30 @@ final class CodexAutoReviewRoutingTests: XCTestCase {
         }
     }
 
+    /// A remote Codex runs under its own host's config. This Mac's config
+    /// saying auto_review handed every remote request back to Codex — where
+    /// it waited in a terminal on the other machine, with no card here.
+    func testRemoteRequestIsNeverDeferredOnThisMacsConfig() throws {
+        try writeConfig(reviewer: "auto_review")
+        let event = try makeEvent(contexts: [context("current", "auto_review")], fields: ["_remote_host_id": "devbox"])
+        XCTAssertFalse(HookServer.shouldDeferPermissionRequestToProvider(event), "the user decides on the card")
+
+        let local = try makeEvent(contexts: [])
+        XCTAssertTrue(HookServer.shouldDeferPermissionRequestToProvider(local), "a local one still follows the config")
+    }
+
+    /// What the remote request says about itself is its own host's word.
+    func testRemoteRequestStillFollowsTheReviewerItCarries() throws {
+        let automatic = try makeEvent(contexts: [], fields: [
+            "_remote_host_id": "devbox", "approvals_reviewer": "auto_review",
+        ])
+        XCTAssertTrue(HookServer.shouldDeferPermissionRequestToProvider(automatic))
+
+        try writeConfig(reviewer: "auto_review")
+        let human = try makeEvent(contexts: [], fields: ["_remote_host_id": "devbox", "approvals_reviewer": "user"])
+        XCTAssertFalse(HookServer.shouldDeferPermissionRequestToProvider(human))
+    }
+
     func testRemoteTranscriptPathIsNeverReadFromTheLocalMachine() throws {
         let event = try makeEvent(contexts: [context("current", "auto_review")], fields: ["_remote_host_id": "remote"])
         XCTAssertNil(CodexPermissionRules.transcriptReviewerValue(event.rawJSON))
