@@ -105,6 +105,10 @@ extension AppState {
         let notifier = PushNotifier.shared
         guard notifier.isEnabled else { return }
         let session = sessions[sessionId]
+        // A child reports to the agent that spawned it, and that agent to the
+        // user: a child's turn ending or failing is not news on its own (#378).
+        // (Its completion never reaches here: the reducer drops it.)
+        guard session?.parentSessionId == nil else { return }
         if let failure = PushEventClassifier.sessionError(eventName: event.eventName, raw: event.rawJSON) {
             notifier.notify(
                 .error(type: failure.type, detail: failure.detail),

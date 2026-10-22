@@ -327,6 +327,7 @@ class HookServer {
     }
 
     private static let pluginMarkerBytes = Data("_via_plugin".utf8)
+    private static let declaredParentMarkerBytes = Data(DeclaredSubsession.parentKey.utf8)
     private static let sourceMarkerBytes = Data(#""_source""#.utf8)
     private static let codexMarkerBytes = Data("codex".utf8)
     private static let cursorTranscriptMarkerBytes = Data("agent-transcripts".utf8)
@@ -544,6 +545,70 @@ class HookServer {
         return false
     }
 
+    /// Agent Sub-Sessions for a child that named its parent
+    /// (`_parent_session_id`, #378) — a pi-subagents child. Separate mode
+    /// leaves it on its own card, where the reducer keeps it quiet. nil when
+    /// the payload carries no usable declaration, so the other routers decide.
+    private func routeDeclaredSubsession(
+        data: Data,
+        raw: [String: Any],
+        mode: String
+    ) -> (processedData: Data, responseData: Data?)? {
+        guard let parentId = DeclaredSubsession.parentSessionId(in: raw),
+              let rawChildId = Self.rawSessionId(from: raw) else {
+            return nil
+        }
+        let childId = HookEvent.cardSessionId(forRawSessionId: rawChildId, in: raw)
+
+        // A child stays where it started until it ends. Folding or hiding it
+        // mid-flight — Agent Sub-Sessions changed under it, or its parent's
+        // card turned up late — would strand the card or row it already has.
+        if appState.sessions[childId] != nil {
+            return (data, nil)
+        }
+        if let hostId = appState.sessionId(hostingSubagent: childId) {
+            return mergeDeclaredSubsession(data: data, raw: raw, into: hostId, childId: childId)
+        }
+
+        switch mode {
+        case "hide":
+            // Hidden, but never answered on the user's behalf (#165): a request
+            // the child is blocked on surfaces on a card of its own, which then
+            // shows the child until it ends.
+            if let event = HookEvent(from: data), Self.routeKind(for: event) != .event {
+                return (data, nil)
+            }
+            return (data, Data("{}".utf8))
+        case "merge":
+            // Into the parent's card — or, for a grandchild, the card its parent
+            // is folded into. An unknown parent is not invented: the child keeps
+            // a card of its own, where it is still treated as a child.
+            let targetId = appState.sessions[parentId] != nil
+                ? parentId
+                : appState.sessionId(hostingSubagent: parentId)
+            guard let targetId else { return (data, nil) }
+            return mergeDeclaredSubsession(data: data, raw: raw, into: targetId, childId: childId)
+        default:
+            return (data, nil)
+        }
+    }
+
+    /// Rewrite a declared child's event onto `cardId` as its subagent. Left on
+    /// its own card when the payload cannot address that card.
+    private func mergeDeclaredSubsession(
+        data: Data,
+        raw: [String: Any],
+        into cardId: String,
+        childId: String
+    ) -> (processedData: Data, responseData: Data?) {
+        var rewritten = raw
+        guard DeclaredSubsession.applyMerge(to: &rewritten, parentCardId: cardId, childCardId: childId),
+              let newData = try? JSONSerialization.data(withJSONObject: rewritten) else {
+            return (data, nil)
+        }
+        return (newData, nil)
+    }
+
     /// Test seam for Agent Sub-Sessions pre-routing (Cursor / Codex / plugin).
     internal func routeSubsessionPayloadIfNeededForTesting(
         data: Data
@@ -565,16 +630,27 @@ class HookServer {
         let mayNeedCursorPpidFallback = isMergeOrHide
             && Self.mayBeCursorHookSource(data: data)
             && data.range(of: Self.ppidKeyBytes) != nil
+        // A child that names its parent (#378). Parsed in every mode: one folded
+        // before Agent Sub-Sessions changed must still end where it started.
+        let mayHaveDeclaredParent = data.range(of: Self.declaredParentMarkerBytes) != nil
 
         // Cursor Task routing is a no-op in separate mode; skip JSON parse when
         // the payload is Cursor-only (Codex/plugin may still need it below).
-        if mayNeedCursorTranscript && !mayNeedPluginOrCodex && !isMergeOrHide {
+        if mayNeedCursorTranscript && !mayNeedPluginOrCodex && !mayHaveDeclaredParent && !isMergeOrHide {
             return (data, nil)
         }
 
-        guard mayNeedPluginOrCodex || mayNeedCursorTranscript || mayNeedCursorPpidFallback,
+        guard mayNeedPluginOrCodex || mayNeedCursorTranscript || mayNeedCursorPpidFallback
+                || mayHaveDeclaredParent,
               let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return (data, nil)
+        }
+
+        // A declared parent is the child's own word; no heuristic below may
+        // second-guess it.
+        if mayHaveDeclaredParent,
+           let routed = routeDeclaredSubsession(data: data, raw: raw, mode: mode) {
+            return routed
         }
 
         // Cursor Task/subagent: apply Agent Sub-Sessions (separate / merge / hide).

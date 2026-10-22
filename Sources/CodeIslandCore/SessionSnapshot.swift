@@ -183,6 +183,11 @@ public struct SessionSnapshot: Sendable {
     public var sessionTitle: String?
     public var sessionTitleSource: SessionTitleSource?
     public var providerSessionId: String?
+    /// The session this one works for, when it said so (`_parent_session_id`,
+    /// see ``DeclaredSubsession``): a pi-subagents child on a card of its own.
+    /// Its turns are part of the parent's, so none of them rings, pops a
+    /// completion card or sends a push; approvals and questions still do.
+    public var parentSessionId: String?
     /// AiWork/Agentix `client_type` from `sessions.get` (e.g. `DTCoderGUI`, `AiWorkGUI`).
     /// Prefer this over the `acp:`/`cli:` session-id prefix — modern TUI also uses `acp:`.
     public var aiworkClientType: String?
@@ -1525,6 +1530,7 @@ public func reduceEvent(
            !sessionTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             sessions[sessionId]?.sessionTitle = sessionTitle
         }
+        sessions[sessionId]?.parentSessionId = DeclaredSubsession.parentSessionId(in: event.rawJSON)
         if !isRemote {
             effects.append(.tryMonitorSession(sessionId: sessionId))
         }
@@ -1609,11 +1615,22 @@ public func reduceEvent(
         effects.append(.tryMonitorSession(sessionId: sessionId))
     }
 
+    // A session another agent spawned (it named its parent) works for that
+    // agent's turn. Its own start, prompt and turn end are the parent's
+    // business, not the user's: no completion card or push, no chime — the
+    // user hears the parent finish (#378). Its approvals and questions ring
+    // on their own path; the user still has to answer those.
+    let isDeclaredChild = sessions[sessionId]?.parentSessionId != nil
+    if isDeclaredChild {
+        effects.removeAll { $0 == .enqueueCompletion(sessionId: sessionId) }
+    }
+
     // Trigger sound for this event. A single failed tool stays silent; only a
     // turn that died (StopFailure) rings the error sound. See EventSoundRouting.
     // A Hermes gateway chat's start, prompt and turn end stay silent.
     if let sound = EventSoundRouting.soundEvent(rawEventName: event.eventName, normalizedEventName: eventName),
-       !HermesHookPayload.isQuiet(event) {
+       !HermesHookPayload.isQuiet(event),
+       !isDeclaredChild {
         effects.append(.playSound(sound))
     }
 
@@ -1788,8 +1805,13 @@ private func claudeDesktopSessionId(in event: HookEvent) -> String? {
     return hostId
 }
 
-private func shouldReopenCursorSubagentOnPrompt(event: HookEvent, session: SessionSnapshot?) -> Bool {
+private func shouldReopenSubagentOnPrompt(event: HookEvent, session: SessionSnapshot?) -> Bool {
     if (event.rawJSON["_cursor_subagent"] as? Bool) == true {
+        return true
+    }
+    // A folded declared child (a pi-subagents child) starts every turn with a
+    // prompt; one sent after its last Stop is a new turn of the same child.
+    if DeclaredSubsession.isMergedEvent(event) {
         return true
     }
     let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String)
@@ -1980,6 +2002,9 @@ public func extractMetadata(into sessions: inout [String: SessionSnapshot], sess
        !sessionTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         sessions[sessionId]?.sessionTitle = sessionTitle
     }
+    if let parentSessionId = DeclaredSubsession.parentSessionId(in: event.rawJSON) {
+        sessions[sessionId]?.parentSessionId = parentSessionId
+    }
 }
 
 private func normalizedCodexDesktopProviderSessionId(_ sessionId: String) -> String {
@@ -2138,7 +2163,7 @@ private func handleSubagentEvent(
 
     case "UserPromptSubmit":
         // Cursor has no SessionStart for Tasks; beforeSubmitPrompt is the relaunch signal.
-        if shouldReopenCursorSubagentOnPrompt(event: event, session: sessions[sessionId]) {
+        if shouldReopenSubagentOnPrompt(event: event, session: sessions[sessionId]) {
             sessions[sessionId]?.clearClosedSubagentId(agentId)
         }
         guard ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event) else {
@@ -2294,6 +2319,15 @@ private func handleSubagentEvent(
             && sessions[sessionId]?.status != .running {
             sessions[sessionId]?.status = .processing
             sessions[sessionId]?.subagents[agentId]?.status = .processing
+        }
+        return true
+
+    case "PreCompact", "PostCompact":
+        // A subagent compacts its own context, not the parent's: the parent
+        // card must not read "Compacting" (or leave a waiting state) for it.
+        if sessions[sessionId]?.subagents[agentId] != nil {
+            sessions[sessionId]?.subagents[agentId]?.lastActivity = Date()
+            sessions[sessionId]?.lastActivity = Date()
         }
         return true
 

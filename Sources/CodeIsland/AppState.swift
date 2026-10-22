@@ -1897,7 +1897,9 @@ final class AppState {
         // Handle the "else if activeSessionId == sessionId → mostActive" edge case
         // (reducer can't check activeSessionId since it's AppState-local)
         if sessions[sessionId]?.status == .idle && activeSessionId == sessionId {
-            if normalizedEventName != "Stop" {
+            // A Stop keeps its session up for the completion card. A child's
+            // Stop pops none (#378), so it hands the spot on like any event.
+            if normalizedEventName != "Stop" || sessions[sessionId]?.parentSessionId != nil {
                 activeSessionId = mostActiveSessionId()
             }
         }
@@ -2386,6 +2388,11 @@ final class AppState {
                 return lhs.value.startTime < rhs.value.startTime
             }
             .first?.key
+    }
+
+    /// The card a subagent with this id is folded into, if any.
+    func sessionId(hostingSubagent agentId: String) -> String? {
+        sessions.first { $0.value.subagents[agentId] != nil }?.key
     }
 
     func findSessionId(providerSessionId: String) -> String? {
@@ -3521,6 +3528,7 @@ final class AppState {
             snapshot.herdrBinaryPath = p.herdrBinaryPath
             snapshot.claudeDesktopSessionId = p.claudeDesktopSessionId
             snapshot.hermesChatElsewhere = p.hermesChatElsewhere ?? false
+            snapshot.parentSessionId = p.parentSessionId
             snapshot.lastActivity = p.lastActivity
             snapshot.transcriptPath = p.transcriptPath
             snapshot.recap = p.recap

@@ -381,23 +381,8 @@ public struct HookEvent {
             return nil
         }
         self.eventName = eventName
-        let rawSessionId = HookEvent.firstString(in: json, keys: ["session_id", "sessionId"])
-        if let rawSessionId,
-           let remoteHostId = json["_remote_host_id"] as? String,
-           !remoteHostId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            self.sessionId = "remote:\(remoteHostId):\(rawSessionId)"
-        } else if let rawSessionId,
-                  (json["_source"] as? String)?.lowercased() == "codex",
-                  json["_term_bundle"] as? String == "com.openai.codex" {
-            // Codex Desktop hooks, app-server notifications, rollout discovery,
-            // and state-DB polling must all address one card. Keep the provider's
-            // raw id in rawJSON for title lookup and persisted providerSessionId.
-            self.sessionId = rawSessionId.hasPrefix("codexapp:")
-                ? rawSessionId
-                : "codexapp:\(rawSessionId)"
-        } else {
-            self.sessionId = rawSessionId
-        }
+        self.sessionId = HookEvent.firstString(in: json, keys: ["session_id", "sessionId"])
+            .map { HookEvent.cardSessionId(forRawSessionId: $0, in: json) }
         self.toolName = HookEvent.firstString(in: json, keys: ["tool_name", "toolName", "tool", "name"])
             ?? HookEvent.firstString(inNestedDictionary: json, containerKeys: ["tool", "payload", "data"], keys: ["name", "tool_name", "toolName"])
             ?? HookEvent.firstString(inNestedDictionary: json, containerKeys: ["toolCall"], keys: ["name"])
@@ -418,6 +403,25 @@ public struct HookEvent {
             ? json["agent_id"] as? String
             : nil
         self.rawJSON = json
+    }
+
+    /// The card a session id from a payload is filed under. Remote hosts get
+    /// a namespace of their own, and Codex Desktop hooks, app-server
+    /// notifications, rollout discovery and state-DB polling must all address
+    /// one `codexapp:` card. The provider's raw id stays in rawJSON for title
+    /// lookup and the persisted providerSessionId.
+    public static func cardSessionId(forRawSessionId rawSessionId: String, in json: [String: Any]) -> String {
+        if let remoteHostId = json["_remote_host_id"] as? String,
+           !remoteHostId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "remote:\(remoteHostId):\(rawSessionId)"
+        }
+        if (json["_source"] as? String)?.lowercased() == "codex",
+           json["_term_bundle"] as? String == "com.openai.codex" {
+            return rawSessionId.hasPrefix("codexapp:")
+                ? rawSessionId
+                : "codexapp:\(rawSessionId)"
+        }
+        return rawSessionId
     }
 
     /// Whether a payload's `agent_id` identifies a subagent working under the

@@ -484,6 +484,40 @@ final class PushNotifierTests: XCTestCase {
         XCTAssertEqual(body["level"] as? String, "active")
     }
 
+    /// A pi-subagents child (it names its parent) reports to the parent, not
+    /// to the user: neither its finished nor its failed turn pushes (#378).
+    func testChildTurnsPushNothingButTheParentsDoes() async throws {
+        let appState = AppState()
+        let parent = "pi-push-parent"
+        let child: [String: Any] = [
+            "session_id": "pi-push-child",
+            "_source": "pi",
+            DeclaredSubsession.parentKey: parent,
+            "agent_type": "worker",
+        ]
+        appState.handleEvent(try makeEvent(child.merging([
+            "hook_event_name": "Stop",
+            "last_assistant_message": "child done",
+        ]) { _, new in new }))
+        appState.handleEvent(try makeEvent(child.merging([
+            "hook_event_name": "StopFailure",
+            "error": "rate_limit",
+            "last_assistant_message": "API Error: Rate limit reached",
+        ]) { _, new in new }))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(transport.requests.count, 0)
+
+        appState.handleEvent(try makeEvent([
+            "hook_event_name": "Stop",
+            "session_id": parent,
+            "_source": "pi",
+            "last_assistant_message": "all done",
+        ]))
+        await waitForRequests(1)
+        XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertEqual(sentBodies().first?["body"] as? String, "all done")
+    }
+
     func testInterruptedTurnIsNotPushedAsFinished() throws {
         let appState = AppState()
         appState.handleEvent(try makeEvent([

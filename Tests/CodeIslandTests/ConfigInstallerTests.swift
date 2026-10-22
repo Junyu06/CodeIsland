@@ -1479,10 +1479,36 @@ hooks:
 
         let contents = try String(contentsOf: piExtensionPath)
         XCTAssertTrue(contents.contains("CodeIsland pi extension"))
-        XCTAssertTrue(contents.contains("// version: v4"))
+        XCTAssertTrue(contents.contains("// version: v5"))
         XCTAssertTrue(contents.contains("__codeislandAllowedToolCalls"))
         XCTAssertTrue(contents.contains("@earendil-works/pi-coding-agent"))
+        // pi-subagents children name their parent's card (#378).
+        XCTAssertTrue(contents.contains("PI_SUBAGENT_PARENT_SESSION"))
+        XCTAssertTrue(contents.contains(DeclaredSubsession.parentKey))
         XCTAssertTrue(ConfigInstaller.isPiExtensionInstalled(piExtensionPath: piExtensionPath.path, fm: fm))
+    }
+
+    /// A v4 install rings for every pi-subagents child (#378); it must be
+    /// replaced, not left as a healthy install.
+    func testV4PiExtensionIsRewrittenToTheParentAwareVersion() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let piAgentDir = tempDir.appendingPathComponent(".pi/agent")
+        let piExtensionDir = piAgentDir.appendingPathComponent("extensions")
+        let piExtensionPath = piExtensionDir.appendingPathComponent("codeisland.ts")
+        try fm.createDirectory(at: piExtensionDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+        try "// CodeIsland pi extension\n// version: v4\n".write(to: piExtensionPath, atomically: true, encoding: .utf8)
+
+        XCTAssertFalse(ConfigInstaller.isPiExtensionInstalled(piExtensionPath: piExtensionPath.path, fm: fm))
+        XCTAssertTrue(ConfigInstaller.installPiExtension(
+            piAgentDir: piAgentDir.path,
+            piExtensionDir: piExtensionDir.path,
+            piExtensionPath: piExtensionPath.path,
+            fm: fm
+        ))
+        XCTAssertTrue(ConfigInstaller.isPiExtensionInstalled(piExtensionPath: piExtensionPath.path, fm: fm))
+        XCTAssertTrue(try String(contentsOf: piExtensionPath).contains("_parent_session_id"))
     }
 
     func testInstallPiExtensionSkipsWhenPiAgentDirIsMissing() throws {
