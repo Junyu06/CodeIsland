@@ -172,16 +172,15 @@ final class CursorImportedClaudeHookTests: XCTestCase {
     /// bridge labels Cursor must be a candidate too, or it never folds.
     func testRelabelledTaskHookFoldsUnderTheChatItsTranscriptNames() async throws {
         UserDefaults.standard.set("merge", forKey: SettingsKey.pluginSessionMode)
-        let previousScanner = AppState.cursorSubagentIndexScanner
-        defer { AppState.cursorSubagentIndexScanner = previousScanner }
         let childId = self.childId
         let taskTranscript = "/Users/u/.cursor/projects/\(workspace.appProjectDirEncoded())/agent-transcripts/"
             + "\(parentId)/subagents/\(childId).jsonl"
-        AppState.cursorSubagentIndexScanner = {
+        let cursorIndexScanner: @Sendable () -> CursorSubagentTranscriptIndex = {
             CursorSubagentTranscriptIndex(pathsBySessionId: [childId: [taskTranscript]], builtAt: Date())
         }
 
         let appState = AppState()
+        appState.discovery.scanners.cursorSubagentIndex = cursorIndexScanner
         appState.sessions[parentId] = runningChat(parentId)
         appState.sessions[siblingId] = runningChat(siblingId)
 

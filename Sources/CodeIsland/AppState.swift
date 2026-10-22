@@ -5,29 +5,6 @@ import CodeIslandCore
 
 private let log = Logger(subsystem: "com.codeisland", category: "AppState")
 
-/// FSEventStream context target. Callbacks hold an unretained pointer to this
-/// box (not `AppState`), and reach the owner only through `weak`, so queued
-/// main-queue deliveries stay safe if `AppState` tears down off the main actor.
-private final class ProjectsWatcherBox: @unchecked Sendable {
-    weak var appState: AppState?
-    private let lock = NSLock()
-    private var cancelled = false
-
-    func cancel() {
-        lock.lock()
-        cancelled = true
-        lock.unlock()
-    }
-
-    func handleChange() {
-        lock.lock()
-        let isCancelled = cancelled
-        lock.unlock()
-        guard !isCancelled else { return }
-        appState?.handleProjectsDirChange()
-    }
-}
-
 /// AppState's answers to the Agent Sub-Sessions resolvers, taken on the main
 /// actor for one hook (``AppState/subsessionContext``).
 struct AppSubsessionContext: SubsessionContext {
@@ -348,17 +325,14 @@ final class AppState {
     private var exitingSessions: [String: ProcessIdentity] = [:]
     @ObservationIgnored
     nonisolated(unsafe) private var saveTimer: Timer?
+    /// Session discovery: the session-store watcher and the scans it runs off
+    /// the main actor, whose sessions land in `integrateDiscovered`.
     @ObservationIgnored
-    nonisolated(unsafe) private var fsEventStream: FSEventStreamRef?
-    @ObservationIgnored
-    nonisolated(unsafe) private var projectsWatcherBox: ProjectsWatcherBox?
-    private var lastFSScanTime: Date = .distantPast
-    @ObservationIgnored
-    nonisolated(unsafe) private var discoveryScanTask: Task<Void, Never>?
-    private var pendingDiscoveryRescan = false
-    @ObservationIgnored
-    nonisolated(unsafe) private var codexDesktopDiscoveryScanTask: Task<Void, Never>?
-    private var lastCodexDesktopDiscoveryPollAt: Date?
+    private(set) lazy var discovery: SessionDiscoveryCoordinator = {
+        let discovery = SessionDiscoveryCoordinator()
+        discovery.onDiscovered = { [weak self] in self?.integrateDiscovered($0) }
+        return discovery
+    }()
     /// Cursor Agent Task transcripts on disk, for rebranding default-Claude
     /// Task cards and folding Cursor-labelled ones. Built off the main actor;
     /// see `rebrandMisattributedCursorTaskCards`.
@@ -659,20 +633,7 @@ final class AppState {
                 removeSession(key)
             }
         }
-        let discoveryPollNow = Date()
-        // Check the cheap clock predicate before the expensive app list: the poll
-        // is rate-limited to every 6s, so five of every six ticks can skip it.
-        let codexPollIntervalElapsed = lastCodexDesktopDiscoveryPollAt.map {
-            discoveryPollNow.timeIntervalSince($0) >= 6
-        } ?? true
-        if codexPollIntervalElapsed, Self.shouldPollCodexDesktopDiscovery(
-            runningBundleIdentifiers: runningBundleIds(),
-            lastPollAt: lastCodexDesktopDiscoveryPollAt,
-            now: discoveryPollNow
-        ) {
-            lastCodexDesktopDiscoveryPollAt = discoveryPollNow
-            requestCodexDesktopDiscoveryScan()
-        }
+        discovery.pollCodexDesktopIfDue(now: Date(), runningBundleIdentifiers: runningBundleIds)
 
         // 4. Remove idle sessions past timeout (user setting, or 10 min default for no-monitor sessions)
         let userTimeout = SettingsManager.shared.sessionTimeout
@@ -3017,153 +2978,22 @@ final class AppState {
         return !closedSubagentIds.isEmpty
     }
 
-    /// What a discovery scan runs. The real scan reads every process and the
-    /// agents' session stores under ~, and each session it returns gets a
-    /// process monitor — and the orphan reaper — on one of the user's real
-    /// CLIs. A test process scans nothing unless a test installs a scanner.
-    nonisolated(unsafe) static var discoveryScanner: @Sendable () -> [DiscoveredSession] = {
-        RuntimeEnvironment.isRunningTests ? [] : SessionDiscovery.findDiscoveredSessions()
-    }
-
-    /// What builds the Cursor Agent Task index: a walk of `~/.cursor/projects`.
-    /// A test process indexes nothing unless a test installs a scanner.
-    nonisolated(unsafe) static var cursorSubagentIndexScanner: @Sendable () -> CursorSubagentTranscriptIndex = {
-        RuntimeEnvironment.isRunningTests
-            ? CursorSubagentTranscriptIndex(pathsBySessionId: [:], builtAt: Date())
-            : CursorSubagentTranscriptIndex.scan(home: FileManager.default.homeDirectoryForCurrentUser.path)
-    }
-
-    private func requestDiscoveryScan() {
-        if discoveryScanTask != nil {
-            pendingDiscoveryRescan = true
-            return
-        }
-
-        pendingDiscoveryRescan = false
-        discoveryScanTask = Task.detached { [weak self] in
-            let discovered = Self.discoveryScanner()
-            guard !Task.isCancelled else { return }
-            await MainActor.run { [weak self] in
-                guard let self else { return }
-                guard !Task.isCancelled else {
-                    self.discoveryScanTask = nil
-                    return
-                }
-                self.integrateDiscovered(discovered)
-                self.discoveryScanTask = nil
-                if self.pendingDiscoveryRescan {
-                    self.pendingDiscoveryRescan = false
-                    self.requestDiscoveryScan()
-                }
-            }
-        }
-    }
-
-    /// FSEvents is not guaranteed to report every append below
-    /// `~/.codex/sessions` on all macOS/filesystem combinations. Reuse the
-    /// cleanup tick as a low-frequency fallback, but only while Codex Desktop
-    /// is running and only after the polling interval has elapsed.
-    nonisolated static func shouldPollCodexDesktopDiscovery(
-        runningBundleIdentifiers: Set<String>,
-        lastPollAt: Date?,
-        now: Date,
-        interval: TimeInterval = 6
-    ) -> Bool {
-        guard runningBundleIdentifiers.contains(codexAppBundleId) else { return false }
-        guard let lastPollAt else { return true }
-        return now.timeIntervalSince(lastPollAt) >= interval
-    }
-
-    func requestCodexDesktopDiscoveryScan() {
-        guard codexDesktopDiscoveryScanTask == nil else { return }
-        codexDesktopDiscoveryScanTask = Task.detached { [weak self] in
-            let discovered = ConfigInstaller.isEnabled(source: "codex")
-                ? CodexDiscovery.findRecentCodexDesktopSessions()
-                : []
-            guard !Task.isCancelled else { return }
-            await MainActor.run { [weak self] in
-                guard let self else { return }
-                guard !Task.isCancelled else {
-                    self.codexDesktopDiscoveryScanTask = nil
-                    return
-                }
-                self.integrateDiscovered(discovered)
-                self.codexDesktopDiscoveryScanTask = nil
-            }
-        }
-    }
-
     func startSessionDiscovery() {
         startCleanupTimer()
         // Restore persisted sessions before process scan (deduped by scan)
         restoreSessions()
 
         // Initial scan for already-running sessions, respecting per-source toggles.
-        requestDiscoveryScan()
+        discovery.requestScan()
         // Watch all known session-store roots so discovery keeps working when hooks are missed.
-        startProjectsWatcher()
-    }
-
-    /// FSEventStream on known session-store roots — fires when transcript/event files change.
-    private func startProjectsWatcher() {
-        guard fsEventStream == nil else { return }
-        let watchRoots = SessionDiscovery.discoveryWatchRoots()
-        guard !watchRoots.isEmpty else { return }
-
-        let box = ProjectsWatcherBox()
-        box.appState = self
-
-        var context = FSEventStreamContext()
-        // Unretained box is owned by `projectsWatcherBox` until
-        // `tearDownProjectsWatcher()`; the weak back-pointer keeps callbacks
-        // safe across off-main `AppState` deinit.
-        context.info = Unmanaged.passUnretained(box).toOpaque()
-
-        let stream = FSEventStreamCreate(
-            nil,
-            { (_, info, _, _, _, _) in
-                guard let info = info else { return }
-                let box = Unmanaged<ProjectsWatcherBox>.fromOpaque(info).takeUnretainedValue()
-                box.handleChange()
-            },
-            &context,
-            watchRoots as CFArray,
-            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            2.0,  // 2-second latency (coalesces rapid writes)
-            FSEventStreamCreateFlags(
-                kFSEventStreamCreateFlagUseCFTypes
-                    | kFSEventStreamCreateFlagNoDefer
-                    | kFSEventStreamCreateFlagFileEvents
-            )
-        )
-
-        guard let stream = stream else { return }
-        FSEventStreamSetDispatchQueue(stream, .main)
-        FSEventStreamStart(stream)
-        self.projectsWatcherBox = box
-        self.fsEventStream = stream
-        log.info("Discovery watcher started on \(watchRoots.joined(separator: ", "))")
+        discovery.startProjectsWatcher()
     }
 
     /// Re-arm discovery after the watched roots changed — an extra config dir
     /// was added, removed or paused in Settings → Hooks — and rescan at once so
     /// sessions already running under a newly added root show up.
     func restartProjectsWatcher() {
-        tearDownProjectsWatcher()
-        startProjectsWatcher()
-        requestDiscoveryScan()
-    }
-
-    /// Called by FSEventStream when a known session-store directory changes.
-    nonisolated fileprivate func handleProjectsDirChange() {
-        Task { @MainActor [weak self] in
-            guard let self = self else { return }
-            // FSEvents already coalesces writes with a two-second latency, and
-            // requestDiscoveryScan() coalesces events that arrive during a scan.
-            // Dropping events in an additional time window can miss the final
-            // lifecycle write and leave the island showing stale state.
-            self.requestDiscoveryScan()
-        }
+        discovery.restartProjectsWatcher()
     }
 
     /// Provider thread IDs are authoritative when both sides have one. Two
@@ -4057,9 +3887,10 @@ final class AppState {
     private func startCursorSubagentIndexRebuild() {
         guard cursorSubagentIndexTask == nil else { return }
         cancelCursorSubagentIndexRecheck()
+        let scan = discovery.scanners.cursorSubagentIndex
         cursorSubagentIndexTask = Task.detached(priority: .utility) { [weak self] in
             guard !Task.isCancelled else { return }
-            let index = Self.cursorSubagentIndexScanner()
+            let index = scan()
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
                 // Cancelled by teardown, which already dropped the handle.
@@ -4418,70 +4249,32 @@ final class AppState {
     }
 
     func stopSessionDiscovery() {
-        tearDownProjectsWatcher()
+        discovery.stop()
         rotation.stopTimer()
         cleanupTimer?.invalidate()
         cleanupTimer = nil
         saveTimer?.invalidate()
         saveTimer = nil
-        discoveryScanTask?.cancel()
-        discoveryScanTask = nil
-        pendingDiscoveryRescan = false
-        codexDesktopDiscoveryScanTask?.cancel()
-        codexDesktopDiscoveryScanTask = nil
-        lastCodexDesktopDiscoveryPollAt = nil
         cursorSubagentIndexTask?.cancel()
         cursorSubagentIndexTask = nil
         cancelCursorSubagentIndexRecheck()
         processMonitor.stopAll()
     }
 
-    /// Stops the FSEvents watcher on the main queue so Stop/Invalidate cannot
-    /// race a queued callback. Safe to call from `deinit` (any thread).
-    nonisolated private func tearDownProjectsWatcher() {
-        let run = { [self] in tearDownProjectsWatcherAssumingMain() }
-        if Thread.isMainThread {
-            run()
-        } else {
-            DispatchQueue.main.sync(execute: run)
-        }
-    }
-
-    /// FSEvents teardown; caller must already be on the main queue.
-    nonisolated private func tearDownProjectsWatcherAssumingMain() {
-        // Flip cancel before stopping so any already-queued callback no-ops
-        // instead of touching a dying AppState / freed box.
-        projectsWatcherBox?.cancel()
-        if let stream = fsEventStream {
-            FSEventStreamStop(stream)
-            FSEventStreamInvalidate(stream)
-            FSEventStreamRelease(stream)
-            fsEventStream = nil
-        }
-        let box = projectsWatcherBox
-        projectsWatcherBox = nil
-        // Keep the box alive until after previously queued main-queue
-        // callbacks drain (Invalidate does not flush them).
-        if let box {
-            DispatchQueue.main.async { _ = box }
-        }
-    }
-
     deinit {
         // Must not use MainActor.assumeIsolated: async callers (notably XCTest)
-        // can release AppState off the main actor via ARC. Weak-boxed FSEvents
-        // + main-synced Timer/FSEvents teardown keep discovery crash-free.
+        // can release AppState off the main actor via ARC. Main-synced Timer
+        // teardown keeps it crash-free. The discovery coordinator (FSEvents,
+        // scans) and the process monitor (exit sources) tear down their own
+        // when they are released.
         tearDownMainThreadResources()
-        discoveryScanTask?.cancel()
-        codexDesktopDiscoveryScanTask?.cancel()
         cursorSubagentIndexTask?.cancel()
         cursorSubagentIndexRecheck?.cancel()
         codexAppServerReconnectTask?.cancel()
-        // The process monitor cancels its exit sources when it is released.
     }
 
-    /// Invalidates main-run-loop Timers and the FSEvents watcher in one main-queue
-    /// hop. Safe from any thread so `deinit` stays uniformly main-safe.
+    /// Invalidates main-run-loop Timers in one main-queue hop. Safe from any
+    /// thread so `deinit` stays uniformly main-safe.
     nonisolated private func tearDownMainThreadResources() {
         let teardown = { [self] in
             rotation.tearDownAssumingMain()
@@ -4489,7 +4282,6 @@ final class AppState {
             cleanupTimer = nil
             saveTimer?.invalidate()
             saveTimer = nil
-            tearDownProjectsWatcherAssumingMain()
         }
         if Thread.isMainThread {
             teardown()

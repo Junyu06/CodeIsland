@@ -130,15 +130,14 @@ final class AttentionRegressionTests: XCTestCase {
     /// card for a session that no longer exists, and start a follow-up for it.
     func testAFoldedCursorTasksStopIsNotAnnouncedAsTheUsersTurn() async throws {
         UserDefaults.standard.set("merge", forKey: SettingsKey.pluginSessionMode)
-        let previousScanner = AppState.cursorSubagentIndexScanner
-        defer { AppState.cursorSubagentIndexScanner = previousScanner }
         let parentId = "e1247fd5-d9a0-48ef-8457-0304606b1833"
         let childId = "2528cb91-6379-48f2-aff8-40f4b804dafa"
         let childTranscript = "/Users/u/.cursor/projects/x/agent-transcripts/\(parentId)/subagents/\(childId).jsonl"
-        AppState.cursorSubagentIndexScanner = {
+        let cursorIndexScanner: @Sendable () -> CursorSubagentTranscriptIndex = {
             CursorSubagentTranscriptIndex(pathsBySessionId: [childId: [childTranscript]], builtAt: Date())
         }
         let appState = appStateWithFollowUps()
+        appState.discovery.scanners.cursorSubagentIndex = cursorIndexScanner
         var parent = SessionSnapshot()
         parent.source = "cursor"
         parent.status = .running

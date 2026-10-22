@@ -48,7 +48,7 @@ final class TestIsolationTests: XCTestCase {
     }
 
     func testDiscoveryScansNoRealProcessesOrSessionStores() {
-        XCTAssertEqual(AppState.discoveryScanner().count, 0)
+        XCTAssertEqual(SessionDiscoveryCoordinator.Scanners.current.sessions().count, 0)
     }
 
     func testHookInstallsNeverStartTheUsersClaude() {

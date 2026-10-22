@@ -608,11 +608,10 @@ final class SubsessionRoutingTests: XCTestCase {
     /// waits, and hides the Task again once the request is answered.
     func testHiddenCursorTasksRequestWaitsThroughTheCursorPass() async throws {
         setMode("hide")
-        let previousScanner = AppState.cursorSubagentIndexScanner
-        AppState.cursorSubagentIndexScanner = { CursorSubagentTranscriptIndex(pathsBySessionId: [:], builtAt: Date()) }
-        defer { AppState.cursorSubagentIndexScanner = previousScanner }
+        let cursorIndexScanner: @Sendable () -> CursorSubagentTranscriptIndex = { CursorSubagentTranscriptIndex(pathsBySessionId: [:], builtAt: Date()) }
 
         let appState = AppState()
+        appState.discovery.scanners.cursorSubagentIndex = cursorIndexScanner
         var chat = SessionSnapshot()
         chat.source = "cursor"
         chat.status = .running

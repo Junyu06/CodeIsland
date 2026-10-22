@@ -126,7 +126,7 @@ extension AppState {
             // Preserve state-backed cards, refresh immediately, and restore the
             // live JSON-RPC channel with capped exponential backoff.
             invalidateCodexAppServerQuestionsAfterDisconnect()
-            requestCodexDesktopDiscoveryScan()
+            discovery.requestCodexDesktopScan()
             scheduleCodexAppServerReconnect()
         case .stopAndRemoveSessions:
             codexAppServerReconnectTask?.cancel()
