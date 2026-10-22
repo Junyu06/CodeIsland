@@ -38,6 +38,12 @@ let package = Package(
             name: "TestDefaultsReset",
             path: "Tests/TestDefaultsReset"
         ),
+        // The stand-in ancestor processes BridgeGoldenTests runs the bridge
+        // under, built next to the test bundles (never shipped).
+        .executableTarget(
+            name: "codeisland-golden-stub",
+            path: "Tests/GoldenAncestryStub"
+        ),
         .testTarget(
             name: "CodeIslandCoreTests",
             dependencies: ["CodeIslandCore", "TestDefaultsReset"],

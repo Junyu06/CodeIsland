@@ -7,13 +7,16 @@ import CodeIslandCore
 /// as the agent reads it.
 @MainActor
 final class HookServerEdgeFactsTests: XCTestCase {
+    private struct NotListening: Error, CustomStringConvertible {
+        let path: String
+        var description: String { "HookServer did not listen on \(path)" }
+    }
+
     private var sandbox: URL!
     private var hookURL: URL!
     private var socketPath: String!
     private var server: HookServer!
     private var appState: AppState!
-    private var savedSocketPath: String?
-    private var savedAutoApproveTools: Any?
 
     override func setUpWithError() throws {
         sandbox = FileManager.default.temporaryDirectory
@@ -24,40 +27,21 @@ final class HookServerEdgeFactsTests: XCTestCase {
         try Data(source.utf8).write(to: hookURL)
 
         // sun_path holds 104 bytes; the temporary directory's path is too long.
+        // The server is handed its socket and the tools it approves without a
+        // card (an internal one, so a blocking request is answered without
+        // anyone at the UI): no process environment, no shared defaults.
         socketPath = "/tmp/ci-hs-\(UUID().uuidString.prefix(8)).sock"
-        savedSocketPath = ProcessInfo.processInfo.environment["CODEISLAND_SOCKET_PATH"]
-        setenv("CODEISLAND_SOCKET_PATH", socketPath, 1)
-        savedAutoApproveTools = UserDefaults.standard.object(forKey: SettingsKey.autoApproveTools)
-        // An internal tool the island approves without a card, so a blocking
-        // request is answered without anyone at the UI.
-        UserDefaults.standard.set("TodoWrite", forKey: SettingsKey.autoApproveTools)
-
         appState = AppState()
-        server = HookServer(appState: appState)
-        server.start()
-        let deadline = Date().addingTimeInterval(5)
-        while !FileManager.default.fileExists(atPath: socketPath), Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-        }
-        guard FileManager.default.fileExists(atPath: socketPath) else {
-            throw XCTSkip("HookServer did not start listening")
-        }
+        server = HookServer(appState: appState, socketPath: socketPath, autoApproveTools: ["TodoWrite"])
+        // Not a skip: a server that cannot listen is a failure.
+        guard server.start() else { throw NotListening(path: socketPath) }
     }
 
     override func tearDownWithError() throws {
         server?.stop()
         server = nil
         appState = nil
-        if let savedSocketPath {
-            setenv("CODEISLAND_SOCKET_PATH", savedSocketPath, 1)
-        } else {
-            unsetenv("CODEISLAND_SOCKET_PATH")
-        }
-        if let savedAutoApproveTools {
-            UserDefaults.standard.set(savedAutoApproveTools, forKey: SettingsKey.autoApproveTools)
-        } else {
-            UserDefaults.standard.removeObject(forKey: SettingsKey.autoApproveTools)
-        }
+        unlink(socketPath)
         try? FileManager.default.removeItem(at: sandbox)
     }
 

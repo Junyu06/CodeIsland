@@ -21,7 +21,7 @@ final class BridgeGoldenTests: XCTestCase {
 
     override func setUpWithError() throws {
         if Self.sharedRunner == nil {
-            Self.sharedRunner = Result { try BridgeGoldenRunner() }
+            Self.sharedRunner = Result { try BridgeGoldenRunner(stub: BridgeGoldenRunner.builtStub(for: Self.self)) }
         }
         runner = try Self.sharedRunner?.get()
     }

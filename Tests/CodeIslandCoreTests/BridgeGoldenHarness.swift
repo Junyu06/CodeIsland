@@ -182,45 +182,21 @@ struct BridgeGoldenNormalizer {
 /// stub executables at the fixture's paths (with the argv it names), against
 /// a stand-in island socket, with stdin from a file.
 final class BridgeGoldenRunner {
+    /// Why the golden runs cannot happen. A failure, never a skip: a skip
+    /// would quietly drop the bridge's regression test.
+    struct SetupError: Error, CustomStringConvertible {
+        let description: String
+    }
+
     let root: String
     /// Where the fixtures' ancestor executables live.
     var tree: String { root + "/tree" }
+    /// The stand-in ancestor (Tests/GoldenAncestryStub), copied to every path
+    /// a fixture names.
     private let stub: String
 
-    /// The stub: logs its pid, leaves the controlling terminal (so the bridge
-    /// finds no tty), runs everything after its first `--` as a child and
-    /// exits with the child's status.
-    private static let stubSource = #"""
-    #include <errno.h>
-    #include <libproc.h>
-    #include <stdio.h>
-    #include <stdlib.h>
-    #include <string.h>
-    #include <sys/wait.h>
-    #include <unistd.h>
-
-    int main(int argc, char **argv) {
-        const char *log = getenv("GOLDEN_STUB_PIDS");
-        if (log) {
-            char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
-            proc_pidpath(getpid(), path, sizeof path);
-            FILE *f = fopen(log, "a");
-            if (f) { fprintf(f, "%d\t%s\n", getpid(), path); fclose(f); }
-        }
-        setsid();
-        int i = 1;
-        while (i < argc && strcmp(argv[i], "--") != 0) i++;
-        if (i + 1 >= argc) return 127;
-        pid_t child = fork();
-        if (child < 0) return 127;
-        if (child == 0) { execv(argv[i + 1], &argv[i + 1]); _exit(127); }
-        int status = 0;
-        while (waitpid(child, &status, 0) < 0) { if (errno != EINTR) return 127; }
-        return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-    }
-    """#
-
-    init() throws {
+    init(stub: URL) throws {
+        self.stub = stub.path
         // A short, neutral root: no path component may look like an agent
         // (`/pi…`, `/claude`, …) to the bridge's ancestry inference.
         let base = "/tmp/ci-golden-\(UUID().uuidString.prefix(8).lowercased())"
@@ -228,27 +204,10 @@ final class BridgeGoldenRunner {
         // realpath, not resolvingSymlinksInPath (which strips `/private`):
         // proc_pidpath and getcwd report /private/tmp/….
         guard let resolved = realpath(base, nil) else {
-            throw XCTSkip("cannot resolve \(base)")
+            throw SetupError(description: "cannot resolve \(base)")
         }
         root = String(cString: resolved)
         free(resolved)
-        let source = root + "/stub.c"
-        stub = root + "/stub"
-        try Data(Self.stubSource.utf8).write(to: URL(fileURLWithPath: source))
-        let compile = Process()
-        compile.executableURL = URL(fileURLWithPath: "/usr/bin/cc")
-        compile.arguments = ["-O1", "-o", stub, source]
-        compile.standardOutput = FileHandle.nullDevice
-        compile.standardError = FileHandle.nullDevice
-        do {
-            try compile.run()
-            compile.waitUntilExit()
-        } catch {
-            throw XCTSkip("no C compiler to build the ancestry stub: \(error)")
-        }
-        guard compile.terminationStatus == 0 else {
-            throw XCTSkip("could not compile the ancestry stub")
-        }
     }
 
     func cleanUp() {
@@ -271,11 +230,20 @@ final class BridgeGoldenRunner {
         if let path = ProcessInfo.processInfo.environment["CODEISLAND_BRIDGE_UNDER_TEST"] {
             return URL(fileURLWithPath: path)
         }
+        return try builtNextToTests("codeisland-bridge", for: testCase)
+    }
+
+    /// The stand-in ancestor, built with the package next to the test bundle.
+    static func builtStub(for testCase: AnyClass) throws -> URL {
+        try builtNextToTests("codeisland-golden-stub", for: testCase)
+    }
+
+    private static func builtNextToTests(_ product: String, for testCase: AnyClass) throws -> URL {
         let url = Bundle(for: testCase).bundleURL
             .deletingLastPathComponent()
-            .appendingPathComponent("codeisland-bridge")
+            .appendingPathComponent(product)
         guard FileManager.default.isExecutableFile(atPath: url.path) else {
-            throw XCTSkip("codeisland-bridge not built next to the test bundle")
+            throw SetupError(description: "\(product) is not built next to the test bundle (swift build --build-tests)")
         }
         return url
     }
