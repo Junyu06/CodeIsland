@@ -144,7 +144,10 @@ runs, whose stdout Cursor reads against its own schema — is answered at once
 with nothing, and its edge prints nothing; a hook its edge does not wait on
 (`waits: false`, whatever its event is spelled) gets no card. The answer it
 does send is already in the form the agent reads (Gemini CLI and Google
-Antigravity get `{"decision":"allow"|"deny"}`), so print it verbatim.
+Antigravity get `{"decision":"allow"|"deny"}`), so print it verbatim. Only
+the user decides: a request the island drops for any other reason — its
+agent got past it, its session ended — is answered `{}`, no decision, and
+the agent asks in its own prompt.
 
 One answer cannot wait for the island: Google Antigravity refuses a tool call
 whose `PreToolUse` hook prints nothing, so the bridge prints
