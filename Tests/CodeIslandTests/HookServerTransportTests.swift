@@ -78,6 +78,7 @@ final class HookServerTransportTests: XCTestCase {
         readIdleTimeout: TimeInterval = HookConnection.readIdleTimeout
     ) {
         server.stop()
+        unlink(socketPath)
         socketPath = "/tmp/ci-ht-\(UUID().uuidString.prefix(8)).sock"
         server = HookServer(
             appState: appState,
