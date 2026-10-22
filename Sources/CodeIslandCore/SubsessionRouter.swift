@@ -26,7 +26,8 @@ public enum SubsessionPlacement: Equatable, Sendable {
 ///   card its parent is folded into. With no card to fold into, it keeps a
 ///   linked card of its own.
 /// - **Hide**: the hook is dropped, but never answered on the user's behalf
-///   (#165): a request the child is blocked on surfaces on a card of its own.
+///   (#165): a request the child is blocked on surfaces on a card of its own
+///   (a plugin proxy's goes back to its agent undecided).
 ///
 /// A child stays where it is until it ends — on its card, or as a row of the
 /// card it is folded into — whatever the setting says now. AppState's passes
@@ -63,6 +64,7 @@ public enum SubsessionRouter {
         let link = DeclaredSubsession.link(in: raw)
             ?? foldedLink(in: raw, cards: context.cards)
             ?? CursorSubsessionRouter.link(in: raw, context: context, now: now)
+            ?? PluginProxySubsession.link(in: raw, context: context, now: now)
         // A session cannot be its own parent.
         guard let link, link.isProviderFolded || link.parentCardId != link.childCardId else { return nil }
         return link
@@ -111,6 +113,15 @@ public enum SubsessionRouter {
                   !isBlockingRequest() else {
                 return .unchanged
             }
+            return .hidden
+        }
+
+        // A plugin proxy reports its agent's own turn a second way (see
+        // ``fold(_:link:into:)``). Hide drops all of it, a request included:
+        // answered `{}`, the request is left undecided and the agent asks the
+        // user itself (#165), as with no hook installed. A card of its own
+        // would show what the agent shows anyway, and stay up until it ended.
+        if link.kind == .pluginProxy, mode == .hide {
             return .hidden
         }
 
@@ -319,5 +330,40 @@ public enum SubsessionRouter {
         guard let string = value as? String else { return nil }
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+/// Another agent firing this one's hooks (#123): the bridge marks a hook that
+/// came with no `--source` and whose source it inferred from the process tree
+/// `_via_plugin` (omo in OpenCode runs Claude Code's hooks). Its parent is
+/// the card of the same agent on the same process — a guess.
+public enum PluginProxySubsession {
+    public static func link(
+        in raw: [String: Any],
+        context: SubsessionContext,
+        now: Date = Date()
+    ) -> SubsessionLink? {
+        guard (raw["_via_plugin"] as? Bool) == true else { return nil }
+        // A hook with no session id lands on AppState's "default" card.
+        let childCardId = SubsessionRouter.sessionId(in: raw)
+            .map { HookEvent.cardSessionId(forRawSessionId: $0, in: raw) } ?? "default"
+        var parentCardId: String?
+        if let source = raw["_source"] as? String,
+           let ppid = SubsessionRouter.positivePpid(in: raw) {
+            parentCardId = SubsessionCards.samePidCard(
+                source: source,
+                ppid: ppid,
+                excluding: childCardId,
+                in: context.cards,
+                now: now
+            )
+        }
+        return SubsessionLink(
+            kind: .pluginProxy,
+            childCardId: childCardId,
+            agentId: childCardId,
+            parentCardId: parentCardId,
+            isInferred: true
+        )
     }
 }

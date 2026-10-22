@@ -455,18 +455,19 @@ class HookServer {
     }
 
     private func routeSubsessionPayloadIfNeeded(data: Data) -> (processedData: Data, responseData: Data?) {
-        let mayNeedPluginOrCodex = data.range(of: Self.pluginMarkerBytes) != nil
-            || (data.range(of: Self.sourceMarkerBytes) != nil && data.range(of: Self.codexMarkerBytes) != nil)
+        let mayNeedCodex = data.range(of: Self.sourceMarkerBytes) != nil && data.range(of: Self.codexMarkerBytes) != nil
 
         let mode = UserDefaults.standard.string(forKey: SettingsKey.pluginSessionMode)
             ?? SettingsDefaults.pluginSessionMode
         let isMergeOrHide = mode == "hide" || mode == "merge"
 
-        // A child that names its parent (#378), or a Cursor Task its
-        // transcript path names: in every mode. Show separately keeps such a
-        // child on a quiet card of its own, and one folded before Agent
-        // Sub-Sessions changed must still end where it started.
+        // A child that names its parent (#378), a plugin proxy (#123), or a
+        // Cursor Task its transcript path names: in every mode. Show
+        // separately keeps such a child on a quiet card of its own, and one
+        // folded before Agent Sub-Sessions changed must still end where it
+        // started.
         let mayBeLinkedChild = data.range(of: Self.declaredParentMarkerBytes) != nil
+            || data.range(of: Self.pluginMarkerBytes) != nil
             || Self.mayNeedCursorSubsessionRouting(data: data)
             // A Cursor Task without one: Merge and Hide fall back to its IDE
             // process (`_ppid`). Show separately does not act on that guess,
@@ -475,39 +476,19 @@ class HookServer {
                 && Self.mayBeCursorHookSource(data: data)
                 && data.range(of: Self.ppidKeyBytes) != nil)
 
-        guard mayNeedPluginOrCodex || mayBeLinkedChild,
+        guard mayNeedCodex || mayBeLinkedChild,
               let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return (data, nil)
         }
 
-        // A child that names its parent, one already folded into a card, or a
-        // Cursor Task (``SubsessionRouter/link(in:context:now:)``).
+        // A child that names its parent, one already folded into a card, a
+        // Cursor Task or a plugin proxy (``SubsessionRouter/link(in:context:now:)``).
         let context = appState.subsessionContext
         if let link = SubsessionRouter.link(in: raw, context: context) {
             return routeLinkedChild(link, data: data, raw: raw, mode: mode, cards: context.cards)
         }
 
         guard isMergeOrHide else {
-            return (data, nil)
-        }
-
-        if (raw["_via_plugin"] as? Bool) == true {
-            switch mode {
-            case "hide":
-                return (data, Self.hiddenPluginResponse(for: raw))
-            case "merge":
-                if let source = raw["_source"] as? String,
-                   let ppid = Self.pluginPpid(from: raw),
-                   let mainSessionId = appState.findSessionId(forSource: source, ppid: ppid) {
-                    var rewritten = raw
-                    rewritten["session_id"] = mainSessionId
-                    if let newData = try? JSONSerialization.data(withJSONObject: rewritten) {
-                        return (newData, nil)
-                    }
-                }
-            default:
-                break
-            }
             return (data, nil)
         }
 

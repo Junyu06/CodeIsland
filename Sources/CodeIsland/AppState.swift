@@ -2401,40 +2401,22 @@ final class AppState {
         answerQuestion(answer, expectedSessionId: expectedSessionId)
     }
 
-    /// Find an existing session whose source matches and whose CLI PID equals
-    /// the supplied ppid. Used by HookServer to merge plugin-proxied events
-    /// (e.g. omo) into their main session when pluginSessionMode == "merge". (#123)
-    ///
-    /// We additionally require the candidate session to have been active in
-    /// the last 5 minutes. This guards against macOS PID reuse — a stale
-    /// session whose CLI long since exited could otherwise still match the
-    /// plugin event's `_ppid` if the OS recycled that PID for an unrelated
-    /// process. Live sessions update `lastActivity` on every event so the
-    /// window is generous; stale ones get skipped. (#123 review)
+    /// An existing session whose source matches and whose CLI PID equals the
+    /// supplied ppid, active in the last five minutes (see
+    /// ``SubsessionCards/samePidCard(source:ppid:excluding:requireActive:in:now:)``).
     func findSessionId(
         forSource source: String,
         ppid: Int,
         excluding excludedSessionId: String? = nil,
         requireActive: Bool = false
     ) -> String? {
-        let normalized = SessionSnapshot.normalizedSupportedSource(source)
-        let cutoff = Date().addingTimeInterval(-300)
-        return sessions
-            .filter { sessionId, snap in
-                let snapSource = SessionSnapshot.normalizedSupportedSource(snap.source)
-                return snapSource == normalized
-                    && snap.cliPid == pid_t(ppid)
-                    && snap.lastActivity >= cutoff
-                    && sessionId != excludedSessionId
-                    && (!requireActive || snap.status != .idle)
-            }
-            .sorted { lhs, rhs in
-                let lhsActive = lhs.value.status != .idle
-                let rhsActive = rhs.value.status != .idle
-                if lhsActive != rhsActive { return lhsActive }
-                return lhs.value.startTime < rhs.value.startTime
-            }
-            .first?.key
+        SubsessionCards.samePidCard(
+            source: source,
+            ppid: ppid,
+            excluding: excludedSessionId,
+            requireActive: requireActive,
+            in: sessions
+        )
     }
 
     func findSessionId(providerSessionId: String) -> String? {

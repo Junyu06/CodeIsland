@@ -195,4 +195,52 @@ final class SubsessionRoutingTests: XCTestCase {
         appState.applyCursorSubsessionModeToKnownSessions()
         XCTAssertNil(appState.sessions[cursorTask], "hidden again once answered")
     }
+
+    // MARK: - Plugin proxies
+
+    /// Hide used to answer a proxy's permission request `allow`. It now goes
+    /// back to the agent undecided (`{}`, as with no hook installed), so the
+    /// agent asks the user itself; the proxy stays hidden throughout.
+    func testHiddenPluginProxyRequestGoesBackToItsAgentUndecided() throws {
+        setMode("hide")
+        let appState = AppState()
+        let server = HookServer(appState: appState)
+        func proxy(_ event: String, _ extra: [String: Any] = [:]) -> [String: Any] {
+            ["hook_event_name": event, "session_id": "ses_proxy", "_source": "opencode", "_via_plugin": true, "_ppid": 62_001]
+                .merging(extra) { _, new in new }
+        }
+
+        for payload in [
+            proxy("PreToolUse", ["tool_name": "bash"]),
+            proxy("PermissionRequest", ["tool_name": "bash", "tool_input": ["command": "rm -rf build"]]),
+            proxy("PermissionRequest", [
+                "tool_name": "AskUserQuestion",
+                "tool_input": ["questions": [["question": "Which?", "options": [["label": "A"]]]]],
+            ]),
+            proxy("Stop"),
+        ] {
+            let routed = try route(payload, server: server)
+            XCTAssertEqual(routed.response.flatMap { String(data: $0, encoding: .utf8) }, "{}", "\(payload["hook_event_name"]!)")
+        }
+        XCTAssertNil(appState.sessions["ses_proxy"])
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+        XCTAssertEqual(played, [])
+    }
+
+    func testMergedPluginProxyJoinsItsAgentsCardAsItsOwnEvents() throws {
+        setMode("merge")
+        let ppid = 62_002
+        let appState = AppState()
+        var main = SessionSnapshot()
+        main.source = "opencode"
+        main.status = .running
+        main.cliPid = pid_t(ppid)
+        appState.sessions["opencode-main"] = main
+        let routed = try route([
+            "hook_event_name": "PostToolUse", "session_id": "ses_proxy",
+            "_source": "opencode", "_via_plugin": true, "_ppid": ppid,
+        ], server: HookServer(appState: appState))
+        XCTAssertEqual(routed.sessionId, "opencode-main")
+        XCTAssertNil(routed.raw["agent_id"])
+    }
 }

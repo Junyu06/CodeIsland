@@ -121,6 +121,10 @@ public protocol SubsessionContext {
 
 /// Lookups over the island's cards that resolving a child's parent needs.
 public enum SubsessionCards {
+    /// A card whose CLI process has not shown activity for this long may be
+    /// a dead session whose PID the OS has since handed to another process.
+    public static let samePidActivityWindow: TimeInterval = 300
+
     /// The card filed under `providerSessionId`: its own key, its Codex
     /// Desktop key, or a card that records it as its provider session id.
     public static func cardId(
@@ -137,6 +141,43 @@ public enum SubsessionCards {
         return cards.first(where: { _, snap in
             snap.providerSessionId == providerSessionId
         })?.key
+    }
+
+    /// A card whose source matches and whose CLI PID is `ppid`: the session
+    /// a plugin proxy's or a Codex thread's process belongs to (#123).
+    ///
+    /// The candidate must have been active in the last five minutes. This
+    /// guards against macOS PID reuse — a stale session whose CLI long since
+    /// exited could otherwise still match the hook's `_ppid` if the OS
+    /// recycled that PID for an unrelated process. Live sessions update
+    /// `lastActivity` on every event so the window is generous; stale ones
+    /// get skipped. (#123 review)
+    public static func samePidCard(
+        source: String,
+        ppid: Int,
+        excluding excludedCardId: String? = nil,
+        requireActive: Bool = false,
+        in cards: [String: SessionSnapshot],
+        now: Date = Date()
+    ) -> String? {
+        let normalized = SessionSnapshot.normalizedSupportedSource(source)
+        let cutoff = now.addingTimeInterval(-samePidActivityWindow)
+        return cards
+            .filter { cardId, snap in
+                let snapSource = SessionSnapshot.normalizedSupportedSource(snap.source)
+                return snapSource == normalized
+                    && snap.cliPid == pid_t(ppid)
+                    && snap.lastActivity >= cutoff
+                    && cardId != excludedCardId
+                    && (!requireActive || snap.status != .idle)
+            }
+            .sorted { lhs, rhs in
+                let lhsActive = lhs.value.status != .idle
+                let rhsActive = rhs.value.status != .idle
+                if lhsActive != rhsActive { return lhsActive }
+                return lhs.value.startTime < rhs.value.startTime
+            }
+            .first?.key
     }
 
     /// The card a child session with this subagent id is folded into, if

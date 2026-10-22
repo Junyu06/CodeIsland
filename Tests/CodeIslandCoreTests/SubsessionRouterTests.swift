@@ -28,6 +28,10 @@ final class SubsessionRouterTests: XCTestCase {
         ["hook_event_name": event, "session_id": cursorTask, "_source": "cursor", "_ppid": 4242]
     }
 
+    private func pluginProxy(_ event: String = "PostToolUse") -> [String: Any] {
+        ["hook_event_name": event, "session_id": child, "_source": "opencode", "_via_plugin": true, "_ppid": 9090]
+    }
+
     // MARK: - Helpers
 
     private func link(_ raw: [String: Any], _ context: StubSubsessionContext, file: StaticString = #filePath, line: UInt = #line) throws -> SubsessionLink {
@@ -84,6 +88,25 @@ final class SubsessionRouterTests: XCTestCase {
         XCTAssertEqual(try placement(cursorByProcess(), .hide, context), .hidden)
     }
 
+    func testPluginProxyInEveryMode() throws {
+        let alone = StubSubsessionContext()
+        let withAgent = StubSubsessionContext(cards: [
+            "opencode-main": subsessionCard(source: "opencode", status: .running, cliPid: 9090),
+        ])
+        XCTAssertEqual(try link(pluginProxy(), withAgent).parentCardId, "opencode-main")
+        XCTAssertEqual(try placement(pluginProxy(), .separate, withAgent), .unchanged, "the agent's card is only a guess")
+        XCTAssertEqual(try placement(pluginProxy(), .merge, withAgent), .fold(into: "opencode-main"))
+        XCTAssertEqual(try placement(pluginProxy(), .merge, alone), .unchanged)
+        XCTAssertEqual(try placement(pluginProxy(), .hide, alone), .hidden, "a proxy is hidden even when its agent has no card")
+        // Answered `{}`: undecided, so the agent asks the user itself (#165).
+        for context in [alone, withAgent] {
+            XCTAssertEqual(try placement(pluginProxy("PermissionRequest"), .hide, context, blocking: true), .hidden)
+        }
+        // A card of its own does not bring it back in Hide.
+        withAgent.cards[child] = subsessionCard(source: "opencode")
+        XCTAssertEqual(try placement(pluginProxy(), .hide, withAgent), .hidden)
+    }
+
     func testHookOfASessionNobodySpawnedHasNoLink() {
         let context = StubSubsessionContext()
         XCTAssertNil(SubsessionRouter.link(in: ["hook_event_name": "Stop", "session_id": parent], context: context))
@@ -128,6 +151,20 @@ final class SubsessionRouterTests: XCTestCase {
     }
 
     // MARK: - The rewrite
+
+    func testPluginProxyJoinsItsAgentsCardAsItsOwnEvents() throws {
+        let context = StubSubsessionContext(cards: [
+            "opencode-main": subsessionCard(source: "opencode", status: .running, cliPid: 9090),
+        ])
+        var raw = pluginProxy("Stop")
+        XCTAssertEqual(
+            SubsessionRouter.route(&raw, link: try link(raw, context), mode: .merge, cards: context.cards, isBlockingRequest: { false }),
+            .rewritten
+        )
+        XCTAssertEqual(raw["session_id"] as? String, "opencode-main")
+        XCTAssertNil(raw["agent_id"], "omo mirrors the session's own turn: no subagent row waiting on a Stop")
+        XCTAssertNil(raw[SubsessionRouter.foldedKey])
+    }
 
     func testChildOnItsOwnCardIsLinkedToItsParent() throws {
         var raw: [String: Any] = ["hook_event_name": "Stop", "session_id": child, "_source": "codex"]
