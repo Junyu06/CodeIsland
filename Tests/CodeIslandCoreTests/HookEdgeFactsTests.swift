@@ -7,20 +7,13 @@ import XCTest
 final class HookEdgeFactsTests: XCTestCase {
     private let remoteHost: [String: Any] = ["id": "devbox", "name": "Dev Box"]
 
-    /// Anything a test would notice if this Mac were consulted for a remote edge.
-    private let noLocalMachine = HookEdgeFacts.LocalMachine(
-        homeDirectory: { XCTFail("a remote edge's home is not this Mac's"); return "/Users/mac" },
-        fileExists: { _ in XCTFail("a remote edge's files are not this Mac's"); return true }
-    )
-
     private func interpret(
         _ payload: [String: Any],
-        localMachine: HookEdgeFacts.LocalMachine? = nil,
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws -> HookIntake {
         let delivery = try XCTUnwrap(
-            HookEdgeFacts.delivery(in: payload, localMachine: localMachine ?? noLocalMachine),
+            HookEdgeFacts.delivery(in: payload),
             "no facts read",
             file: file, line: line
         )
@@ -200,8 +193,7 @@ final class HookEdgeFactsTests: XCTestCase {
 
     func testRemoteHookWithoutSessionIsDropped() throws {
         let delivery = HookEdgeFacts.delivery(
-            in: ["hook_event_name": "Stop", "_edge": remoteEdge(source: "codex")],
-            localMachine: noLocalMachine
+            in: ["hook_event_name": "Stop", "_edge": remoteEdge(source: "codex")]
         )
         guard case .dropped = delivery else {
             return XCTFail("a hook with no session and no process to key it by is dropped")
@@ -263,7 +255,7 @@ final class HookEdgeFactsTests: XCTestCase {
     }
 
     /// A remote edge's pid is not this Mac's; a remote Grok's transcript is
-    /// not on this Mac (no home, no file lookup — `noLocalMachine` fails).
+    /// not on this Mac (no home, no file lookup).
     func testRemoteEdgeIgnoresLocalOnlyFacts() throws {
         let intake = try interpret([
             "hookEventName": "Stop",
@@ -300,51 +292,63 @@ final class HookEdgeFactsTests: XCTestCase {
         XCTAssertNil(none.payload["cwd"])
     }
 
-    // MARK: - Local edges and the facts themselves
+    // MARK: - No edge is this Mac
 
-    func testLocalEdgeGetsTheBridgesProcessAndTerminalReading() throws {
-        let intake = try interpret([
-            "hook_event_name": "Stop",
-            "session_id": "local-1",
-            "_edge": [
+    /// No edge sends facts from this Mac: the bridge reads its own and drops
+    /// an `_edge` piped into it. A `host` that is missing, `null` or not an
+    /// object (a string) does not make an edge this Mac's: its `ppid` is
+    /// never tracked, and no home or file of this Mac is consulted for it.
+    func testAnEdgeWithAMalformedHostIsNotTakenForThisMac() throws {
+        for host: Any? in [nil, NSNull(), "devbox", ["id": 7]] {
+            var edge: [String: Any] = [
                 "v": 1,
                 "source": "codex",
                 "ppid": 4242,
                 "cwd": "/Users/u/project",
                 "env": [
                     "TERM_PROGRAM": "iTerm.app",
-                    "ITERM_SESSION_ID": "w0t0p0:GUID-1",
                     "TMUX": "/tmp/tmux-501/default,1,0",
                     "TMUX_PANE": "%3",
                     "UNRELATED_SECRET": "not read",
                 ],
                 "tmux_client_tty": "/dev/ttys004",
-            ] as [String: Any],
-        ], localMachine: .init(homeDirectory: { "/Users/u" }, fileExists: { _ in false }))
-        XCTAssertEqual(intake.payload["_ppid"] as? Int32, 4242)
-        XCTAssertEqual(intake.payload["_source"] as? String, "codex")
-        XCTAssertEqual(intake.payload["_term_app"] as? String, "iTerm.app")
-        XCTAssertEqual(intake.payload["_iterm_session"] as? String, "GUID-1")
-        XCTAssertEqual(intake.payload["_tmux_pane"] as? String, "%3")
-        XCTAssertEqual(intake.payload["_tmux_client_tty"] as? String, "/dev/ttys004")
-        XCTAssertEqual(intake.payload["cwd"] as? String, "/Users/u/project")
-        XCTAssertNil(intake.payload["_remote_host_id"])
-        XCTAssertFalse(intake.facts.environment.keys.contains("UNRELATED_SECRET"))
+            ]
+            edge["host"] = host
+            let label = String(describing: host)
+            let facts = HookEdgeFacts.facts(from: edge)
+            XCTAssertNil(facts.parentPID, label)
+            XCTAssertNotNil(facts.remoteHost, label)
+            XCTAssertNil(facts.homeDirectory(), label)
+            XCTAssertFalse(facts.fileExists("/"), label)
+
+            let intake = try interpret(["hook_event_name": "UserPromptSubmit", "session_id": "s-1", "prompt": "hi", "_edge": edge])
+            XCTAssertNil(intake.payload["_ppid"], label)
+            XCTAssertNil(intake.payload["_remote_host_id"], "no host to name: \(label)")
+            // The facts it did send are still read.
+            XCTAssertEqual(intake.payload["_source"] as? String, "codex", label)
+            XCTAssertEqual(intake.payload["_term_app"] as? String, "iTerm.app", label)
+            XCTAssertEqual(intake.payload["_tmux_pane"] as? String, "%3", label)
+            XCTAssertEqual(intake.payload["_tmux_client_tty"] as? String, "/dev/ttys004", label)
+            XCTAssertEqual(intake.payload["cwd"] as? String, "/Users/u/project", label)
+            XCTAssertFalse(intake.facts.environment.keys.contains("UNRELATED_SECRET"), label)
+        }
     }
 
-    func testUnusablePidsAreIgnored() {
-        for ppid: Any in [true, 1.5, 4_294_967_296, "123"] {
-            let facts = HookEdgeFacts.facts(from: ["ppid": ppid])
-            XCTAssertNil(facts.parentPID, "\(ppid)")
+    /// Without a pid, an edge's hook that names no session cannot be keyed by
+    /// its agent's process: it is dropped, not filed under a pid of this Mac.
+    func testAnEdgesSessionIsNeverMadeUpFromAPid() {
+        let delivery = HookEdgeFacts.delivery(
+            in: ["hook_event_name": "Stop", "_edge": ["v": 1, "source": "codex", "ppid": 4242] as [String: Any]]
+        )
+        guard case .dropped = delivery else {
+            return XCTFail("an edge's hook with no session is dropped")
         }
-        XCTAssertEqual(HookEdgeFacts.facts(from: ["ppid": 77]).parentPID, 77)
     }
 
     func testSkipAndGrokImportsAreDropped() {
         for env: [String: String] in [["CODEISLAND_SKIP": "1"], ["GROK_SESSION_ID": "g"]] {
             let delivery = HookEdgeFacts.delivery(
-                in: ["hook_event_name": "Stop", "session_id": "s", "_edge": remoteEdge(source: "claude", extra: ["env": env])],
-                localMachine: noLocalMachine
+                in: ["hook_event_name": "Stop", "session_id": "s", "_edge": remoteEdge(source: "claude", extra: ["env": env])]
             )
             guard case .dropped = delivery else {
                 return XCTFail("\(env) should drop the hook")

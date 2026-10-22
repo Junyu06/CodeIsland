@@ -62,7 +62,7 @@ public struct HookIntake {
         public var eventTag: String?
         /// The source to stamp when nothing declares or infers one. The
         /// bridge has none (the island then defaults to Claude); see
-        /// ``HookEdgeFacts/facts(from:localMachine:)`` for an edge's.
+        /// ``HookEdgeFacts/facts(from:)`` for an edge's.
         public var defaultSource: String?
         /// The hook's environment. Only ``HookIntake/environmentKeys`` are read.
         public var environment: [String: String]
@@ -80,7 +80,8 @@ public struct HookIntake {
         public var homeDirectory: () -> String?
         /// `~` in a path of this Mac, expanded (HERMES_HOME).
         public var expandingTildeInPath: (String) -> String
-        /// Where an edge on another machine runs; nil on this Mac.
+        /// Where an edge on another machine runs (an id or a name it did not
+        /// send is empty); nil on this Mac.
         public var remoteHost: EdgeHost?
         /// SHA-256 of the hook's stdin exactly as the agent wrote it
         /// (``CursorHookPayload/deliveryDigest(of:)``).
@@ -654,10 +655,10 @@ public struct HookIntake {
         // An edge on another machine: which one. A payload that names its host
         // already (the remote OpenCode plugin's) keeps it.
         if let host = facts.remoteHost {
-            if Self.nonEmptyString(json["_remote_host_id"]) == nil {
+            if Self.nonEmptyString(json["_remote_host_id"]) == nil, Self.nonEmptyString(host.id) != nil {
                 json["_remote_host_id"] = host.id
             }
-            if Self.nonEmptyString(json["_remote_host_name"]) == nil {
+            if Self.nonEmptyString(json["_remote_host_name"]) == nil, Self.nonEmptyString(host.name) != nil {
                 json["_remote_host_name"] = host.name
             }
         }

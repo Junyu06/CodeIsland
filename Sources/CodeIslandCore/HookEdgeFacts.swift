@@ -9,6 +9,11 @@ import Foundation
 /// A payload without `_edge` is its edge's own interpretation — the bridge's,
 /// a plugin's, a remote hook installed before this existed — and is taken as
 /// it is.
+///
+/// Every edge that sends facts runs on another machine: the bridge, the one
+/// edge on this Mac, reads its own and drops an `_edge` piped into it. So no
+/// fact is ever taken for this Mac's — no pid is tracked, no home or file of
+/// this Mac consulted — whatever `host` says, or if it says nothing.
 public enum HookEdgeFacts {
     /// The payload key the facts travel under.
     public static let key = "_edge"
@@ -26,25 +31,6 @@ public enum HookEdgeFacts {
         case interpreted(HookIntake)
     }
 
-    /// What a local edge's facts are read against: this Mac's home and files.
-    /// An edge on another machine gets neither.
-    public struct LocalMachine {
-        public var homeDirectory: () -> String?
-        public var fileExists: (String) -> Bool
-
-        public init(homeDirectory: @escaping () -> String?, fileExists: @escaping (String) -> Bool) {
-            self.homeDirectory = homeDirectory
-            self.fileExists = fileExists
-        }
-
-        public static var current: LocalMachine {
-            LocalMachine(
-                homeDirectory: { FileManager.default.homeDirectoryForCurrentUser.path },
-                fileExists: { FileManager.default.fileExists(atPath: $0) }
-            )
-        }
-    }
-
     private static let keyBytes = Data(#""_edge""#.utf8)
 
     /// Cheap probe on the raw bytes: a payload that cannot carry facts is
@@ -54,12 +40,9 @@ public enum HookEdgeFacts {
     }
 
     /// What `payload` delivers, or nil when it carries no `_edge` facts.
-    public static func delivery(
-        in payload: [String: Any],
-        localMachine: LocalMachine = .current
-    ) -> Delivery? {
+    public static func delivery(in payload: [String: Any]) -> Delivery? {
         guard let edge = payload[key] as? [String: Any] else { return nil }
-        let facts = facts(from: edge, localMachine: localMachine)
+        let facts = facts(from: edge)
         guard HookIntake.admits(sourceTag: facts.sourceTag, environment: facts.environment) else {
             return .dropped
         }
@@ -76,8 +59,8 @@ public enum HookEdgeFacts {
         return .interpreted(intake)
     }
 
-    /// HookIntake's facts from an `_edge` object.
-    public static func facts(from edge: [String: Any], localMachine: LocalMachine = .current) -> HookIntake.Facts {
+    /// HookIntake's facts from an `_edge` object: those of another machine.
+    public static func facts(from edge: [String: Any]) -> HookIntake.Facts {
         let source = string(edge["source"])
         // Claude Code's hook is the one other agents run too — Cursor imports it
         // (#377), omo fires it — so on this Mac it carries no `--source`, and the
@@ -93,37 +76,25 @@ public enum HookEdgeFacts {
         let digest = string(edge["stdin_sha256"])
         let tmuxClientTTY = string(edge["tmux_client_tty"])
 
-        var facts = HookIntake.Facts(
+        // Another machine, even when `host` is missing or malformed: none of
+        // its processes, files or home are this Mac's, so no `ppid` is read
+        // and nothing is looked up here (the defaults: no home, no file).
+        let host = edge["host"] as? [String: Any]
+        return HookIntake.Facts(
             sourceTag: isClaudesOwnHook ? nil : source,
             eventTag: string(edge["event"]),
             defaultSource: isClaudesOwnHook ? "claude" : nil,
             environment: environment,
             workingDirectory: { workingDirectory },
             tty: { tty },
+            remoteHost: HookIntake.EdgeHost(
+                id: host?["id"] as? String ?? "",
+                name: host?["name"] as? String ?? ""
+            ),
             stdinDigest: { digest },
             edgeWaits: edge["waits"] as? Bool,
             tmuxClientTTY: { _ in tmuxClientTTY }
         )
-        if let host = edge["host"] as? [String: Any] {
-            // Another machine: none of its processes, files or home are this
-            // Mac's, so nothing is looked up for it here.
-            facts.remoteHost = HookIntake.EdgeHost(
-                id: host["id"] as? String ?? "",
-                name: host["name"] as? String ?? ""
-            )
-        } else {
-            facts.parentPID = pid(edge["ppid"])
-            facts.homeDirectory = localMachine.homeDirectory
-            facts.fileExists = localMachine.fileExists
-        }
-        return facts
-    }
-
-    /// A process id, or nil for anything else — `true`, a fraction, a number
-    /// past pid_t's range.
-    private static func pid(_ value: Any?) -> Int32? {
-        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
-        return Int32(exactly: number.doubleValue)
     }
 
     private static func string(_ value: Any?) -> String? {
