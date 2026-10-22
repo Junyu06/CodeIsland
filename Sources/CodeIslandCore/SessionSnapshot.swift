@@ -174,7 +174,8 @@ public struct SessionSnapshot: Sendable {
     public var interrupted: Bool = false
     /// The last turn ended on an error (Claude Code / Grok `StopFailure`, a
     /// failed AiWork stream or Cowork turn); the card's status reads ERROR
-    /// until the next prompt. Set by AppState.enqueueCompletion. Transient.
+    /// until the next prompt. Set when AppState announces the turn's
+    /// completion (`AttentionDecision.completion`). Transient.
     public var lastTurnFailed: Bool = false
     /// Cline-specific: true after TaskComplete/TaskCancel until the next TaskStart/TaskResume.
     /// Cline runs hooks asynchronously (background bridge), so events from prior tools can
@@ -1074,12 +1075,90 @@ public enum SideEffect: Equatable {
 
 // MARK: - Pure Reducer
 
-/// Pure reducer: mutates sessions, returns side effects for the caller to execute.
+/// A hook event applied to the sessions: the lifecycle effects for the
+/// caller to execute (never `.playSound` or `.enqueueCompletion`), and what
+/// the event did, for `AttentionPolicy` to decide whether the user hears
+/// about it.
+public struct HookEventReduction {
+    public var effects: [SideEffect]
+    public var facts: HookEventFacts
+}
+
+/// Pure reducer: mutates sessions and reports what happened. Whether that
+/// rings, pops a card, pushes or gets a follow-up is `AttentionPolicy`'s call.
+public func reduceHookEvent(
+    sessions: inout [String: SessionSnapshot],
+    event: HookEvent,
+    maxHistory: Int,
+    replyCompletePlaceholder: String = "Reply complete"
+) -> HookEventReduction {
+    var facts = HookEventFacts(event: event)
+    let effects = applyHookEvent(
+        sessions: &sessions,
+        event: event,
+        maxHistory: maxHistory,
+        replyCompletePlaceholder: replyCompletePlaceholder,
+        facts: &facts
+    )
+    if facts.endedTurn {
+        let sessionId = event.sessionId ?? "default"
+        facts.subagentTurn = PushEventClassifier.isSubagentCompletion(
+            agentId: event.agentId,
+            raw: event.rawJSON,
+            sessionId: sessionId,
+            session: sessions[sessionId]
+        )
+    }
+    return HookEventReduction(effects: effects, facts: facts)
+}
+
+/// The reducer followed by `AttentionPolicy`'s own reading of the event:
+/// `.enqueueCompletion` and `.playSound` are the policy's intents, before the
+/// user's settings and the room have their say. The app runs the two halves
+/// itself — ``reduceHookEvent`` now, the policy with the context it gathers
+/// once the event has settled — and this keeps an event's whole story
+/// checkable in one call.
 public func reduceEvent(
     sessions: inout [String: SessionSnapshot],
     event: HookEvent,
     maxHistory: Int,
     replyCompletePlaceholder: String = "Reply complete"
+) -> [SideEffect] {
+    let reduction = reduceHookEvent(
+        sessions: &sessions,
+        event: event,
+        maxHistory: maxHistory,
+        replyCompletePlaceholder: replyCompletePlaceholder
+    )
+    let sessionId = event.sessionId ?? "default"
+    let intents = AttentionPolicy.intents(
+        for: .hookEvent(reduction.facts),
+        subject: AttentionSubject(sessions[sessionId])
+    )
+    var attention: [SideEffect] = []
+    if intents.completion != nil {
+        attention.append(.enqueueCompletion(sessionId: sessionId))
+    }
+    if let sound = intents.sound {
+        attention.append(.playSound(sound))
+    }
+    // Ahead of the closing switch of the active session, where the reducer
+    // used to put them.
+    var effects = reduction.effects
+    if case .setActiveSession? = effects.last {
+        effects.insert(contentsOf: attention, at: effects.count - 1)
+    } else {
+        effects.append(contentsOf: attention)
+    }
+    return effects
+}
+
+private func applyHookEvent(
+    sessions: inout [String: SessionSnapshot],
+    event: HookEvent,
+    maxHistory: Int,
+    replyCompletePlaceholder: String,
+    facts: inout HookEventFacts
 ) -> [SideEffect] {
     let sessionId = event.sessionId ?? "default"
     let eventName = EventNormalizer.normalize(event.eventName)
@@ -1293,7 +1372,7 @@ public func reduceEvent(
                 sessions[sessionId]?.status = .idle
                 sessions[sessionId]?.currentTool = nil
                 sessions[sessionId]?.toolDescription = nil
-                effects.append(.enqueueCompletion(sessionId: sessionId))
+                facts.endedTurn = true
             }
         } else {
             sessions[sessionId]?.status = .processing
@@ -1353,7 +1432,7 @@ public func reduceEvent(
             sessions[sessionId]?.status = .idle
             sessions[sessionId]?.taskRoundEnded = true
         }
-        effects.append(.enqueueCompletion(sessionId: sessionId))
+        facts.endedTurn = true
     case "Stop":
         // Hermes fires on_session_end at the end of every turn. A delegate_task
         // child or a scheduled job runs just one, so its turn ending is its
@@ -1436,10 +1515,7 @@ public func reduceEvent(
             sessions[sessionId]?.status = .idle
             sessions[sessionId]?.currentTool = nil
             sessions[sessionId]?.toolDescription = nil
-            // A Hermes gateway chat's turn settles its card without a completion.
-            if !HermesHookPayload.isQuiet(event) {
-                effects.append(.enqueueCompletion(sessionId: sessionId))
-            }
+            facts.endedTurn = true
         }
     case "SessionStart":
         effects.append(.stopMonitor(sessionId: sessionId))
@@ -1583,7 +1659,7 @@ public func reduceEvent(
         sessions[sessionId]?.status = .idle
         sessions[sessionId]?.currentTool = nil
         sessions[sessionId]?.toolDescription = nil
-        effects.append(.enqueueCompletion(sessionId: sessionId))
+        facts.endedTurn = true
     default:
         break
     }
@@ -1615,24 +1691,10 @@ public func reduceEvent(
         effects.append(.tryMonitorSession(sessionId: sessionId))
     }
 
-    // A session another agent spawned (it named its parent) works for that
-    // agent's turn. Its own start, prompt and turn end are the parent's
-    // business, not the user's: no completion card or push, no chime — the
-    // user hears the parent finish (#378). Its approvals and questions ring
-    // on their own path; the user still has to answer those.
-    let isDeclaredChild = sessions[sessionId]?.parentSessionId != nil
-    if isDeclaredChild {
-        effects.removeAll { $0 == .enqueueCompletion(sessionId: sessionId) }
-    }
-
-    // Trigger sound for this event. A single failed tool stays silent; only a
-    // turn that died (StopFailure) rings the error sound. See EventSoundRouting.
-    // A Hermes gateway chat's start, prompt and turn end stay silent.
-    if let sound = EventSoundRouting.soundEvent(rawEventName: event.eventName, normalizedEventName: eventName),
-       !HermesHookPayload.isQuiet(event),
-       !isDeclaredChild {
-        effects.append(.playSound(sound))
-    }
+    // The event reached this session's own state. Whether it rings, pops a
+    // completion card or pushes — a declared child's never do (#378), nor a
+    // Hermes gateway chat's (#364) — is AttentionPolicy's call.
+    facts.appliedToSession = true
 
     // Switch display to the session that just had activity
     if eventName == "Stop" {
