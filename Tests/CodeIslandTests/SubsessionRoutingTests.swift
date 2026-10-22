@@ -426,6 +426,47 @@ final class SubsessionRoutingTests: XCTestCase {
         }
     }
 
+    /// Current Codex files a spawned thread's hooks under the session that
+    /// spawned it, the thread as `agent_id`. A grandchild's are then filed
+    /// under its parent thread, which has no card of its own: it is a row of
+    /// the root's. They built a card for that thread holding the grandchild's
+    /// row, left "processing" for good. They join the root's card instead,
+    /// where the grandchild's parent is — and stay there once its row ends.
+    func testGrandchildFiledUnderItsParentThreadJoinsTheCardItsParentIsOn() throws {
+        let grandchild = "019a0000-0000-7000-8000-00000000000c"
+        let parentPath = try writeRollout("parent.jsonl", sessionMeta: rootRollout(parentThread))
+        let grandPath = try writeRollout("grand.jsonl", sessionMeta: childRollout(grandchild, parent: childThread))
+        let underRoot: [String: Any] = ["agent_id": childThread, "agent_type": "worker"]
+        let underChild: [String: Any] = ["agent_id": grandchild, "agent_type": "explorer"]
+        for mode in ["separate", "merge"] {
+            setMode(mode)
+            played = []
+            let appState = AppState()
+            let server = HookServer(appState: appState)
+            try deliver(codex("UserPromptSubmit", thread: parentThread, transcript: parentPath, ["prompt": "go"]), to: appState, server: server)
+            try deliver(codex("SubagentStart", thread: parentThread, transcript: parentPath, underRoot), to: appState, server: server)
+
+            let start = try deliver(codex("SubagentStart", thread: childThread, transcript: grandPath, underChild), to: appState, server: server)
+            XCTAssertEqual(start.sessionId, parentThread, mode)
+            XCTAssertEqual(start.raw["agent_id"] as? String, grandchild, mode)
+            XCTAssertEqual(appState.sessions[parentThread]?.subagents[grandchild]?.agentType, "explorer", mode)
+            try deliver(
+                codex("PreToolUse", thread: childThread, transcript: grandPath, underChild.merging(["tool_name": "exec_command"]) { _, new in new }),
+                to: appState, server: server
+            )
+            // The parent thread's turn ends first.
+            try deliver(codex("SubagentStop", thread: parentThread, transcript: parentPath, underRoot), to: appState, server: server)
+            let stop = try deliver(codex("SubagentStop", thread: childThread, transcript: grandPath, underChild), to: appState, server: server)
+            XCTAssertEqual(stop.sessionId, parentThread, mode)
+            XCTAssertNil(appState.sessions[childThread], "\(mode): no card for the parent thread")
+            XCTAssertEqual(appState.sessions[parentThread]?.subagents.isEmpty, true, mode)
+
+            try deliver(codex("Stop", thread: parentThread, transcript: parentPath, ["last_assistant_message": "done"]), to: appState, server: server)
+            XCTAssertEqual(appState.justCompletedSessionId, parentThread, mode)
+            XCTAssertEqual(played, ["8bit_complete"], mode)
+        }
+    }
+
     /// Current Codex files a thread's hooks under the root's session id. In
     /// Hide its SubagentStart is hidden too, so a request it is blocked on
     /// starts its row on the root's card: under the thread's own role.

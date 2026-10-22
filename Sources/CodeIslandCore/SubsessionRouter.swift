@@ -106,16 +106,18 @@ public enum SubsessionRouter {
         isBlockingRequest: () -> Bool
     ) -> SubsessionPlacement {
         if link.isProviderFolded {
-            guard let parent = link.parentCardId else { return .unchanged }
+            guard let filedUnder = link.parentCardId else { return .unchanged }
+            let host = providerFiledHost(for: link, filedUnder: filedUnder, in: cards)
             // Hide drops it until a request it is blocked on has put the
             // child on the card.
-            if mode == .hide, cards[parent]?.subagents[link.agentId] == nil, !isBlockingRequest() {
+            if mode == .hide, cards[host]?.subagents[link.agentId] == nil, !isBlockingRequest() {
                 return .hidden
             }
             // Show separately and Merge leave it where the agent filed it.
             // One that names no child is folded where it sits, which names
             // it: as it came it would be the parent's own event.
-            return link.isFiledAsParentsOwn ? .fold(into: parent) : .unchanged
+            if host == filedUnder, !link.isFiledAsParentsOwn { return .unchanged }
+            return .fold(into: host)
         }
 
         // A plugin proxy reports its agent's own turn a second way (see
@@ -156,6 +158,23 @@ public enum SubsessionRouter {
             // which then shows the child until it ends.
             return isBlockingRequest() ? ownCard(link, mode: mode) : .hidden
         }
+    }
+
+    /// The card a hook the agent filed under the parent's session belongs on:
+    /// that session's card. A session with no card of its own there is a
+    /// thread the agent made a row of another card (Codex files a
+    /// grandchild's hooks under its parent thread, whose own hooks are a row
+    /// of the root's): the hook joins the child where it already is, or else
+    /// the card its parent is a row of, as a declared grandchild does.
+    private static func providerFiledHost(
+        for link: SubsessionLink,
+        filedUnder: String,
+        in cards: [String: SessionSnapshot]
+    ) -> String {
+        if cards[filedUnder] != nil { return filedUnder }
+        return SubsessionCards.cardHosting(foldedSubsession: link.agentId, in: cards)
+            ?? link.parentAgentId.flatMap { SubsessionCards.cardHosting(subagent: $0, in: cards) }
+            ?? filedUnder
     }
 
     /// The card Merge folds the child into: its parent's — or, for a

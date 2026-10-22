@@ -236,4 +236,13 @@ public enum SubsessionCards {
     ) -> String? {
         cards.first { $0.value.subagents[agentId]?.subsessionKind != nil }?.key
     }
+
+    /// The card with a subagent row of this id, whoever made it: Codex files
+    /// a spawned thread's hooks as a row of the session that spawned it.
+    public static func cardHosting(
+        subagent agentId: String,
+        in cards: [String: SessionSnapshot]
+    ) -> String? {
+        cards.first { $0.value.subagents[agentId] != nil }?.key
+    }
 }

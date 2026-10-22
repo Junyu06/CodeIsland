@@ -266,6 +266,40 @@ final class SubsessionRouterTests: XCTestCase {
         XCTAssertEqual(try placement(grandchild, .merge, desktop), .fold(into: "codexapp:root"))
     }
 
+    func testGrandchildCodexFiledUnderItsParentThreadJoinsTheCardItsParentIsOn() throws {
+        // Codex filed the grandchild's hook under its parent thread, which
+        // has no card of its own: Codex filed that thread as a row of the
+        // root's card.
+        var root = subsessionCard(source: "codex")
+        root.subagents[parent] = SubagentState(agentId: parent, agentType: "worker")
+        let context = StubSubsessionContext(cards: ["root": root])
+        for mode in [SubsessionMode.separate, .merge] {
+            XCTAssertEqual(try placement(codexFiledUnderParent(), mode, context), .fold(into: "root"), "\(mode)")
+        }
+        XCTAssertEqual(try placement(codexFiledUnderParent(), .hide, context), .hidden)
+        XCTAssertEqual(try placement(codexFiledUnderParent("PermissionRequest"), .hide, context, blocking: true), .fold(into: "root"))
+
+        var raw = codexFiledUnderParent()
+        XCTAssertEqual(
+            SubsessionRouter.route(&raw, link: try link(raw, context), mode: .merge, cards: context.cards, isBlockingRequest: { false }),
+            .rewritten
+        )
+        XCTAssertEqual(raw["session_id"] as? String, "root")
+        XCTAssertEqual(raw["agent_id"] as? String, child)
+        XCTAssertEqual(raw["agent_type"] as? String, "worker")
+
+        // Its row stays its place once its parent's row is gone.
+        var folded = SubagentState(agentId: child, agentType: "worker")
+        folded.subsessionKind = .codexThread
+        root.subagents = [child: folded]
+        context.cards["root"] = root
+        XCTAssertEqual(try placement(codexFiledUnderParent(), .merge, context), .fold(into: "root"))
+
+        // With neither, it stays where Codex filed it.
+        context.cards["root"] = subsessionCard(source: "codex")
+        XCTAssertEqual(try placement(codexFiledUnderParent(), .merge, context), .unchanged)
+    }
+
     // MARK: - The rewrite
 
     func testFoldRewritesEveryKindOntoTheHostAsItsSubagent() throws {

@@ -143,6 +143,9 @@ public enum CodexThreadSubsession {
                 childCardId: HookEvent.cardSessionId(forRawSessionId: agentId, in: raw),
                 agentId: agentId,
                 parentCardId: HookEvent.cardSessionId(forRawSessionId: sessionId, in: raw),
+                // The session filed under may be a thread with no card of
+                // its own, a row of the root's (a grandchild's hook).
+                parentAgentId: sessionId,
                 isProviderFolded: true
             )
         }
@@ -179,6 +182,7 @@ public enum CodexThreadSubsession {
                 childCardId: HookEvent.cardSessionId(forRawSessionId: threadId, in: raw),
                 agentId: threadId,
                 parentCardId: childCardId,
+                parentAgentId: sessionId,
                 agentType: metadata.agentType,
                 isProviderFolded: true,
                 isFiledAsParentsOwn: true
