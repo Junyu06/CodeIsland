@@ -1581,15 +1581,7 @@ private func applyHookEvent(
         if let weztermPane = event.rawJSON["_wezterm_pane"] as? String, !weztermPane.isEmpty {
             sessions[sessionId]?.weztermPaneId = weztermPane
         }
-        if let herdrPane = event.rawJSON["_herdr_pane_id"] as? String, !herdrPane.isEmpty {
-            sessions[sessionId]?.herdrPaneId = herdrPane
-        }
-        if let herdrSocket = event.rawJSON["_herdr_socket_path"] as? String, !herdrSocket.isEmpty {
-            sessions[sessionId]?.herdrSocketPath = herdrSocket
-        }
-        if let herdrBinary = event.rawJSON["_herdr_bin_path"] as? String, !herdrBinary.isEmpty {
-            sessions[sessionId]?.herdrBinaryPath = herdrBinary
-        }
+        applyHerdrRoute(into: &sessions, sessionId: sessionId, event: event)
         if let supersetWs = event.rawJSON["_superset_workspace_id"] as? String, !supersetWs.isEmpty {
             sessions[sessionId]?.supersetWorkspaceId = supersetWs
         }
@@ -1858,18 +1850,7 @@ public func fillMissingParentMetadataFromSubagentEvent(
         sessions[sessionId]?.cliPid = pid
     }
 
-    if sessions[sessionId]?.herdrPaneId == nil,
-       let pane = event.rawJSON["_herdr_pane_id"] as? String, !pane.isEmpty {
-        sessions[sessionId]?.herdrPaneId = pane
-    }
-    if sessions[sessionId]?.herdrSocketPath == nil,
-       let socket = event.rawJSON["_herdr_socket_path"] as? String, !socket.isEmpty {
-        sessions[sessionId]?.herdrSocketPath = socket
-    }
-    if sessions[sessionId]?.herdrBinaryPath == nil,
-       let binary = event.rawJSON["_herdr_bin_path"] as? String, !binary.isEmpty {
-        sessions[sessionId]?.herdrBinaryPath = binary
-    }
+    applyHerdrRoute(into: &sessions, sessionId: sessionId, event: event, fillingOnly: true)
     // A subagent runs inside the parent's CLI, so it carries the same id.
     if sessions[sessionId]?.claudeDesktopSessionId == nil,
        let hostId = claudeDesktopSessionId(in: event) {
@@ -1881,6 +1862,34 @@ public func fillMissingParentMetadataFromSubagentEvent(
     if sessions[sessionId]?.parentSessionId == nil,
        let parentSessionId = SubsessionRouter.parentCardId(in: event.rawJSON) {
         sessions[sessionId]?.parentSessionId = parentSessionId
+    }
+}
+
+/// Records the Herdr pane the hook's agent runs in (`_herdr_*`, from the
+/// pane's env). `fillingOnly` keeps what the card already has — a subagent's
+/// hook only fills gaps on its parent's card.
+///
+/// A remote hook's are never recorded: its pane belongs to the Herdr on its
+/// own host, and the binary path it names would be run on this Mac
+/// (HerdrController).
+private func applyHerdrRoute(
+    into sessions: inout [String: SessionSnapshot],
+    sessionId: String,
+    event: HookEvent,
+    fillingOnly: Bool = false
+) {
+    guard SubsessionRouter.remoteHostId(in: event.rawJSON) == nil else { return }
+    if let pane = event.rawJSON["_herdr_pane_id"] as? String, !pane.isEmpty,
+       !fillingOnly || sessions[sessionId]?.herdrPaneId == nil {
+        sessions[sessionId]?.herdrPaneId = pane
+    }
+    if let socket = event.rawJSON["_herdr_socket_path"] as? String, !socket.isEmpty,
+       !fillingOnly || sessions[sessionId]?.herdrSocketPath == nil {
+        sessions[sessionId]?.herdrSocketPath = socket
+    }
+    if let binary = event.rawJSON["_herdr_bin_path"] as? String, !binary.isEmpty,
+       !fillingOnly || sessions[sessionId]?.herdrBinaryPath == nil {
+        sessions[sessionId]?.herdrBinaryPath = binary
     }
 }
 
@@ -2043,15 +2052,7 @@ public func extractMetadata(into sessions: inout [String: SessionSnapshot], sess
     if let weztermPane = event.rawJSON["_wezterm_pane"] as? String, !weztermPane.isEmpty {
         sessions[sessionId]?.weztermPaneId = weztermPane
     }
-    if let herdrPane = event.rawJSON["_herdr_pane_id"] as? String, !herdrPane.isEmpty {
-        sessions[sessionId]?.herdrPaneId = herdrPane
-    }
-    if let herdrSocket = event.rawJSON["_herdr_socket_path"] as? String, !herdrSocket.isEmpty {
-        sessions[sessionId]?.herdrSocketPath = herdrSocket
-    }
-    if let herdrBinary = event.rawJSON["_herdr_bin_path"] as? String, !herdrBinary.isEmpty {
-        sessions[sessionId]?.herdrBinaryPath = herdrBinary
-    }
+    applyHerdrRoute(into: &sessions, sessionId: sessionId, event: event)
     // Superset workspace / pane (injected by bridge from SUPERSET_* env vars). Presence routes
     // activation to com.superset.desktop instead of the spoofed kitty TERM_PROGRAM. (#213)
     if let supersetWs = event.rawJSON["_superset_workspace_id"] as? String, !supersetWs.isEmpty {

@@ -3836,11 +3836,28 @@ private struct ProjectNameLink: View {
             .lineLimit(1)
             .truncationMode(.tail)
             .onTapGesture {
-                if isInteractive, let cwd = cwd {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: cwd))
+                if isInteractive, let cwd, let folder = HookFolder.openableURL(cwd) {
+                    NSWorkspace.shared.open(folder)
                 }
             }
             .help(isInteractive && cwd != nil ? "\(L10n.shared["open_path"]) \(cwd ?? "")" : "")
+    }
+}
+
+/// A folder a hook named (the session's cwd), as something safe to hand to
+/// Finder.
+enum HookFolder {
+    /// `path` when it is a folder Finder shows — nil for a file, an app or
+    /// other package, or nothing at all. The path arrives in a hook payload,
+    /// and opening an app bundle or a script launches it.
+    static func openableURL(_ path: String, fileManager: FileManager = .default) -> URL? {
+        guard path.hasPrefix("/") else { return nil }
+        let resolved = (path as NSString).resolvingSymlinksInPath
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: resolved, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              !NSWorkspace.shared.isFilePackage(atPath: resolved) else { return nil }
+        return URL(fileURLWithPath: path)
     }
 }
 
