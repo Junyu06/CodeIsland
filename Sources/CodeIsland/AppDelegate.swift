@@ -40,6 +40,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         RemoteManager.shared.onDisconnect = { [weak appState] hostId in
             appState?.removeRemoteSessions(hostId: hostId)
         }
+        // Each remote host's hooks arrive on a socket of its own, bound when
+        // the host connects: the socket, not the payload, names the host.
+        RemoteManager.shared.hookSockets = RemoteHookSockets(appState: appState)
 
         // Prewarm the usage footer off the launch path — first panel expansion
         // then shows data immediately instead of popping in a beat later.

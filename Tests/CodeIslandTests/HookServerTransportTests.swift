@@ -6,7 +6,9 @@ import CodeIslandCore
 /// HookServer's socket against real clients on a throwaway path: what a
 /// hook writes reaches the island however early the hook closes and however
 /// busy the main thread is, a held request waits for its answer, and one
-/// whose hook is gone is dropped.
+/// whose hook is gone is dropped. The socket is a remote host's, as the
+/// remote hook reaches it (``RemoteHookSockets``): its hooks are the ones
+/// that close early, over a slow link.
 @MainActor
 final class HookServerTransportTests: XCTestCase {
     private var socketPath: String!
@@ -17,7 +19,7 @@ final class HookServerTransportTests: XCTestCase {
         // sun_path holds 104 bytes; the temporary directory's path is too long.
         socketPath = "/tmp/ci-ht-\(UUID().uuidString.prefix(8)).sock"
         appState = AppState()
-        server = HookServer(appState: appState, socketPath: socketPath)
+        server = HookServer(appState: appState, socketPath: socketPath, origin: Self.buildBox, hostCwdFilter: { _ in nil })
         XCTAssertTrue(server.start(), "HookServer did not listen on \(socketPath!)")
     }
 
@@ -27,6 +29,9 @@ final class HookServerTransportTests: XCTestCase {
         appState = nil
         unlink(socketPath)
     }
+
+    /// The remote host whose socket the tests' hooks reach.
+    private static let buildBox = HookOrigin.remoteHost(id: "host-1", name: "Build Box")
 
     /// A payload a remote hook installed before `_edge` sends: its own
     /// interpretation, filed under its host.
@@ -83,6 +88,8 @@ final class HookServerTransportTests: XCTestCase {
         server = HookServer(
             appState: appState,
             socketPath: socketPath,
+            origin: Self.buildBox,
+            hostCwdFilter: { _ in nil },
             heldRequestCheckInterval: heldRequestCheckInterval,
             readIdleTimeout: readIdleTimeout
         )

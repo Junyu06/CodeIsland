@@ -469,6 +469,8 @@ final class L10n: ObservableObject {
         "remote_retry_in": "Reconnecting in %d s (attempt %d/%d)",
         "remote_retry_slow": "Still unreachable after %d attempts; trying again in %d min",
         "remote_waiting_network": "Offline; reconnects when the network is back",
+        "remote_socket_folder_unsafe": "%@ is not a folder only you can use, so this host's hooks have nowhere safe to arrive. Remove it, then connect again.",
+        "remote_socket_unavailable": "CodeIsland can't listen at %@ for this host's hooks, so it doesn't connect.",
 
         // Buddy
         "buddy": "Buddy",
@@ -1053,6 +1055,8 @@ final class L10n: ObservableObject {
         "remote_retry_in": "Erneute Verbindung in %d s (Versuch %d/%d)",
         "remote_retry_slow": "Nach %d Versuchen nicht erreichbar; nächster Versuch in %d Min.",
         "remote_waiting_network": "Offline – verbindet sich wieder, sobald das Netzwerk zurück ist",
+        "remote_socket_folder_unsafe": "%@ ist kein Ordner, den nur du nutzen kannst – die Hooks dieses Hosts hätten keinen sicheren Ort zum Ankommen. Entferne ihn und verbinde erneut.",
+        "remote_socket_unavailable": "CodeIsland kann unter %@ nicht auf die Hooks dieses Hosts lauschen und verbindet ihn daher nicht.",
 
         // Buddy
         "buddy": "Buddy",
@@ -1637,6 +1641,8 @@ final class L10n: ObservableObject {
         "remote_retry_in": "%d 秒后重新连接（第 %d/%d 次）",
         "remote_retry_slow": "已连续失败 %d 次，%d 分钟后再试",
         "remote_waiting_network": "网络已断开，恢复后自动重新连接",
+        "remote_socket_folder_unsafe": "%@ 不是只有你能使用的文件夹，此主机的 hooks 没有安全的接收位置。请删除它后重新连接。",
+        "remote_socket_unavailable": "CodeIsland 无法在 %@ 监听此主机的 hooks，因此不会连接。",
 
         // Buddy
         "buddy": "Buddy",
@@ -2221,6 +2227,8 @@ final class L10n: ObservableObject {
         "remote_retry_in": "%d 秒後重新連線（第 %d/%d 次）",
         "remote_retry_slow": "已連續失敗 %d 次，%d 分鐘後再試",
         "remote_waiting_network": "網路已中斷，恢復後自動重新連線",
+        "remote_socket_folder_unsafe": "%@ 不是只有你能使用的資料夾，此主機的 hooks 沒有安全的接收位置。請刪除它後重新連線。",
+        "remote_socket_unavailable": "CodeIsland 無法在 %@ 監聽此主機的 hooks，因此不會連線。",
 
         // Buddy
         "buddy": "Buddy",
@@ -2805,6 +2813,8 @@ final class L10n: ObservableObject {
         "remote_retry_in": "%d 秒後に再接続（%d/%d 回目）",
         "remote_retry_slow": "%d 回続けて失敗しました。%d 分後に再試行します",
         "remote_waiting_network": "オフライン：ネットワーク復帰後に自動で再接続します",
+        "remote_socket_folder_unsafe": "%@ はあなた専用のフォルダではないため、このホストのフックを安全に受け取れません。削除してから再接続してください。",
+        "remote_socket_unavailable": "CodeIsland は %@ でこのホストのフックを待ち受けできないため、接続しません。",
 
         // Buddy
         "buddy": "Buddy",
@@ -3389,6 +3399,8 @@ final class L10n: ObservableObject {
         "remote_retry_in": "%d초 후 다시 연결 (%d/%d번째 시도)",
         "remote_retry_slow": "%d회 연속 실패, %d분 후 다시 시도합니다",
         "remote_waiting_network": "오프라인: 네트워크가 복구되면 다시 연결합니다",
+        "remote_socket_folder_unsafe": "%@은(는) 나만 쓸 수 있는 폴더가 아니어서 이 호스트의 훅을 안전하게 받을 곳이 없습니다. 삭제한 뒤 다시 연결하세요.",
+        "remote_socket_unavailable": "CodeIsland가 %@에서 이 호스트의 훅을 수신할 수 없어 연결하지 않습니다.",
 
         // Buddy
         "buddy": "Buddy",
@@ -3973,6 +3985,8 @@ final class L10n: ObservableObject {
         "remote_retry_in": "%d sn sonra yeniden bağlanılacak (deneme %d/%d)",
         "remote_retry_slow": "%d denemeden sonra hâlâ ulaşılamıyor; %d dk sonra yeniden denenecek",
         "remote_waiting_network": "Çevrimdışı; ağ geri geldiğinde yeniden bağlanacak",
+        "remote_socket_folder_unsafe": "%@ yalnızca sizin kullanabildiğiniz bir klasör değil; bu sunucunun kancaları için güvenli bir varış yeri yok. Klasörü kaldırıp yeniden bağlanın.",
+        "remote_socket_unavailable": "CodeIsland, bu sunucunun kancalarını %@ üzerinde dinleyemiyor; bu yüzden bağlanmıyor.",
 
         // Buddy
         "buddy": "Buddy",

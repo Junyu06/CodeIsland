@@ -2,9 +2,11 @@ import XCTest
 import CodeIslandCore
 @testable import CodeIsland
 
-/// Drives a private `RemoteManager` with stand-ins for ssh: no process is
-/// started and no host is contacted. The reconnect rules themselves are
-/// covered by `RemoteReconnectPolicyTests`; these check the wiring — the
+/// Drives a private `RemoteManager` with stand-ins for ssh and for the
+/// hosts' sockets: no process is started, no host is contacted, no socket is
+/// bound. The reconnect rules themselves are covered by
+/// `RemoteReconnectPolicyTests`; these check the wiring — the host's own
+/// socket bound before ssh starts and the only place its tunnel ends, the
 /// socket-path probe awaited before ssh starts, the debounced recovery pass,
 /// and late reports from a tunnel that was already replaced.
 @MainActor
@@ -29,13 +31,18 @@ final class RemoteManagerTests: XCTestCase {
     private final class FakeTunnel: RemoteTunnel {
         var onStatusChange: ((SSHForwarder.Status) -> Void)?
         private(set) var connects = 0
+        private(set) var disconnects = 0
+        /// Where each connect forwarded the host's hooks to.
+        private(set) var localSocketPaths: [String] = []
 
         func connect(host: RemoteHost, localSocketPath: String, remoteSocketPath: String) {
             connects += 1
+            localSocketPaths.append(localSocketPath)
             onStatusChange?(.connecting)
         }
 
         func disconnect() {
+            disconnects += 1
             onStatusChange?(.disconnected)
         }
 
@@ -79,7 +86,49 @@ final class RemoteManagerTests: XCTestCase {
         }
     }
 
+    /// Stands in for `RemoteHookSockets`: binds nothing, gives each open a
+    /// path of its own, fails when told to, and keeps a log.
+    @MainActor
+    private final class FakeHookSockets: RemoteHookSocketProviding {
+        var failure: RemoteHookSocketFailure?
+        /// What happened, in order: "stale", "open host-id", "close host-id".
+        private(set) var log: [String] = []
+        /// The path each host has open now.
+        private(set) var open: [String: String] = [:]
+        private(set) var names: [String: String] = [:]
+        private var binds = 0
+
+        func open(for host: RemoteHost) -> Result<String, RemoteHookSocketFailure> {
+            open[host.id] = nil
+            log.append("open \(host.id)")
+            if let failure { return .failure(failure) }
+            binds += 1
+            let path = "/tmp/ci-fake-hosts/\(host.id)-\(binds).sock"
+            open[host.id] = path
+            names[host.id] = host.name
+            return .success(path)
+        }
+
+        func rename(hostId: String, to name: String) {
+            names[hostId] = name
+        }
+
+        func close(hostId: String) {
+            guard open.removeValue(forKey: hostId) != nil else { return }
+            log.append("close \(hostId)")
+        }
+
+        func closeAll() {
+            for hostId in open.keys.sorted() { close(hostId: hostId) }
+        }
+
+        func removeStale() {
+            log.append("stale")
+        }
+    }
+
     private func makeManager(
+        sockets: FakeHookSockets? = nil,
         _ configure: (inout RemoteReconnectPolicy.Config) -> Void = { _ in }
     ) -> (RemoteManager, ProbeGate, Tunnels) {
         var config = RemoteReconnectPolicy.Config()
@@ -91,6 +140,7 @@ final class RemoteManagerTests: XCTestCase {
         let manager = RemoteManager(
             defaults: defaults,
             reconnectPolicy: RemoteReconnectPolicy(config: config),
+            hookSockets: sockets ?? FakeHookSockets(),
             makeTunnel: { tunnels.make() },
             probeSocketPath: { _ in await gate.probe() },
             installRemoteHooks: { _, _ in RemoteInstallResult(ok: true, message: "installed") }
@@ -268,6 +318,124 @@ final class RemoteManagerTests: XCTestCase {
 
         manager.systemDidWake()
         await waitUntil { tunnels.connects == 2 }
+    }
+
+    // MARK: - The host's own socket
+
+    /// The tunnel ends at the socket bound for the host on this connect —
+    /// never at the main socket, which another user may have taken first.
+    func testTheTunnelEndsAtTheSocketBoundForTheHost() async {
+        let sockets = FakeHookSockets()
+        let (manager, _, tunnels) = makeManager(sockets: sockets)
+        defer { manager.shutdown() }
+        let host = addHost(to: manager)
+        await connect(host, on: manager, tunnels: tunnels)
+
+        let bound = sockets.open[host.id]
+        XCTAssertNotNil(bound)
+        XCTAssertEqual(tunnels.made[0].localSocketPaths, [bound!])
+        XCTAssertNotEqual(bound, HookServer.socketPath)
+
+        // A reconnect binds afresh and forwards there.
+        manager.reconnect(id: host.id)
+        await waitUntil { tunnels.connects == 2 }
+        XCTAssertEqual(sockets.log, ["open \(host.id)", "close \(host.id)", "open \(host.id)"])
+        XCTAssertEqual(tunnels.made.last?.localSocketPaths.last, sockets.open[host.id])
+        XCTAssertNotEqual(sockets.open[host.id], bound)
+    }
+
+    /// No socket of its own, no tunnel: the host fails, says why, and is
+    /// still wanted — a wake, the network or Connect tries again.
+    func testAHostWithoutASocketDoesNotConnect() async {
+        let sockets = FakeHookSockets()
+        sockets.failure = .folderNotPrivate(path: "/tmp/codeisland-501-hosts")
+        let (manager, gate, tunnels) = makeManager(sockets: sockets)
+        defer { manager.shutdown() }
+        let host = addHost(to: manager)
+        var dropped: [String] = []
+        manager.onDisconnect = { dropped.append($0) }
+
+        manager.connect(id: host.id)
+        await settle()
+
+        let message = RemoteHookSocketFailure.folderNotPrivate(path: "/tmp/codeisland-501-hosts").message(L10n.shared)
+        XCTAssertEqual(gate.started, 0, "not even the probe runs")
+        XCTAssertEqual(tunnels.connects, 0, "no ssh")
+        XCTAssertEqual(manager.connectionStatus[host.id], .failed(message))
+        XCTAssertEqual(manager.lastMessage[host.id], message)
+        XCTAssertTrue(manager.wantsConnection(id: host.id))
+        XCTAssertEqual(manager.reconnectPhase(id: host.id), .idle)
+        XCTAssertEqual(dropped, [host.id], "its sessions go")
+
+        sockets.failure = nil
+        manager.systemDidWake()
+        await waitUntil { tunnels.connects == 1 }
+        XCTAssertEqual(tunnels.made[0].localSocketPaths, [sockets.open[host.id]!])
+    }
+
+    /// A tunnel still running when the host can no longer have a socket led
+    /// to one that is gone: it is stopped, not left forwarding.
+    func testAFailedSocketStopsTheTunnelThatLedThere() async {
+        let sockets = FakeHookSockets()
+        let (manager, _, tunnels) = makeManager(sockets: sockets)
+        defer { manager.shutdown() }
+        let host = addHost(to: manager)
+        await connect(host, on: manager, tunnels: tunnels)
+        tunnels.made[0].report(.failed("ssh exited (255)"))
+        await waitUntil { manager.reconnectPhase(id: host.id) == .retryPending }
+
+        sockets.failure = .cannotListen(path: "/tmp/x.sock")
+        manager.systemDidWake()
+        await waitUntil { manager.connectionStatus[host.id] == .failed(RemoteHookSocketFailure.cannotListen(path: "/tmp/x.sock").message(L10n.shared)) }
+        XCTAssertEqual(tunnels.made[0].disconnects, 1)
+        XCTAssertEqual(tunnels.connects, 1)
+    }
+
+    func testDisconnectRemoveAndQuitCloseTheHostsSocket() async {
+        let sockets = FakeHookSockets()
+        let (manager, _, tunnels) = makeManager(sockets: sockets)
+        let first = addHost(to: manager)
+        let second = addHost(to: manager)
+        let third = addHost(to: manager)
+        await connect(first, on: manager, tunnels: tunnels)
+        await connect(second, on: manager, tunnels: tunnels)
+        await connect(third, on: manager, tunnels: tunnels)
+
+        manager.disconnect(id: first.id)
+        XCTAssertNil(sockets.open[first.id])
+        manager.removeHost(id: second.id)
+        XCTAssertNil(sockets.open[second.id])
+        manager.shutdown()
+        XCTAssertTrue(sockets.open.isEmpty)
+        XCTAssertEqual(sockets.log.filter { $0.hasPrefix("close") }.count, 3)
+    }
+
+    func testStartupClearsStaleSocketsBeforeAnyHostBinds() async {
+        let sockets = FakeHookSockets()
+        let (manager, _, tunnels) = makeManager(sockets: sockets)
+        defer { manager.shutdown() }
+        let host = addHost(to: manager)
+        manager.startup()
+        await waitUntil { tunnels.connects == 1 }
+        XCTAssertEqual(sockets.log.prefix(2), ["stale", "open \(host.id)"])
+    }
+
+    /// The name travels with every request on the host's socket; renaming
+    /// needs no new tunnel.
+    func testRenamingAHostRenamesItsSocket() async {
+        let sockets = FakeHookSockets()
+        let (manager, _, tunnels) = makeManager(sockets: sockets)
+        defer { manager.shutdown() }
+        var host = addHost(to: manager)
+        await connect(host, on: manager, tunnels: tunnels)
+        tunnels.made[0].report(.connected)
+        await waitUntil { manager.connectionStatus[host.id] == .connected }
+
+        host.name = "Build Box"
+        manager.updateHost(host)
+        XCTAssertEqual(sockets.names[host.id], "Build Box")
+        await settle()
+        XCTAssertEqual(tunnels.connects, 1, "a new name keeps the tunnel")
     }
 
     // MARK: - Stale reports

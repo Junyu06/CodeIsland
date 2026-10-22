@@ -21,6 +21,10 @@ final class HookSocketListener: @unchecked Sendable {
     // On `queue`, once started.
     private var source: DispatchSourceRead?
     private var paused = false
+    /// The socket file start() made, by device and inode, so that
+    /// removeSocketFile() never takes one that has taken its place. Set and
+    /// read on the thread that starts and removes the listener.
+    private var madeFile: (device: dev_t, inode: ino_t)?
 
     /// `onConnection` gets each accepted connection, on `queue`.
     init(path: String, queue: DispatchQueue, onConnection: @escaping @Sendable (HookConnection) -> Void) {
@@ -74,6 +78,10 @@ final class HookSocketListener: @unchecked Sendable {
         }
         // Belt-and-suspenders: owner-only even if the umask did not take.
         chmod(path, 0o700)
+        var made = stat()
+        if lstat(path, &made) == 0 {
+            madeFile = (made.st_dev, made.st_ino)
+        }
         _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
 
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
@@ -85,6 +93,18 @@ final class HookSocketListener: @unchecked Sendable {
         source.setCancelHandler { close(fd) }
         source.resume()
         return true
+    }
+
+    /// Removes the socket file start() made, and nothing else: not a file
+    /// that has taken its place at `path` since.
+    func removeSocketFile() {
+        guard let made = madeFile else { return }
+        madeFile = nil
+        var info = stat()
+        guard lstat(path, &info) == 0,
+              info.st_dev == made.device, info.st_ino == made.inode,
+              (info.st_mode & S_IFMT) == S_IFSOCK else { return }
+        unlink(path)
     }
 
     /// Stops accepting and closes the listener. Connections already accepted

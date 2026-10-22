@@ -27,12 +27,19 @@ final class HookServerEdgeFactsTests: XCTestCase {
         try Data(source.utf8).write(to: hookURL)
 
         // sun_path holds 104 bytes; the temporary directory's path is too long.
-        // The server is handed its socket and the tools it approves without a
-        // card (an internal one, so a blocking request is answered without
-        // anyone at the UI): no process environment, no shared defaults.
+        // The server is handed its socket — the hook's host's, as the island
+        // binds one for each — and the tools it approves without a card (an
+        // internal one, so a blocking request is answered without anyone at
+        // the UI): no process environment, no shared defaults.
         socketPath = "/tmp/ci-hs-\(UUID().uuidString.prefix(8)).sock"
         appState = AppState()
-        server = HookServer(appState: appState, socketPath: socketPath, autoApproveTools: ["TodoWrite"])
+        server = HookServer(
+            appState: appState,
+            socketPath: socketPath,
+            origin: .remoteHost(id: "host-1", name: "Build Box"),
+            hostCwdFilter: { _ in nil },
+            autoApproveTools: ["TodoWrite"]
+        )
         // Not a skip: a server that cannot listen is a failure.
         guard server.start() else { throw NotListening(path: socketPath) }
     }

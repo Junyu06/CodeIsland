@@ -15,8 +15,15 @@ class HookServer {
     private let appState: AppState
     /// Where hooks connect (``SocketPath``).
     nonisolated static var socketPath: String { SocketPath.path }
-    /// Where this server listens: ``socketPath``, or a test's own socket.
+    /// Where this server listens: ``socketPath``, a remote host's own socket
+    /// (``RemoteHookSockets``), or a test's.
     let socketPath: String
+    /// Which machine the requests on this socket come from: this Mac, or the
+    /// remote host the socket was bound for (``HookOrigin``). Read on the
+    /// connection queue; the host's name may change while it is connected.
+    private let originBox: OriginBox
+    /// The cwd allow-list (#240) of a remote host, by id.
+    private let hostCwdFilter: @MainActor (String) -> String?
     /// The tools a test approves without a card; nil reads the user's settings.
     private let pinnedAutoApproveTools: Set<String>?
     /// How often a held request's hook is checked for being gone: a backstop
@@ -29,6 +36,11 @@ class HookServer {
     /// a complete request is handed to the main actor (``HookSocketListener``).
     private let connectionQueue = DispatchQueue(label: "com.codeisland.hook-server", qos: .userInitiated)
 
+    /// `origin` is the machine whose hooks reach `socketPath`: this Mac's
+    /// main socket, or a remote host's own (``RemoteHookSockets``).
+    /// `hostCwdFilter` gives a remote host's cwd allow-list; by default the
+    /// one in Settings.
+    ///
     /// `socketPath`, `autoApproveTools`, `heldRequestCheckInterval` and
     /// `readIdleTimeout` are for tests: a socket of their own, the tools
     /// approved without a card, not read from the settings, a shorter
@@ -36,21 +48,38 @@ class HookServer {
     init(
         appState: AppState,
         socketPath: String = HookServer.socketPath,
+        origin: HookOrigin = .local,
+        hostCwdFilter: @escaping @MainActor (String) -> String? = { id in
+            RemoteManager.shared.hosts.first(where: { $0.id == id })?.cwdFilter
+        },
         autoApproveTools: Set<String>? = nil,
         heldRequestCheckInterval: TimeInterval = 300,
         readIdleTimeout: TimeInterval = HookConnection.readIdleTimeout
     ) {
         self.appState = appState
         self.socketPath = socketPath
+        self.originBox = OriginBox(origin)
+        self.hostCwdFilter = hostCwdFilter
         self.pinnedAutoApproveTools = autoApproveTools
         self.heldRequestCheckInterval = heldRequestCheckInterval
         self.readIdleTimeout = readIdleTimeout
+    }
+
+    /// Which machine this socket's requests come from.
+    var origin: HookOrigin { originBox.value }
+
+    /// The remote host this socket is for was renamed: its requests carry
+    /// the new name from now on. Nothing changes on this Mac's socket.
+    func renameHost(to name: String) {
+        guard case .remoteHost(let id, _) = originBox.value else { return }
+        originBox.set(.remoteHost(id: id, name: name))
     }
 
     /// Starts listening. False, logged, when the socket cannot be created.
     @discardableResult
     func start() -> Bool {
         let readIdleTimeout = readIdleTimeout
+        let originBox = originBox
         let listener = HookSocketListener(path: socketPath, queue: connectionQueue) { [weak self] connection in
             connection.readRequest(limit: Self.maxPayloadSize, idleTimeout: readIdleTimeout) { request in
                 switch request {
@@ -60,9 +89,9 @@ class HookServer {
                     log.warning("Payload too large (over \(Self.maxPayloadSize) bytes), dropping connection")
                     connection.respond(Self.oversizedPayloadAnswer)
                 case .received(let data):
-                    // An edge's facts are parsed and interpreted here too, off
-                    // the main thread.
-                    let intake = Self.intake(data)
+                    // The socket names the host, and an edge's facts are
+                    // parsed and interpreted, here too, off the main thread.
+                    let intake = Self.intake(data, origin: originBox.value)
                     if case .answerNothing = intake {
                         connection.respond(Data())
                         return
@@ -82,8 +111,17 @@ class HookServer {
     }
 
     func stop() {
+        let listener = listener
         listener?.stop()
-        listener = nil
+        self.listener = nil
+        guard case .local = origin else {
+            // A host's socket goes at once, and only the file this server
+            // made: the host's forward is gone, and the host may connect
+            // again and bind this path a moment later — a late removal
+            // would take that socket away.
+            listener?.removeSocketFile()
+            return
+        }
         // Delay socket removal so in-flight hooks can finish sending their payload
         // before the file disappears — prevents intermittent errors on session end (#45).
         let path = socketPath
@@ -187,12 +225,12 @@ class HookServer {
         }
     }
 
-    /// Looks up the configured cwd filter for a remote host id. Nil when the
-    /// event is not remote or the host is no longer configured.
-    private static func remoteCwdFilter(for event: HookEvent) -> String? {
-        guard let hostId = event.rawJSON["_remote_host_id"] as? String,
-              !hostId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return RemoteManager.shared.hosts.first(where: { $0.id == hostId })?.cwdFilter
+    /// The cwd filter of the remote host whose socket this is: the socket
+    /// names the host, not the payload. Nil on this Mac's socket, or once
+    /// the host is no longer configured.
+    private var remoteCwdFilter: String? {
+        guard case .remoteHost(let hostId, _) = origin else { return nil }
+        return hostCwdFilter(hostId)
     }
 
     /// Fire-and-forget POST of the hook event to a user-configured webhook URL.
@@ -405,7 +443,7 @@ class HookServer {
     /// (`_edge`), by connection: its answer goes back as its agent reads it.
     private var edgeIntakes: [ObjectIdentifier: HookIntake] = [:]
 
-    /// A delivery before it is routed (``intake(_:)``).
+    /// A delivery before it is routed (``intake(_:origin:)``).
     enum Intake {
         /// Route `payload`. `edge` is HookIntake's reading of an edge that
         /// sent facts, nil for a payload its edge interpreted itself.
@@ -414,15 +452,41 @@ class HookServer {
         case answerNothing
     }
 
+    /// A request that arrived on `origin`'s socket, before it is routed.
+    ///
+    /// The socket names the host first (``HookOrigin/admit(_:)``): on a
+    /// remote host's socket the payload is stamped with that host, whatever
+    /// it claimed; on this Mac's, a payload that claims a remote host is
+    /// answered with nothing. So HookIntake and everything after it see the
+    /// host the socket names, and no other.
+    ///
     /// An edge that cannot interpret its hook sends what it observed in
     /// `_edge` instead (``HookEdgeFacts``); HookIntake reads it here, as
     /// codeisland-bridge does on its own side. A payload without facts is its
     /// edge's own interpretation and passes as it is. Runs on the connection
     /// queue, off the main thread.
-    nonisolated static func intake(_ data: Data) -> Intake {
-        guard HookEdgeFacts.mayCarryFacts(data),
-              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let delivery = HookEdgeFacts.delivery(in: payload) else {
+    nonisolated static func intake(_ received: Data, origin: HookOrigin) -> Intake {
+        let data: Data
+        let parsed: [String: Any]?
+        switch origin.admit(received) {
+        case .admitted(let admitted, let payload):
+            data = admitted
+            parsed = payload
+        case .refusedRemoteClaim:
+            // Only a process on this Mac reaches this socket, and none of
+            // its hooks names a remote host: this one passes itself off as
+            // one, which would take it past every check that keeps a remote
+            // session from acting on this Mac.
+            log.warning("HookServer: refused a request on this Mac's socket that claims to come from a remote host")
+            return .answerNothing
+        case .refusedUnreadable:
+            log.warning("HookServer: refused a request on a remote host's socket that is not a JSON object")
+            return .answerNothing
+        }
+        let payload = parsed ?? (HookEdgeFacts.mayCarryFacts(data)
+            ? try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            : nil)
+        guard let payload, let delivery = HookEdgeFacts.delivery(in: payload) else {
             return .route(data, edge: nil)
         }
         // Slashes unescaped, as the remote hook used to send them: the byte
@@ -522,7 +586,7 @@ class HookServer {
         // Per-host cwd allow-list for remote sessions (#240): on a shared remote
         // account every user's hooks reach every connected client — scope this
         // panel to the configured working directories and drop the rest.
-        if let filterCSV = Self.remoteCwdFilter(for: event),
+        if let filterCSV = remoteCwdFilter,
            !Self.remoteEventPassesCwdFilter(
                cwd: event.rawJSON["cwd"] as? String,
                workspaceRoots: event.rawJSON["workspace_roots"] as? [String],
@@ -677,5 +741,28 @@ class HookServer {
             data = intake.stdout(forAnswer: data) ?? Data()
         }
         connection.respond(data)
+    }
+}
+
+/// The origin a server's connection queue reads, while the main actor may
+/// rename its host.
+private final class OriginBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: HookOrigin
+
+    init(_ origin: HookOrigin) {
+        current = origin
+    }
+
+    var value: HookOrigin {
+        lock.lock()
+        defer { lock.unlock() }
+        return current
+    }
+
+    func set(_ origin: HookOrigin) {
+        lock.lock()
+        current = origin
+        lock.unlock()
     }
 }

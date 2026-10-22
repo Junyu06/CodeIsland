@@ -1,5 +1,9 @@
 import XCTest
 @testable import CodeIsland
+import CodeIslandCore
+
+/// The socket the hook's host has on the island: requests there are its own.
+private let buildBox = HookOrigin.remoteHost(id: "host-1", name: "Build Box")
 
 /// #377 over Remote-SSH: Cursor runs the Claude Code hooks it imports, so on a
 /// remote host its events reach the remote hook as CODEISLAND_SOURCE=claude.
@@ -35,7 +39,7 @@ final class RemoteHookCursorPayloadTests: XCTestCase {
         guard let sent = try rawSentPayload(for: input) else { return nil }
         XCTAssertNotNil(sent["_edge"], "the hook sends facts")
         XCTAssertNil(sent["_source"], "and leaves interpreting them to the island")
-        guard case .route(let routed, let edge) = HookServer.intake(try JSONSerialization.data(withJSONObject: sent)) else {
+        guard case .route(let routed, let edge) = HookServer.intake(try JSONSerialization.data(withJSONObject: sent), origin: buildBox) else {
             XCTFail("the island answered nothing")
             return nil
         }

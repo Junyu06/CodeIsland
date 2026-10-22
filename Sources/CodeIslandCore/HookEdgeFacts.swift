@@ -13,7 +13,9 @@ import Foundation
 /// Every edge that sends facts runs on another machine: the bridge, the one
 /// edge on this Mac, reads its own and drops an `_edge` piped into it. So no
 /// fact is ever taken for this Mac's — no pid is tracked, no home or file of
-/// this Mac consulted — whatever `host` says, or if it says nothing.
+/// this Mac consulted — whatever `host` says, or if it says nothing. Nor is
+/// `host` the edge's word: by the time facts are read, the island has put
+/// there the host whose socket they arrived on (``HookOrigin``).
 public enum HookEdgeFacts {
     /// The payload key the facts travel under.
     public static let key = "_edge"

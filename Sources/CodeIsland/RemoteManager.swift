@@ -26,6 +26,12 @@ final class RemoteManager: ObservableObject {
 
     var onDisconnect: ((String) -> Void)?
 
+    /// Where each host's hooks arrive on this Mac: a socket of the host's
+    /// own, bound before its tunnel starts (``RemoteHookSockets``). The app
+    /// sets it before ``startup()``; without it no host connects, for a
+    /// forward may end only at a socket the island bound for its host.
+    var hookSockets: (any RemoteHookSocketProviding)?
+
     private var forwarders: [String: any RemoteTunnel] = [:]
     // Per-user remote socket path resolved at connect time (#193). Keyed by host id;
     // reused by installHooks so the SSH -R forward and the remote hooks agree.
@@ -53,11 +59,12 @@ final class RemoteManager: ObservableObject {
     private let probeSocketPath: (RemoteHost) async -> String
     private let installRemoteHooks: (RemoteHost, String) async -> RemoteInstallResult
 
-    /// Everything after `reconnectPolicy` reaches ssh or the clock; tests pass
-    /// stand-ins.
+    /// Everything after `reconnectPolicy` reaches ssh, the clock or the
+    /// hosts' sockets; tests pass stand-ins.
     init(
         defaults: UserDefaults = .standard,
         reconnectPolicy: RemoteReconnectPolicy = RemoteReconnectPolicy(),
+        hookSockets: (any RemoteHookSocketProviding)? = nil,
         now: @escaping () -> Date = Date.init,
         makeTunnel: @escaping @MainActor () -> any RemoteTunnel = { SSHForwarder() },
         probeSocketPath: @escaping (RemoteHost) async -> String = { await RemoteInstaller.prepareRemoteSocketPath(host: $0) },
@@ -67,6 +74,7 @@ final class RemoteManager: ObservableObject {
     ) {
         self.defaults = defaults
         self.reconnectPolicy = reconnectPolicy
+        self.hookSockets = hookSockets
         self.now = now
         self.makeTunnel = makeTunnel
         self.probeSocketPath = probeSocketPath
@@ -75,6 +83,8 @@ final class RemoteManager: ObservableObject {
     }
 
     func startup() {
+        // Before any host binds one: sockets a crash left behind.
+        hookSockets?.removeStale()
         startRecoveryTriggers()
         for host in hosts where host.autoConnect {
             connect(id: host.id)
@@ -85,6 +95,7 @@ final class RemoteManager: ObservableObject {
         for host in hosts {
             disconnect(id: host.id)
         }
+        hookSockets?.closeAll()
     }
 
     func addHost(_ host: RemoteHost) {
@@ -98,6 +109,10 @@ final class RemoteManager: ObservableObject {
         let wasConnected = (connectionStatus[host.id] == .connected)
         hosts[index] = host
         save()
+        // The host's socket stamps its requests with its name.
+        if previous.name != host.name {
+            hookSockets?.rename(hostId: host.id, to: host.name)
+        }
         // Only bounce the tunnel when a field the SSH connection depends on
         // changed. Local-only fields (name, cwdFilter — filtering happens in
         // HookServer, #240) must not interrupt live sessions.
@@ -155,6 +170,20 @@ final class RemoteManager: ObservableObject {
             return
         }
 
+        // The host's hooks arrive on a socket bound for it now, which names
+        // the host to everything they reach (HookOrigin); its tunnel ends
+        // there and nowhere else. Without one, nothing is forwarded.
+        let opened = hookSockets?.open(for: host)
+            ?? .failure(.cannotListen(path: RemoteHookSockets.directory(forMainSocket: HookServer.socketPath)))
+        let localSocketPath: String
+        switch opened {
+        case .success(let path):
+            localSocketPath = path
+        case .failure(let failure):
+            failWithoutSocket(host, failure)
+            return
+        }
+
         let forwarder = forwarders[id] ?? makeTunnel()
         forwarders[id] = forwarder
         forwarder.onStatusChange = { [weak self, weak forwarder] status in
@@ -178,11 +207,30 @@ final class RemoteManager: ObservableObject {
                 // The probe takes seconds. A Disconnect meanwhile must not be
                 // followed by a tunnel nothing can stop any more, and of two
                 // overlapping connects only the newer one starts ssh.
+                // Still this connect's, so the socket it bound is still the
+                // host's: a Disconnect closes it, a newer connect binds anew.
                 guard self.connectTokens[id] == token, self.forwarders[id] === forwarder else { return }
                 self.remoteSocketPaths[host.id] = remoteSocketPath
-                forwarder.connect(host: host, localSocketPath: HookServer.socketPath, remoteSocketPath: remoteSocketPath)
+                forwarder.connect(host: host, localSocketPath: localSocketPath, remoteSocketPath: remoteSocketPath)
             }
         }
+    }
+
+    /// The host could not have a socket of its own: it does not connect,
+    /// and says why. A tunnel it still had is stopped — it led to a socket
+    /// that is gone. Tried again on a wake, the network coming back, or
+    /// Connect.
+    private func failWithoutSocket(_ host: RemoteHost, _ failure: RemoteHookSocketFailure) {
+        let message = failure.message(L10n.shared)
+        Self.log.error("remote \(host.id, privacy: .public) has no socket: \(String(describing: failure), privacy: .public)")
+        reconnectPolicy.connectAborted(host.id)
+        connectTokens[host.id] = nil
+        forwarders[host.id]?.disconnect()
+        forwarders[host.id] = nil
+        connectionStatus[host.id] = .failed(message)
+        lastMessage[host.id] = message
+        installRunning[host.id] = false
+        onDisconnect?(host.id)
     }
 
     func disconnect(id: String) {
@@ -193,6 +241,7 @@ final class RemoteManager: ObservableObject {
         connectTokens[id] = nil
         forwarders[id]?.disconnect()
         forwarders[id] = nil
+        hookSockets?.close(hostId: id)
         remoteSocketPaths[id] = nil
         connectionStatus[id] = .disconnected
         installRunning[id] = false

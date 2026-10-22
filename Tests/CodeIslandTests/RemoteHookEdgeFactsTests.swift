@@ -2,6 +2,9 @@ import XCTest
 @testable import CodeIsland
 import CodeIslandCore
 
+/// The socket the hook's host has on the island: requests there are its own.
+private let buildBox = HookOrigin.remoteHost(id: "host-1", name: "Build Box")
+
 /// The remote hook sends facts (`_edge`) and HookServer interprets them with
 /// HookIntake, the bridge's interpretation. These run the shipped
 /// codeisland-remote-hook.py's `main()` against a throwaway socket, hand what
@@ -120,7 +123,7 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
 
     private func intake(_ sent: Data?, file: StaticString = #filePath, line: UInt = #line) throws -> (event: [String: Any], intake: HookIntake) {
         let sent = try XCTUnwrap(sent, "the hook sent nothing", file: file, line: line)
-        guard case .route(let routed, let edge?) = HookServer.intake(sent) else {
+        guard case .route(let routed, let edge?) = HookServer.intake(sent, origin: buildBox) else {
             XCTFail("the island did not read the hook's facts", file: file, line: line)
             throw XCTSkip("no intake")
         }
@@ -199,7 +202,7 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
         let stdin = #"{"hook_event_name":"PermissionRequest","session_id":"conv-1","cursor_version":"3.25.9","question":"Run?"}"#
         let (sent, printed) = try runHook(source: "claude", stdin: stdin, reply: Data())
         XCTAssertEqual(printed, "")
-        guard case .answerNothing = HookServer.intake(try XCTUnwrap(sent)) else {
+        guard case .answerNothing = HookServer.intake(try XCTUnwrap(sent), origin: buildBox) else {
             return XCTFail("a Cursor hook is not held on the island")
         }
     }
@@ -209,7 +212,7 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
     func testHookWithoutSessionIsDroppedOnTheIsland() throws {
         let (sent, printed) = try runHook(source: "claude", stdin: #"{"hook_event_name":"Stop"}"#)
         XCTAssertEqual(printed, "")
-        guard case .answerNothing = HookServer.intake(try XCTUnwrap(sent)) else {
+        guard case .answerNothing = HookServer.intake(try XCTUnwrap(sent), origin: buildBox) else {
             return XCTFail("a hook with no session is dropped")
         }
     }
@@ -259,7 +262,7 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
             "transcript_path": "/home/u/.cursor/projects/p/agent-transcripts/chat-1/subagents/task-1.jsonl",
             "_edge": ["v": 1, "source": "claude", "waits": false, "host": ["id": "h", "name": "h"]] as [String: Any],
         ]
-        guard case .route(let routed, _?) = HookServer.intake(try JSONSerialization.data(withJSONObject: payload)) else {
+        guard case .route(let routed, _?) = HookServer.intake(try JSONSerialization.data(withJSONObject: payload), origin: buildBox) else {
             return XCTFail("the island did not read the hook's facts")
         }
         XCTAssertTrue(HookServer.mayNeedCursorSubsessionRouting(data: routed))
@@ -343,7 +346,7 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
             XCTAssertTrue(intake.waitsForAnswer, "\(payload)")
             // What the island does once the edge says it does not wait.
             delivered["_edge"] = ["v": 1, "source": "claude", "waits": edgeWaits, "host": ["id": "h", "name": "h"]] as [String: Any]
-            guard case .answerNothing = HookServer.intake(try JSONSerialization.data(withJSONObject: delivered)) else {
+            guard case .answerNothing = HookServer.intake(try JSONSerialization.data(withJSONObject: delivered), origin: buildBox) else {
                 XCTFail("\(payload): held although nobody waits on it")
                 continue
             }
@@ -379,11 +382,15 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
         XCTAssertNil(claude["_source"])
         XCTAssertEqual(claude["_remote_host_id"] as? String, "host-1")
 
-        // A host the payload names stands.
+        // A host the payload names stands, as an older island reads it; the
+        // island takes the host from the socket the hook reached.
         let (namedSent, _) = try runHook(source: "codex", stdin: #"{"session_id":"s","hook_event_name":"Stop","_remote_host_id":"other","_source":"codex"}"#)
         let named = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(namedSent)) as? [String: Any])
         XCTAssertEqual(named["_remote_host_id"] as? String, "other")
         XCTAssertEqual(named["_source"] as? String, "codex")
+        let (namedEvent, _) = try intake(namedSent)
+        XCTAssertEqual(namedEvent["_remote_host_id"] as? String, "host-1")
+        XCTAssertEqual(namedEvent["_remote_host_name"] as? String, "Build Box")
     }
 
     /// A blank cwd meets the per-host cwd allow-list (#240), which drops a
@@ -401,7 +408,7 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
                 "_edge": ["v": 1, "source": "opencode", "cwd": "/home/dev/proj",
                           "host": ["id": "host-1", "name": "Build Box"], "waits": false] as [String: Any],
             ]
-            guard case .route(let routed, _) = HookServer.intake(try JSONSerialization.data(withJSONObject: payload)) else {
+            guard case .route(let routed, _) = HookServer.intake(try JSONSerialization.data(withJSONObject: payload), origin: buildBox) else {
                 return XCTFail("not routed")
             }
             let event = try XCTUnwrap(JSONSerialization.jsonObject(with: routed) as? [String: Any])
@@ -415,13 +422,15 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
     }
 
     /// Remote hooks installed before facts existed (0.3.1) keep interpreting
-    /// their hooks themselves; the island takes their payload byte for byte.
+    /// their hooks themselves; the island takes their payload as it is, filed
+    /// under the host whose socket it came in on.
     func testPayloadsFromOlderRemoteHooksPassUntouched() throws {
         let legacy = Data(#"{"hook_event_name":"Stop","session_id":"sess-9","cwd":"/work/proj","_source":"claude","_remote_host_id":"host-1","_remote_host_name":"Build Box","_tty":"/dev/pts/7","last_assistant_message":"Done."}"#.utf8)
-        guard case .route(let routed, let edge) = HookServer.intake(legacy) else {
+        guard case .route(let routed, let edge) = HookServer.intake(legacy, origin: buildBox) else {
             return XCTFail("a legacy payload is routed")
         }
-        XCTAssertEqual(routed, legacy)
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: legacy) as? NSDictionary)
+        XCTAssertEqual(try XCTUnwrap(JSONSerialization.jsonObject(with: routed) as? NSDictionary), sent)
         XCTAssertNil(edge)
     }
 
