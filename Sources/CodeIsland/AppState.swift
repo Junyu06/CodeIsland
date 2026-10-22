@@ -2158,7 +2158,8 @@ final class AppState {
         // already in progress.
         let burstAlreadyInProgress = nextVisiblePermissionIndex() != nil
         permissionQueue.append(request)
-        pushPermissionQueued(event, sessionId: sessionId, smartSuppressed: !shouldAutoOpenPendingSurface(for: sessionId))
+        let attention = decideAttention(.approvalQueued(firstOfBurst: !burstAlreadyInProgress), sessionId: sessionId)
+        pushPermissionQueued(event, sessionId: sessionId, push: attention.push)
 
         // Show UI only when no approval card is already up to be stolen from.
         // showNextPending picks the first *visible* request, promotes it to the
@@ -2168,9 +2169,7 @@ final class AppState {
         if !approvalCardOnScreen {
             showNextPending()
         }
-        if !burstAlreadyInProgress {
-            SoundManager.shared.handleEvent("PermissionRequest")
-        }
+        playAttentionSound(attention, sessionId: sessionId)
         refreshDerivedState()
     }
 
@@ -2538,20 +2537,22 @@ final class AppState {
 
         let request = QuestionRequest(event: event, question: question, continuation: continuation)
         questionQueue.append(request)
-        pushQuestionQueued(request, sessionId: sessionId, smartSuppressed: !shouldAutoOpenPendingSurface(for: sessionId))
-
         // First of a burst: nothing else visibly waiting. Not `count == 1` —
         // a closed question stays queued, and must not swallow every later
         // question's card and sound (the trap #309 fixed for approvals).
-        if nextVisibleQuestion?.id == request.id {
+        let firstOfBurst = nextVisibleQuestion?.id == request.id
+        let attention = decideAttention(.questionQueued(firstOfBurst: firstOfBurst), sessionId: sessionId)
+        pushQuestionQueued(request, sessionId: sessionId, push: attention.push)
+
+        if firstOfBurst {
             activeSessionId = sessionId
             if Self.autoExpandOnQuestion(), shouldAutoOpenPendingSurface(for: sessionId) {
                 withAnimation(NotchAnimation.open) {
                     surface = .questionCard(sessionId: sessionId)
                 }
             }
-            SoundManager.shared.handleEvent("PermissionRequest")
         }
+        playAttentionSound(attention, sessionId: sessionId)
         refreshDerivedState()
     }
 
@@ -2667,28 +2668,27 @@ final class AppState {
             askUserQuestionState: askState
         )
         questionQueue.append(request)
+        // First of a burst, as in `handleQuestion`.
+        let firstOfBurst = nextVisibleQuestion?.id == request.id
         // Smart Suppress alone: whether the island opens the card by itself
         // (the "auto-expand on question" switch) says nothing about whether
         // the person is looking at the question in their terminal.
-        pushQuestionQueued(
-            request,
+        let attention = decideAttention(
+            .questionQueued(firstOfBurst: firstOfBurst),
             sessionId: sessionId,
-            smartSuppressed: !shouldAutoOpenPendingSurface(
-                for: sessionId,
-                isTerminalFrontmost: questionTerminalFrontmostDetector
-            )
+            terminalFrontmost: questionTerminalFrontmostDetector
         )
+        pushQuestionQueued(request, sessionId: sessionId, push: attention.push)
 
-        // First of a burst, as in `handleQuestion`.
-        if nextVisibleQuestion?.id == request.id {
+        if firstOfBurst {
             activeSessionId = sessionId
             if Self.autoExpandOnQuestion(), shouldAutoOpenQuestionSurface(for: event) {
                 withAnimation(NotchAnimation.open) {
                     surface = .questionCard(sessionId: sessionId)
                 }
             }
-            SoundManager.shared.handleEvent("PermissionRequest")
         }
+        playAttentionSound(attention, sessionId: sessionId)
         refreshDerivedState()
     }
 

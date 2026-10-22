@@ -17,27 +17,26 @@ extension AppState {
         )
     }
 
-    /// A permission request was just queued. `smartSuppressed` is evaluated
-    /// only when a push is actually on the table.
-    func pushPermissionQueued(_ event: HookEvent, sessionId: String, smartSuppressed: @autoclosure () -> Bool) {
-        let notifier = PushNotifier.shared
-        guard notifier.isEnabled else { return }
-        notifier.notify(
+    /// A permission request was just queued, and `AttentionPolicy` decided
+    /// it is pushed.
+    func pushPermissionQueued(_ event: HookEvent, sessionId: String, push: AttentionDecision.Push?) {
+        guard let push else { return }
+        PushNotifier.shared.notify(
             Self.pushContent(forPermission: event, cwd: sessions[sessionId]?.cwd),
             subject: pushSubject(for: sessionId),
-            smartSuppressed: smartSuppressed(),
+            smartSuppressed: push.smartSuppressed,
             request: pushRequest(forPermission: event, sessionId: sessionId)
         )
     }
 
-    /// A question (hook Notification, AskUserQuestion, Codex app-server) was just queued.
-    func pushQuestionQueued(_ request: QuestionRequest, sessionId: String, smartSuppressed: @autoclosure () -> Bool) {
-        let notifier = PushNotifier.shared
-        guard notifier.isEnabled else { return }
-        notifier.notify(
+    /// A question (hook Notification, AskUserQuestion, Codex app-server) was
+    /// just queued, and `AttentionPolicy` decided it is pushed.
+    func pushQuestionQueued(_ request: QuestionRequest, sessionId: String, push: AttentionDecision.Push?) {
+        guard let push else { return }
+        PushNotifier.shared.notify(
             Self.pushContent(forQuestion: request),
             subject: pushSubject(for: sessionId),
-            smartSuppressed: smartSuppressed(),
+            smartSuppressed: push.smartSuppressed,
             request: pushRequest(forQuestion: request, sessionId: sessionId)
         )
     }
