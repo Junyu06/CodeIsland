@@ -253,6 +253,21 @@ final class HookServerTransportTests: XCTestCase {
         pump(until: { self.appState.permissionQueue.isEmpty }, timeout: 2, "the card outlived the replay's hook")
     }
 
+    /// A server released while a request is on its way to the main actor
+    /// drops the connection; its hook is let go, not left waiting.
+    func testAServerReleasedMidRequestLetsItsHookGo() throws {
+        let hook = try XCTUnwrap(RawHook.connect(to: socketPath))
+        hook.write(remotePayload("UserPromptSubmit", session: "released", extra: #","prompt":"p""#))
+        usleep(300_000)  // the request is read off the main thread; its hop to it waits
+        server.stop()
+        server = nil
+
+        let answer = hook.readAnswerInBackground(timeout: 3)
+        pump(until: { answer.value != nil }, timeout: 6, "the hook's read never ended")
+        XCTAssertFalse(answer.timedOut, "the dropped connection was neither answered nor closed")
+        hook.close()
+    }
+
     /// Every held request is watched through one kqueue: holding one costs
     /// its socket and nothing more. It cost a kqueue of its own as well, and
     /// launchd's 256 descriptors ran out twice as fast.
@@ -354,6 +369,32 @@ final class HookConnectionTests: XCTestCase {
         XCTAssertTrue(wait(for: closed, timeout: 2), "the check missed a hook that is gone")
     }
 
+    /// A connection dropped after its request, without an answer or
+    /// cancel(), closes: its hook sees the end of the answer instead of
+    /// waiting on a socket nobody holds.
+    func testADroppedConnectionLetsItsHookGo() throws {
+        var fds: [Int32] = [0, 0]
+        XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds), 0)
+        let hook = fds[1]
+        hookEnds.append(hook)
+        _ = "{}".withCString { send(hook, $0, 2, MSG_NOSIGNAL) }
+        shutdown(hook, SHUT_WR)
+        let read = Flag()
+        do {
+            let connection = HookConnection(fd: fds[0], queue: queue)
+            queue.async {
+                connection.readRequest(limit: 1_024) { _ in read.set() }
+            }
+        }
+        XCTAssertTrue(wait(for: read, timeout: 2), "the request was not read")
+
+        var timeout = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(hook, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var byte: UInt8 = 0
+        let got = recv(hook, &byte, 1, 0)
+        XCTAssertEqual(got, 0, "the hook still waits: \(got < 0 ? String(cString: strerror(errno)) : "a byte")")
+    }
+
     /// A watched connection closes the moment its hook goes, and not before.
     func testAWatchedHookIsSeenGoingAtOnce() throws {
         let (connection, hook) = try connectionPair(peerWatch: HookPeerWatch())
@@ -429,8 +470,16 @@ private final class RawHook: @unchecked Sendable {
     final class Box: @unchecked Sendable {
         private let lock = NSLock()
         private var stored: Data?
+        private var storedTimedOut = false
         var value: Data? { lock.withLock { stored } }
-        func set(_ data: Data) { lock.withLock { stored = data } }
+        /// The read gave up waiting: the island neither answered nor closed.
+        var timedOut: Bool { lock.withLock { storedTimedOut } }
+        func set(_ read: (data: Data, timedOut: Bool)) {
+            lock.withLock {
+                stored = read.data
+                storedTimedOut = read.timedOut
+            }
+        }
     }
 
     private let fd: Int32
@@ -486,10 +535,10 @@ private final class RawHook: @unchecked Sendable {
         return box
     }
 
-    /// Reads the answer to EOF on another thread.
-    func readAnswerInBackground() -> Box {
+    /// Reads the answer to EOF on another thread, giving up after `timeout` seconds.
+    func readAnswerInBackground(timeout: Int = 10) -> Box {
         let box = Box()
-        DispatchQueue.global().async { [self] in box.set(readToEOF()) }
+        DispatchQueue.global().async { [self] in box.set(readToEOF(timeout: timeout)) }
         return box
     }
 
@@ -515,8 +564,8 @@ private final class RawHook: @unchecked Sendable {
         }
     }
 
-    private func readToEOF() -> Data {
-        var timeout = timeval(tv_sec: 10, tv_usec: 0)
+    private func readToEOF(timeout seconds: Int = 10) -> (data: Data, timedOut: Bool) {
+        var timeout = timeval(tv_sec: seconds, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         var answer = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
@@ -527,7 +576,7 @@ private final class RawHook: @unchecked Sendable {
             } else if count < 0, errno == EINTR {
                 continue
             } else {
-                return answer
+                return (answer, count < 0 && errno == EAGAIN)
             }
         }
     }

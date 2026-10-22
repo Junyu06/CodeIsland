@@ -313,6 +313,20 @@ final class HookConnection: @unchecked Sendable {
         _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
     }
 
+    deinit {
+        // Dropped without an answer or cancel(): the descriptor must not
+        // leak, nor its hook wait on a socket nobody holds. No dispatch
+        // source can be left — each holds the connection until it is
+        // cancelled and done — so the descriptor is closed here, once.
+        guard !closed else { return }
+        if let peerWatchToken { peerWatch.unwatch(peerWatchToken) }
+        Darwin.close(fd)
+        let handlers = closeHandlers
+        if !handlers.isEmpty {
+            queue.async { handlers.forEach { $0() } }
+        }
+    }
+
     /// Reads what the hook sends, to its EOF, and hands it to `completion`
     /// on the queue. Called once, on the queue.
     func readRequest(limit: Int, completion: @escaping (Request) -> Void) {
