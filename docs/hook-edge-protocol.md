@@ -37,7 +37,8 @@ quirk is then fixed once, in HookIntake, for every edge.
   `CODEISLAND_SOCKET_OWNER_UID` to the SSH user's uid in each hook command,
   and an edge then uses a socket that user owns instead. Once connected, the
   remote hook also asks the kernel who listens behind the socket
-  (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS and FreeBSD) and sends
+  (`SO_PEERCRED` on Linux and OpenBSD, `LOCAL_PEERCRED` on macOS and
+  FreeBSD) and sends
   nothing unless it is that same user: sshd's forward listens as the SSH
   user. Where the platform has no way to ask, the `lstat` stands alone. The
   remote OpenCode plugin sends every event through the remote hook (Node

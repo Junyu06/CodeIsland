@@ -392,6 +392,50 @@ final class HookSocketOwnershipTests: XCTestCase {
         }
     }
 
+    /// Each platform's answer is read where its uid is: Linux's struct ucred
+    /// (pid, uid, gid), OpenBSD's struct sockpeercred (uid, gid, pid), the
+    /// struct xucred of macOS and FreeBSD (version, uid, …). A platform with
+    /// no way to ask says nothing; one where asking fails names nobody.
+    func testTheHookReadsEachPlatformsPeerCredentials() throws {
+        let hookURL = URL(fileURLWithPath: scratch + "/codeisland-remote-hook.py")
+        try Data(XCTUnwrap(RemoteInstaller.remoteHookSource()).utf8).write(to: hookURL)
+        let driver = """
+        import importlib.util, socket, struct, sys
+        spec = importlib.util.spec_from_file_location("hook", sys.argv[1])
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        class Answers:
+            def __init__(self, data):
+                self.data = data
+            def getsockopt(self, level, option, size):
+                if self.data is None:
+                    raise OSError(95, "Operation not supported")
+                return self.data
+        socket.SO_PEERCRED = getattr(socket, "SO_PEERCRED", 17)
+        found = []
+        for platform, data in [
+            ("linux", struct.pack("iII", 4242, 1000, 1001)),
+            ("openbsd7", struct.pack("IIi", 1000, 1001, 4242)),
+            ("darwin", struct.pack("=IIh", 0, 1000, 1) + bytes(66)),
+            ("freebsd14", struct.pack("=IIh", 0, 1000, 1) + bytes(74)),
+            ("sunos5", b""),
+            ("linux", None),
+        ]:
+            sys.platform = platform
+            found.append(hook._peer_uid(Answers(data)))
+        print(found)
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-c", driver, hookURL.path]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        try process.run()
+        let out = String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        XCTAssertEqual(out.trimmingCharacters(in: .whitespacesAndNewlines), "[1000, 1000, 1000, 1000, None, -1]")
+    }
+
     /// The hook asks the kernel who listens (LOCAL_PEERCRED here, as on
     /// macOS hosts; SO_PEERCRED on Linux): the island's stand-in, this user.
     func testRemoteHookAsksTheKernelWhoListens() throws {

@@ -459,13 +459,17 @@ def _peer_uid(sock):
     """The uid of whoever listens at the other end of the connected socket
     `sock`, as the kernel tells it — the credentials it had when it called
     listen(), which no file at the socket's path can change: Linux's
-    SO_PEERCRED, the LOCAL_PEERCRED of macOS and FreeBSD (a struct xucred,
-    cr_uid after cr_version). None where the platform has no way to ask;
-    -1, which is nobody's, when asking failed."""
+    SO_PEERCRED (a struct ucred: pid, uid, gid), OpenBSD's (a struct
+    sockpeercred: uid, gid, pid), the LOCAL_PEERCRED of macOS and FreeBSD (a
+    struct xucred, cr_uid after cr_version). None where the platform has no
+    way to ask; -1, which is nobody's, when asking failed."""
     try:
-        if hasattr(socket, "SO_PEERCRED"):
+        if sys.platform.startswith("linux") and hasattr(socket, "SO_PEERCRED"):
             creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("iII"))
             return struct.unpack("iII", creds)[1]
+        if sys.platform.startswith("openbsd") and hasattr(socket, "SO_PEERCRED"):
+            creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("IIi"))
+            return struct.unpack("IIi", creds)[0]
         if sys.platform == "darwin" or sys.platform.startswith("freebsd"):
             level = getattr(socket, "SOL_LOCAL", 0)
             option = getattr(socket, "LOCAL_PEERCRED", 0x001)
