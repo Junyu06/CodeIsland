@@ -1,5 +1,5 @@
 // CodeIsland pi extension
-// version: v9
+// version: v10
 // OMP-compatible install
 
 /**
@@ -8,6 +8,7 @@
  * This is the same socket bridge as codeisland-pi.ts, but imports OMP's
  * package scope so `omp` can load it from ~/.omp/agent/extensions.
  * `CODEISLAND_SOCKET_PATH` overrides the socket path, as it does for the app.
+ * Nothing is sent to a socket this user does not own (`socketIsOwnedByUser`).
  *
  * Subagent sessions (task tool, eval `agent()`, `/tan` clones):
  *   OMP runs them in-process and rebinds this extension to each one. A
@@ -19,7 +20,7 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { connect } from "node:net";
 import { homedir } from "node:os";
 import { getuid } from "node:process";
@@ -44,6 +45,29 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 const userId = getuid?.() ?? 0;
 const SOCKET_PATH =
   process.env.CODEISLAND_SOCKET_PATH || `/tmp/codeisland-${userId}.sock`;
+
+/**
+ * Whether the socket at `path` is one this user owns. The default path is a
+ * predictable name in /tmp, where any user can create a socket first: theirs
+ * would be sent every event and could answer a permission request. `lstat`,
+ * not `stat`: a symlink, even to our own socket, stays its owner's to repoint,
+ * while a socket of ours in sticky /tmp is ours alone to remove.
+ *
+ * Exported for tests, which pass their own `lstat` and `uid`.
+ */
+export function socketIsOwnedByUser(
+  path: string,
+  lstat: (path: string) => { isSocket(): boolean; uid: number } = lstatSync,
+  uid: number | undefined = getuid?.(),
+): boolean {
+  if (uid === undefined) return false;
+  try {
+    const stat = lstat(path);
+    return stat.isSocket() && stat.uid === uid;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Bridge binary path. Used for blocking permission requests because Node's
@@ -186,6 +210,10 @@ function detectTty(): string | null {
  */
 function sendToSocket(payload: object): Promise<boolean> {
   return new Promise((resolve) => {
+    if (!socketIsOwnedByUser(SOCKET_PATH)) {
+      resolve(false);
+      return;
+    }
     try {
       const sock = connect({ path: SOCKET_PATH }, () => {
         sock.write(JSON.stringify(payload));
@@ -235,7 +263,7 @@ function sendAndWaitResponseCancellable(
 ): CancellableBridge {
   const { promise, resolve } = Promise.withResolvers<Record<string, unknown> | null>();
 
-  if (!existsSync(BRIDGE_PATH)) {
+  if (!existsSync(BRIDGE_PATH) || !socketIsOwnedByUser(SOCKET_PATH)) {
     resolve(null);
     return { promise, cancel: () => {} };
   }

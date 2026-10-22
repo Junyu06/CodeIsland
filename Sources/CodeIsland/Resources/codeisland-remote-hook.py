@@ -10,10 +10,11 @@ import hashlib
 import json
 import os
 import socket
+import stat
 import subprocess
 import sys
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 # The `_edge` facts version (HookEdgeFacts.version on the island).
 EDGE_FACTS_VERSION = 1
 # Per-user socket path (#193): CodeIsland injects CODEISLAND_SOCKET_PATH via the hook
@@ -431,12 +432,30 @@ def _parse_object(raw):
     return data if isinstance(data, dict) else None
 
 
+def _socket_is_ours(path):
+    """Whether `path` is a socket this user owns. The path is a predictable
+    name in /tmp, where any user on this host can create a socket first: theirs
+    would get the event and could answer it. lstat, not stat: a symlink, even
+    to our own socket, stays its owner's to repoint, while a socket of ours in
+    sticky /tmp is ours alone to remove. sshd creates the island's forwarded
+    socket as the login user, so the island's is always ours."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISSOCK(info.st_mode) and info.st_uid == os.getuid()
+
+
 def _send_event(payload, expects_response, stays_for_reply=True):
     """Sends the event and reads the island's reply to EOF; returns the reply
     when the hook waits for one. A hook nobody waits on reads it too, for a
     short while, unless it is a tool step (`stays_for_reply`, see
     _TOOL_STEP_EVENTS): an older island, which accepted connections on its main
-    thread, lost the event of a hook that had closed before it got there."""
+    thread, lost the event of a hook that had closed before it got there.
+    Nothing is sent to a socket this user does not own: as if the island
+    were not there."""
+    if not _socket_is_ours(SOCKET_PATH):
+        return None
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(BLOCKING_TIMEOUT_SECONDS if expects_response else TIMEOUT_SECONDS)
     try:

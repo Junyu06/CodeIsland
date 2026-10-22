@@ -141,6 +141,11 @@ func connectSocket(_ path: String, timeoutMs: Int32 = 3000) -> Int32? {
 
     var addr = sockaddr_un()
     addr.sun_family = sa_family_t(AF_UNIX)
+    // sun_path holds 104 bytes; a longer path would overrun it.
+    guard path.utf8.count < MemoryLayout.size(ofValue: addr.sun_path) else {
+        close(sock)
+        return nil
+    }
     withUnsafeMutablePointer(to: &addr.sun_path.0) { ptr in
         path.withCString { _ = strcpy(ptr, $0) }
     }
@@ -247,9 +252,10 @@ writeImmediateStdout(HookIntake.immediateStdout(sourceTag: sourceTag, eventName:
 // Quick exit: CODEISLAND_SKIP, or a hook Grok imported from another agent's config
 guard HookIntake.admits(sourceTag: sourceTag, environment: env) else { exit(0) }
 
-// Quick exit: socket doesn't exist or isn't a socket
-var statBuf = stat()
-guard stat(socketPath, &statBuf) == 0, (statBuf.st_mode & S_IFMT) == S_IFSOCK else { exit(0) }
+// Quick exit: no socket of this user's at the path. Either the island isn't
+// running, or someone else took the path, and a socket of theirs would get
+// the event and could answer it (SocketPath.Holder).
+guard SocketPath.holder(of: socketPath) == .thisUser else { exit(0) }
 
 // Safety: arm a short alarm before reading stdin — if the calling process
 // forgot to close its pipe, we bail out instead of blocking forever.
@@ -336,6 +342,13 @@ if intake.deliveryDelay > 0 {
 let connectTimeoutMs: Int32 = isBlocking ? 3000 : 1000
 guard let sock = connectSocket(socketPath, timeoutMs: connectTimeoutMs) else {
     debugLog("socket connect failed")
+    exit(0)
+}
+// The listener must be this user's too: outside sticky /tmp, the file checked
+// above may have been replaced since.
+guard SocketPath.peerIsUser(sock) else {
+    debugLog("socket listener is another user's, not sending")
+    close(sock)
     exit(0)
 }
 

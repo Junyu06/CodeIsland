@@ -1,28 +1,50 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { createServer } from "net";
 import { tmpdir } from "os";
 import { join } from "path";
 
 // The remote plugin hands every event to ~/.codeisland/codeisland-remote-hook.py
-// on the SSH host. A stand-in hook in a temp HOME records what it would forward.
+// on the SSH host, while the island's forwarded socket is there: a socket this
+// user owns (sshd makes it as the login user). A stand-in hook in a temp HOME
+// records what it would forward; a stand-in socket, never a real one, is the
+// island's. The module reads both while loading.
 const home = mkdtempSync(join(tmpdir(), "codeisland-remote-plugin-"));
 const received = join(home, "received.jsonl");
-mkdirSync(join(home, ".codeisland"));
-const hook = join(home, ".codeisland", "codeisland-remote-hook.py");
-writeFileSync(hook, [
-  "import sys",
-  `with open(${JSON.stringify(received)}, "a") as out:`,
-  "    out.write(sys.stdin.read() + \"\\n\")",
-  "",
-].join("\n"));
-chmodSync(hook, 0o755);
+const socketPath = join(home, "island.sock");
+const island = createServer((sock) => sock.end());
+await new Promise<void>((resolve) => island.listen(socketPath, resolve));
 
-const savedHome = process.env.HOME;
+/** A HOME whose stand-in hook appends what it is handed to `out`. */
+function standInHome(dir: string, out: string) {
+  mkdirSync(join(dir, ".codeisland"));
+  const hook = join(dir, ".codeisland", "codeisland-remote-hook.py");
+  writeFileSync(hook, [
+    "import sys",
+    `with open(${JSON.stringify(out)}, "a") as out:`,
+    "    out.write(sys.stdin.read() + \"\\n\")",
+    "",
+  ].join("\n"));
+  chmodSync(hook, 0o755);
+}
+standInHome(home, received);
+
+const saved = { HOME: process.env.HOME, CODEISLAND_SOCKET_PATH: process.env.CODEISLAND_SOCKET_PATH };
+const restore = () => {
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+};
 process.env.HOME = home;
+process.env.CODEISLAND_SOCKET_PATH = socketPath;
 const { default: plugin } = await import("../../Sources/CodeIsland/Resources/codeisland-opencode-remote.js");
-process.env.HOME = savedHome;
+restore();
 
-afterAll(() => rmSync(home, { recursive: true, force: true }));
+afterAll(async () => {
+  await new Promise<void>((resolve) => island.close(() => resolve()));
+  rmSync(home, { recursive: true, force: true });
+});
 
 const forwarded = async (count: number) => {
   for (let i = 0; i < 200; i++) {
@@ -75,6 +97,30 @@ describe("remote OpenCode plugin", () => {
       expect(compact._ppid).toBeUndefined();
     } finally {
       process.env.PWD = savedPwd;
+    }
+  });
+
+  // Another user on the host could have created the socket path first; theirs
+  // would get every event and could answer a permission request. Through a
+  // symlink (connect() follows one, lstat does not) or to nothing at all, the
+  // hook is never run.
+  test("nothing is handed on unless the socket is this user's own", async () => {
+    for (const [name, path] of [["link", join(home, "link.sock")], ["missing", join(home, "missing.sock")]]) {
+      if (name === "link") symlinkSync(socketPath, path);
+      const otherHome = join(home, name);
+      mkdirSync(otherHome);
+      const handedOn = join(otherHome, "received.jsonl");
+      standInHome(otherHome, handedOn);
+      process.env.HOME = otherHome;
+      process.env.CODEISLAND_SOCKET_PATH = path;
+      const { default: other } = await import(`../../Sources/CodeIsland/Resources/codeisland-opencode-remote.js?not-ours-${name}`);
+      restore();
+
+      const hooks = await other.server({ client: undefined, serverUrl: undefined });
+      await hooks.event({ event: { type: "session.created", properties: { info: { id: `s-${name}` } } } });
+      await hooks.event({ event: { type: "session.status", properties: { sessionID: `s-${name}`, status: { type: "idle" } } } });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(existsSync(handedOn)).toBe(false);
     }
   });
 });

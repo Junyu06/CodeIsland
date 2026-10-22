@@ -1025,10 +1025,12 @@ struct ConfigInstaller {
     }
 
     /// Hook script version — bump this when the script template changes
-    private static let hookScriptVersion = 5
+    private static let hookScriptVersion = 6
 
-    /// Hook script for Claude Code (dispatcher: bridge binary → nc fallback)
-    private static let hookScript = """
+    /// Hook script for Claude Code (dispatcher: bridge binary → nc fallback).
+    /// The fallback, like the bridge, sends only to a socket this user owns
+    /// (`SocketPath.Holder`): BSD stat reads the path without following it.
+    static let hookScript = """
         #!/bin/bash
         # CodeIsland hook v\(hookScriptVersion) — native bridge with shell fallback
         BRIDGE="$HOME/.codeisland/codeisland-bridge"
@@ -1037,7 +1039,7 @@ struct ConfigInstaller {
         fi
         # Fallback: original shell approach (no binary installed yet)
         SOCK="/tmp/codeisland-$(id -u).sock"
-        [ -S "$SOCK" ] || exit 0
+        [ "$(/usr/bin/stat -f '%u %HT' "$SOCK" 2>/dev/null)" = "$(id -u) Socket" ] || exit 0
         INPUT=$(cat)
         _ITERM_GUID="${ITERM_SESSION_ID##*:}"
         TERM_INFO="\\"_term_app\\":\\"${TERM_PROGRAM:-}\\",\\"_iterm_session\\":\\"${_ITERM_GUID:-}\\",\\"_tty\\":\\"$(tty 2>/dev/null || true)\\",\\"_ppid\\":$PPID"
@@ -3432,13 +3434,13 @@ struct ConfigInstaller {
     // MARK: - pi Extension
 
     /// Current pi extension version — bump when codeisland-pi.ts changes.
-    private static let piExtensionVersion = "v5"
+    private static let piExtensionVersion = "v6"
 
     /// Current omp extension version — bump when codeisland-omp.ts changes.
     /// Kept independent of pi (OMP reuses the "CodeIsland pi extension" banner
     /// but ships its own resource file), so a pi-only bump does not false-flag
     /// healthy OMP installs as needing repair.
-    private static let ompExtensionVersion = "v9"
+    private static let ompExtensionVersion = "v10"
 
     private static func piExtensionSource() -> String? {
         if let url = Bundle.appModule.url(forResource: "codeisland-pi", withExtension: "ts", subdirectory: "Resources"),
@@ -3531,7 +3533,7 @@ struct ConfigInstaller {
 
     // MARK: - OpenClaw plugin (#235)
 
-    private static let openclawPluginVersion = "v1"
+    private static let openclawPluginVersion = "v2"
     private static let openclawPluginFiles = ["index.ts", "openclaw.plugin.json", "package.json"]
 
     private static func openclawPluginSource(_ file: String) -> String? {
@@ -3814,7 +3816,7 @@ struct ConfigInstaller {
 
     /// Current OpenCode plugin version — bump when codeisland-opencode.js changes
     /// (the MiMo Code copy is the same file, so it follows this too).
-    private static let opencodePluginVersion = "v9"
+    private static let opencodePluginVersion = "v10"
 
     private static func isOpencodePluginInstalled(fm: FileManager) -> Bool {
         guard fm.fileExists(atPath: opencodePluginPath) else { return false }
