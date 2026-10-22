@@ -34,11 +34,17 @@ struct TerminalVisibilityDetector {
         let isTerminalFrontmost: @Sendable (SessionSnapshot) -> Bool
         /// Tab level; may block on AppleScript or a terminal CLI.
         let isSessionTabVisible: @Sendable (SessionSnapshot) -> Bool
+        /// Can a jump land on the session at all? False for a Codex session
+        /// whose tmux pane can't be told apart from another session's
+        /// (`CodexTmuxRouting.Resolution.ambiguous`): its jump only raises the
+        /// terminal, so the terminal being in front proves nothing. May block.
+        var isSessionLocatable: @Sendable (SessionSnapshot) -> Bool = { _ in true }
 
         /// The real desktop: frontmost app, window list, AppleScript, CLIs.
         static let live = Probe(
             isTerminalFrontmost: { TerminalVisibilityDetector.liveIsTerminalFrontmost($0) },
-            isSessionTabVisible: { TerminalVisibilityDetector.liveIsSessionTabVisible($0) }
+            isSessionTabVisible: { TerminalVisibilityDetector.liveIsSessionTabVisible($0) },
+            isSessionLocatable: { TerminalVisibilityDetector.liveIsSessionLocatable($0) }
         )
 
         /// "Can't tell" — what the detector already answers for a terminal it
@@ -76,6 +82,16 @@ struct TerminalVisibilityDetector {
     /// **Call from a background thread only** — AppleScript/CLI calls may block 50-200ms.
     static func isSessionTabVisible(_ session: SessionSnapshot) -> Bool {
         probe.isSessionTabVisible(session)
+    }
+
+    /// Jump validation: did a click on this session land on it? Its tab is
+    /// showing, or its terminal is in front — unless the session can't be
+    /// located, where the jump only raised the terminal.
+    /// **Call from a background thread only**, like `isSessionTabVisible`.
+    static func didJumpLand(_ session: SessionSnapshot) -> Bool {
+        let probe = self.probe
+        if probe.isSessionTabVisible(session) { return true }
+        return probe.isTerminalFrontmost(session) && probe.isSessionLocatable(session)
     }
 
     // MARK: - App-level check (main-thread safe, no blocking)
@@ -155,9 +171,14 @@ struct TerminalVisibilityDetector {
         }
 
         // tmux takes priority: if session runs in a tmux pane, check that pane
-        // regardless of which terminal app wraps tmux (iTerm2, Ghostty, etc.)
+        // regardless of which terminal app wraps tmux (iTerm2, Ghostty, etc.).
+        // The pane is the one the jump targets, from the same resolution.
         if let pane = session.tmuxPane, !pane.isEmpty {
-            return isTmuxPaneActive(pane)
+            switch CodexTmuxRouting.resolution(for: session, tmuxPath: findBinary("tmux")) {
+            case .located(let located): return isTmuxPaneActive(located.id)
+            case .ambiguous: return false
+            case .unverified: return isTmuxPaneActive(pane)
+            }
         }
 
         // Herdr owns the pane below the outer terminal. Route on the same
@@ -207,6 +228,10 @@ struct TerminalVisibilityDetector {
 
         // Unknown terminal — can't determine tab, prefer showing notification
         return false
+    }
+
+    private static func liveIsSessionLocatable(_ session: SessionSnapshot) -> Bool {
+        CodexTmuxRouting.resolution(for: session, tmuxPath: findBinary("tmux")) != .ambiguous
     }
 
     private static func isWarpSession(_ session: SessionSnapshot) -> Bool {

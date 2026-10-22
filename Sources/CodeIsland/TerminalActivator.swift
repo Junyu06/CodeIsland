@@ -49,7 +49,10 @@ struct TerminalActivator {
     /// Reverse map: source → native app bundle ID. Used as a fallback when
     /// termBundleId is missing but the source's desktop app is running.
     static let sourceToNativeAppBundleId: [String: String] = [
-        "codex": "com.openai.codex",
+        // Codex has both CLI and desktop sessions. Only an explicit desktop
+        // bundle ID should route to Codex.app; a source-only fallback steals
+        // Ghostty/tmux CLI jumps whenever the desktop app is also running.
+        // Callers with no session use desktopAppBundleId(forSource:).
         "cursor": "com.todesktop.230313mzl4w4u92",
         "trae": "com.trae.app",
         // Trae CN is its own install with its own bundle id (Homebrew trae-cn
@@ -67,6 +70,14 @@ struct TerminalActivator {
         // of raising — or launching — the IDE.
         "aiwork": "com.alipay.dtcoder.ide",
     ]
+
+    /// The source's desktop app for a caller with no session to route, such as
+    /// Buddy's focus button when no card of that agent exists. Codex is kept
+    /// out of the map above so a running Codex.app can't steal a CLI session's
+    /// jump; with no session there is no jump to steal.
+    static func desktopAppBundleId(forSource source: String) -> String? {
+        sourceToNativeAppBundleId[source] ?? (source == "codex" ? AppState.codexAppBundleId : nil)
+    }
 
     /// Bundle IDs of apps that have both APP and CLI modes.
     /// When termBundleId matches, bring that app to front;
@@ -194,6 +205,12 @@ struct TerminalActivator {
             return
         }
 
+        activateTerminal(session: session, sessionId: sessionId)
+    }
+
+    private static func activateTerminal(
+        session: SessionSnapshot, sessionId: String?, tmuxAlreadySelected: Bool = false
+    ) {
         // Resolve terminal: bundle ID (most accurate) → TERM_PROGRAM → scan running apps
         let termApp: String
         if let bundleId = session.termBundleId,
@@ -276,7 +293,12 @@ struct TerminalActivator {
         }
 
         // --- tmux: switch pane first, then fall through to terminal-specific activation ---
-        if let pane = session.tmuxPane, !pane.isEmpty {
+        if !tmuxAlreadySelected, session.source == "codex",
+           let pane = session.tmuxPane, !pane.isEmpty {
+            activateCodexTmux(session: session, sessionId: sessionId, termApp: termApp)
+            return
+        }
+        if !tmuxAlreadySelected, let pane = session.tmuxPane, !pane.isEmpty {
             activateTmux(pane: pane, tmuxEnv: session.tmuxEnv)
         }
 
@@ -1034,20 +1056,81 @@ struct TerminalActivator {
         }
     }
 
+    /// Re-resolve the target before touching tmux. Hooks from a shared Codex
+    /// daemon can all carry the pane where that daemon originally started.
+    /// The target is `CodexTmuxRouting.resolution(for:tmuxPath:)`, the same
+    /// answer TerminalVisibilityDetector checks the jump against. When nothing
+    /// can be checked (no tmux binary, no server answer, the process is gone)
+    /// the hook's pane is used exactly as for every other source.
+    private static func activateCodexTmux(session: SessionSnapshot, sessionId: String?, termApp: String) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            var target = session
+            if let bin = findBinary("tmux") {
+                let env = tmuxProcessEnv(session.tmuxEnv)
+                switch CodexTmuxRouting.resolution(for: session, tmuxPath: bin) {
+                case .located(let pane):
+                    let clients = runProcess(bin, args: ["list-clients", "-F", CodexTmuxRouting.clientFormat], env: env)
+                        .flatMap { String(data: $0, encoding: .utf8) }
+                        .map(CodexTmuxRouting.parseClients) ?? []
+                    let client = CodexTmuxRouting.client(for: pane, clients: clients, preferred: session.tmuxClientTty)
+                    // Complete the switch before matching the outer terminal's window.
+                    selectTmuxPane(bin, pane: pane.id, env: env, client: client)
+                    target.tmuxPane = pane.id
+                    if let client { target.tmuxClientTty = client }
+                case .ambiguous:
+                    // The hook's pane is another session's and no single pane shows
+                    // this one: bring the terminal forward and leave tmux as it is.
+                    // The jump check reports this as not landed (see the detector).
+                    DispatchQueue.main.async {
+                        raiseTerminalApp(termApp, termBundleId: session.termBundleId)
+                    }
+                    return
+                case .unverified:
+                    if let pane = session.tmuxPane { selectTmuxPane(bin, pane: pane, env: env) }
+                }
+            }
+            DispatchQueue.main.async {
+                activateTerminal(session: target, sessionId: sessionId, tmuxAlreadySelected: true)
+            }
+        }
+    }
+
+    /// App level only: no tab, window or tmux pane is picked, and CodeIsland
+    /// itself never comes forward.
+    private static func raiseTerminalApp(_ termApp: String, termBundleId: String?) {
+        if let bundleId = appLevelTerminalBundleId(termApp: termApp, termBundleId: termBundleId) {
+            raiseAppWithoutQuickTerminal(bundleId: bundleId)
+        } else {
+            bringToFront(termApp)
+        }
+    }
+
+    /// The app `raiseTerminalApp` brings forward: the hook's bundle ID, else
+    /// the known terminal `termApp` names; nil leaves it to `bringToFront`.
+    static func appLevelTerminalBundleId(termApp: String, termBundleId: String?) -> String? {
+        if let termBundleId, !termBundleId.isEmpty { return termBundleId }
+        return knownTerminals.first { $0.name.caseInsensitiveCompare(termApp) == .orderedSame }?.bundleId
+    }
+
     // MARK: - tmux (CLI: tmux switch-client + select-window/select-pane)
 
     private static func activateTmux(pane: String, tmuxEnv: String? = nil) {
         guard let bin = findBinary("tmux") else { return }
         DispatchQueue.global(qos: .userInitiated).async {
-            // 1) Switch the attached client to the target session — needed when the user is
-            //    currently attached to session A but the agent runs in session B. tmux derives
-            //    the session from the pane target, so "switch-client -t <pane>" is sufficient.
-            //    Failure is fine (e.g. no client attached, or pane belongs to current session).
-            _ = runProcess(bin, args: ["switch-client", "-t", pane], env: tmuxProcessEnv(tmuxEnv))
-            // 2) Within that session, switch to the window containing the pane, then select the pane
-            _ = runProcess(bin, args: ["select-window", "-t", pane], env: tmuxProcessEnv(tmuxEnv))
-            _ = runProcess(bin, args: ["select-pane", "-t", pane], env: tmuxProcessEnv(tmuxEnv))
+            selectTmuxPane(bin, pane: pane, env: tmuxProcessEnv(tmuxEnv))
         }
+    }
+
+    /// Blocking; call off the main thread. `client` nil lets tmux pick the client.
+    private static func selectTmuxPane(_ bin: String, pane: String, env: [String: String]?, client: String? = nil) {
+        // 1) Switch the attached client to the target session — needed when the user is
+        //    currently attached to session A but the agent runs in session B. tmux derives
+        //    the session from the pane target, so "switch-client -t <pane>" is sufficient.
+        //    Failure is fine (e.g. no client attached, or pane belongs to current session).
+        _ = runProcess(bin, args: ["switch-client"] + (client.map { ["-c", $0] } ?? []) + ["-t", pane], env: env)
+        // 2) Within that session, switch to the window containing the pane, then select the pane
+        _ = runProcess(bin, args: ["select-window", "-t", pane], env: env)
+        _ = runProcess(bin, args: ["select-pane", "-t", pane], env: env)
     }
 
     // MARK: - Zellij (CLI: zellij action list-panes → go-to-tab + activate parent terminal)

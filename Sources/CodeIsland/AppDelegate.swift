@@ -189,6 +189,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Explicitly reopening the menu-bar app should expose its real settings,
+        // not ask SwiftUI to synthesize a placeholder Settings scene.
+        SettingsWindowController.shared.show()
+        return false
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         hookRecoveryTimer?.invalidate()
         teardownGlobalShortcut()
