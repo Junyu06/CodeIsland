@@ -22,33 +22,39 @@ class HookServer {
     /// How often a held request's hook is checked for being gone: a backstop
     /// to its watch, which sees that at once (``monitorPeerDisconnect``).
     private let heldRequestCheckInterval: TimeInterval
+    /// How long a hook may send nothing before its request is complete.
+    private let readIdleTimeout: TimeInterval
     private var listener: HookSocketListener?
     /// Hook connections are accepted and read here, off the main thread; only
     /// a complete request is handed to the main actor (``HookSocketListener``).
     private let connectionQueue = DispatchQueue(label: "com.codeisland.hook-server", qos: .userInitiated)
 
-    /// `socketPath`, `autoApproveTools` and `heldRequestCheckInterval` are for
-    /// tests: a socket of their own, the tools approved without a card, not
-    /// read from the settings, and a shorter backstop.
+    /// `socketPath`, `autoApproveTools`, `heldRequestCheckInterval` and
+    /// `readIdleTimeout` are for tests: a socket of their own, the tools
+    /// approved without a card, not read from the settings, a shorter
+    /// backstop and a shorter wait for a stalled hook.
     init(
         appState: AppState,
         socketPath: String = HookServer.socketPath,
         autoApproveTools: Set<String>? = nil,
-        heldRequestCheckInterval: TimeInterval = 300
+        heldRequestCheckInterval: TimeInterval = 300,
+        readIdleTimeout: TimeInterval = HookConnection.readIdleTimeout
     ) {
         self.appState = appState
         self.socketPath = socketPath
         self.pinnedAutoApproveTools = autoApproveTools
         self.heldRequestCheckInterval = heldRequestCheckInterval
+        self.readIdleTimeout = readIdleTimeout
     }
 
     /// Starts listening. False, logged, when the socket cannot be created.
     @discardableResult
     func start() -> Bool {
+        let readIdleTimeout = readIdleTimeout
         let listener = HookSocketListener(path: socketPath, queue: connectionQueue) { [weak self] connection in
-            connection.readRequest(limit: Self.maxPayloadSize) { request in
+            connection.readRequest(limit: Self.maxPayloadSize, idleTimeout: readIdleTimeout) { request in
                 switch request {
-                case .failed:
+                case .failed, .stalled:
                     connection.cancel()
                 case .tooLarge:
                     log.warning("Payload too large (over \(Self.maxPayloadSize) bytes), dropping connection")

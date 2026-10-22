@@ -71,11 +71,20 @@ final class HookServerTransportTests: XCTestCase {
     }
 
     /// Replaces the server with one on a socket of its own, checking held
-    /// requests' hooks every `heldRequestCheckInterval`.
-    private func restartServer(heldRequestCheckInterval: TimeInterval) {
+    /// requests' hooks every `heldRequestCheckInterval` and letting a hook
+    /// send nothing for `readIdleTimeout` before its request is complete.
+    private func restartServer(
+        heldRequestCheckInterval: TimeInterval = 300,
+        readIdleTimeout: TimeInterval = HookConnection.readIdleTimeout
+    ) {
         server.stop()
         socketPath = "/tmp/ci-ht-\(UUID().uuidString.prefix(8)).sock"
-        server = HookServer(appState: appState, socketPath: socketPath, heldRequestCheckInterval: heldRequestCheckInterval)
+        server = HookServer(
+            appState: appState,
+            socketPath: socketPath,
+            heldRequestCheckInterval: heldRequestCheckInterval,
+            readIdleTimeout: readIdleTimeout
+        )
         XCTAssertTrue(server.start(), "HookServer did not listen on \(socketPath!)")
     }
 
@@ -171,6 +180,40 @@ final class HookServerTransportTests: XCTestCase {
         pump(for: 1)  // ten rounds of the safety net
         XCTAssertNotNil(appState.pendingPermission, "the safety net dropped a request whose hook still waits")
         XCTAssertNil(answer.value, "the safety net cut off a waiting hook")
+
+        appState.approvePermission()
+        pump(until: { answer.value != nil }, "the answer did not reach the hook")
+        XCTAssertTrue(String(decoding: answer.value ?? Data(), as: UTF8.self).contains(#""behavior":"allow""#))
+        hook.close()
+    }
+
+    /// A hook that never finishes its request (no EOF, nothing more sent)
+    /// is let go after the read's idle timeout instead of holding its
+    /// socket forever.
+    func testAHookThatNeverFinishesItsRequestIsLetGo() throws {
+        restartServer(readIdleTimeout: 0.3)
+        let hook = try XCTUnwrap(RawHook.connect(to: socketPath))
+        hook.writeWithoutFinishing(#"{"hook_event_name":"Stop","#)
+
+        let answer = hook.readAnswerInBackground(timeout: 3)
+        pump(until: { answer.value != nil }, timeout: 6, "the hook's read never ended")
+        XCTAssertFalse(answer.timedOut, "a hook that never finished its request was held on to")
+        XCTAssertEqual(answer.value, Data())
+        hook.close()
+    }
+
+    /// The read's idle timeout ends with the request: the wait for a held
+    /// request's answer that follows is not bound by it.
+    func testAHeldRequestIsNotBoundByTheReadTimeout() throws {
+        restartServer(readIdleTimeout: 0.2)
+        let hook = try XCTUnwrap(RawHook.connect(to: socketPath))
+        hook.write(permissionPayload(session: "slow-user", toolUseId: "tu-slow"))
+        let answer = hook.readAnswerInBackground()
+
+        pump(until: { self.appState.pendingPermission != nil }, "no card for the request")
+        pump(for: 1)
+        XCTAssertNotNil(appState.pendingPermission, "the read's timeout cut off a held request")
+        XCTAssertNil(answer.value, "the read's timeout cut off a waiting hook")
 
         appState.approvePermission()
         pump(until: { answer.value != nil }, "the answer did not reach the hook")
@@ -440,6 +483,47 @@ final class HookConnectionTests: XCTestCase {
         connection.cancel()
     }
 
+    /// A hook that sends nothing, or part of its request and then nothing,
+    /// never finishing it, is handed over as stalled once the idle timeout
+    /// passes.
+    func testAStalledRequestIsHandedOverAsStalled() throws {
+        for sent in ["", #"{"hook_event_name":"#] {
+            let (connection, hook) = try connectionPair()
+            if !sent.isEmpty {
+                _ = sent.withCString { send(hook, $0, strlen($0), MSG_NOSIGNAL) }
+            }
+            let stalled = Flag()
+            queue.async {
+                connection.readRequest(limit: 1_024, idleTimeout: 0.3) { request in
+                    if case .stalled = request { stalled.set() }
+                }
+            }
+            XCTAssertTrue(wait(for: stalled, timeout: 2), "a hook that sent \(sent.isEmpty ? "nothing" : "part of its request") was waited on for good")
+            XCTAssertEqual(connection.keptRequestBytesForTesting, 0)
+            connection.cancel()
+        }
+    }
+
+    /// The idle timeout counts silence, not time: a request that comes slowly
+    /// but steadily (a slow SSH link) gets through whole.
+    func testASlowButSteadyRequestIsNotCutOff() throws {
+        let (connection, hook) = try connectionPair()
+        let chunks = 10
+        let received = Flag()
+        queue.async {
+            connection.readRequest(limit: 1_024, idleTimeout: 0.3) { request in
+                if case .received(let data) = request, data.count == chunks { received.set() }
+            }
+        }
+        for _ in 0..<chunks {
+            _ = "x".withCString { send(hook, $0, 1, MSG_NOSIGNAL) }
+            usleep(100_000)  // a second in all: more than the idle timeout
+        }
+        shutdown(hook, SHUT_WR)
+        XCTAssertTrue(wait(for: received, timeout: 2), "a slow but steady request was cut off")
+        connection.cancel()
+    }
+
     /// The first answer is the one: a second, arriving while the first is
     /// still being written, is dropped, not spliced into it.
     func testTheFirstAnswerWins() throws {
@@ -579,6 +663,12 @@ private final class RawHook: @unchecked Sendable {
     func write(_ payload: String) {
         writeAll(Data(payload.utf8))
         shutdown(fd, SHUT_WR)
+    }
+
+    /// Writes `payload` and stops there, without the half-close that ends a
+    /// request: a hook that stalled.
+    func writeWithoutFinishing(_ payload: String) {
+        writeAll(Data(payload.utf8))
     }
 
     /// Writes `data` (and half-closes) on another thread; then reads the

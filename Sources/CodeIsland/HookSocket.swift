@@ -281,7 +281,16 @@ final class HookConnection: @unchecked Sendable {
         case tooLarge
         /// The connection failed before a single byte.
         case failed
+        /// The hook sent nothing for the idle timeout and did not finish:
+        /// it stalled, or never half-closed. What came is not used.
+        case stalled
     }
+
+    /// How long a hook may send nothing before its request is complete (its
+    /// EOF). Generous: a hook writes its request at once, but over SSH the
+    /// bytes may come slowly. The wait for a held request's answer, which
+    /// follows, has no such bound.
+    static let readIdleTimeout: TimeInterval = 120
 
     /// How often a held connection asks its socket whether the hook is gone
     /// when it cannot be watched (``closeWhenPeerLeaves()``).
@@ -292,6 +301,7 @@ final class HookConnection: @unchecked Sendable {
     private let peerWatch: HookPeerWatch
     // On `queue`:
     private var reader: DispatchSourceRead?
+    private var readerIdle: DispatchSourceTimer?
     private var writer: DispatchSourceWrite?
     private var peerWatchToken: UInt?
     private var peerPoll: DispatchSourceTimer?
@@ -329,21 +339,45 @@ final class HookConnection: @unchecked Sendable {
     }
 
     /// Reads what the hook sends, to its EOF, and hands it to `completion`
-    /// on the queue. Called once, on the queue.
-    func readRequest(limit: Int, completion: @escaping (Request) -> Void) {
+    /// on the queue — ``Request/stalled`` once nothing has come for
+    /// `idleTimeout`. Called once, on the queue.
+    func readRequest(
+        limit: Int,
+        idleTimeout: TimeInterval = HookConnection.readIdleTimeout,
+        completion: @escaping (Request) -> Void
+    ) {
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-        source.setEventHandler { [self] in
-            guard let request = readAvailable(limit: limit) else { return }
+        let idle = DispatchSource.makeTimerSource(queue: queue)
+        reader = source
+        readerIdle = idle
+        let handOver = { [self] (request: Request) in
             reader?.cancel()
             reader = nil
+            readerIdle?.cancel()
+            readerIdle = nil
             // Handed over: a held connection, which may wait for hours,
             // keeps none of its request (up to `limit` bytes).
             received = Data()
             completion(request)
         }
+        source.setEventHandler { [self] in
+            guard reader != nil else { return }
+            let before = received.count
+            if let request = readAvailable(limit: limit) {
+                handOver(request)
+            } else if received.count > before {
+                idle.schedule(deadline: .now() + idleTimeout)
+            }
+        }
+        idle.setEventHandler { [self] in
+            guard reader != nil else { return }
+            log.warning("HookServer: a hook sent nothing for \(Int(idleTimeout)) s before its EOF; dropping it")
+            handOver(.stalled)
+        }
         countOnDescriptor(source)
-        reader = source
+        idle.schedule(deadline: .now() + idleTimeout)
         source.resume()
+        idle.resume()
     }
 
     /// The bytes of its request the connection still keeps. For tests.
@@ -492,6 +526,8 @@ final class HookConnection: @unchecked Sendable {
         finishing = true
         reader?.cancel()
         reader = nil
+        readerIdle?.cancel()
+        readerIdle = nil
         writer?.cancel()
         writer = nil
         if let peerWatchToken {
