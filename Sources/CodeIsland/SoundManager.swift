@@ -107,9 +107,7 @@ class SoundManager {
     }
 
     /// What may hold event sounds back right now. The clock and the lock
-    /// state are read only for a cue with the master switch on — before the
-    /// cue's own switch, as they always were (the lock read also catches a
-    /// lock notification that went missing).
+    /// state are read only for a cue the user would otherwise hear.
     var hold: SoundHold {
         SoundHold(
             quietHours: { self.quietHoursActive },

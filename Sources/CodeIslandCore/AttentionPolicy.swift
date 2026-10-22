@@ -167,13 +167,15 @@ public enum AttentionPolicy {
         settle(intents(for: moment, subject: subject), context: context)
     }
 
-    /// The sound a cue plays as the user set things up: the master switch,
-    /// then anything holding sounds back, then the cue's own switch. A cue
-    /// with no sound of its own (most hook events) is never audible.
+    /// The sound a cue plays as the user set things up: the master switch and
+    /// the cue's own switch (a cue with no sound of its own — most hook
+    /// events — is never audible), then anything holding sounds back. The
+    /// hold comes last because reading the lock state is a WindowServer round
+    /// trip, which a silent tool step must not pay on the main thread.
     public static func audibleSound(_ cue: String?, sounds: SoundPreferences, hold: SoundHold) -> String? {
-        guard let cue, sounds.enabled else { return nil }
+        guard let cue, sounds.enabled, sounds.audibleCues.contains(cue) else { return nil }
         guard !holdsSounds(hold) else { return nil }
-        return sounds.audibleCues.contains(cue) ? cue : nil
+        return cue
     }
 
     /// Whether event sounds are held back right now, for a reason that will

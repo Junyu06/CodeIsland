@@ -163,4 +163,28 @@ final class AttentionRegressionTests: XCTestCase {
         XCTAssertTrue(appState.followUps.scheduler.trackedKeys.isEmpty, "nothing to follow up")
         XCTAssertEqual(played, [], "a Task finishing is its parent's business")
     }
+
+    /// Main-thread cost: with sounds on and "mute when away" on (its default),
+    /// every hook event whose cue has no sound at all (PreToolUse,
+    /// PostToolUse, …) used to read the session lock flag — in production
+    /// `CGSessionCopyCurrentDictionary`, a WindowServer round trip — because
+    /// the hold was checked before the cue's own switch.
+    func testSilentToolHooksDoNotReadTheLockFlag() throws {
+        UserDefaults.standard.removeObject(forKey: SettingsKey.autoMuteWhenAway)
+        var probes = 0
+        SceneMuteMonitor.shared.resetForTesting()
+        SceneMuteMonitor.shared.lockProbe = { probes += 1; return false }
+        let appState = appStateWithFollowUps()
+        for n in 0..<10 {
+            appState.handleEvent(try event(["hook_event_name": "PreToolUse", "session_id": "p", "tool_name": "Read", "tool_use_id": "t\(n)"]))
+            appState.handleEvent(try event(["hook_event_name": "PostToolUse", "session_id": "p", "tool_name": "Read", "tool_use_id": "t\(n)"]))
+        }
+        XCTAssertEqual(played, [])
+        XCTAssertEqual(probes, 0, "20 silent tool hooks, \(probes) lock-flag reads")
+
+        // A cue the user would hear still asks.
+        appState.handleEvent(try event(["hook_event_name": "Stop", "session_id": "p"]))
+        XCTAssertEqual(played, ["8bit_complete"])
+        XCTAssertGreaterThan(probes, 0, "a sound that may play still checks the lock")
+    }
 }

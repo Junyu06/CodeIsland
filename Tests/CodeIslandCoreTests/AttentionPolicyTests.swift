@@ -599,19 +599,23 @@ final class AttentionPolicyTests: XCTestCase {
         XCTAssertEqual(reads, [], "no cue, no card, no push: nothing to look up")
 
         reads = []
-        _ = AttentionPolicy.decide(Self.hook("PreToolUse"), context: context(soundEnabled: false))
+        _ = AttentionPolicy.decide(Self.hook("Stop"), context: context(soundEnabled: false))
         XCTAssertEqual(reads, [], "with the master switch off nothing holds a sound back")
 
         reads = []
         _ = AttentionPolicy.decide(Self.hook("PreToolUse"), context: context())
-        XCTAssertEqual(reads, ["quietHours", "scene"], "the hold is read before the cue's own switch, as it always was")
+        XCTAssertEqual(reads, [], "a cue with no sound of its own reads neither the clock nor the lock state")
 
         reads = []
-        _ = AttentionPolicy.decide(Self.hook("PreToolUse"), context: context(muteWhenAway: false))
+        _ = AttentionPolicy.decide(Self.hook("Stop"), context: context())
+        XCTAssertEqual(reads, ["quietHours", "scene"], "a cue the user would hear asks what holds sounds back")
+
+        reads = []
+        _ = AttentionPolicy.decide(Self.hook("Stop"), context: context(muteWhenAway: false))
         XCTAssertEqual(reads, ["quietHours"], "the lock state is not read while 'mute when away' is off")
 
         reads = []
-        _ = AttentionPolicy.decide(Self.hook("PreToolUse"), context: context(quietHours: true))
+        _ = AttentionPolicy.decide(Self.hook("Stop"), context: context(quietHours: true))
         XCTAssertEqual(reads, ["quietHours"], "quiet hours already hold it")
 
         reads = []
