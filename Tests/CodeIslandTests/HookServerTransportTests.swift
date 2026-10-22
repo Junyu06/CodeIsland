@@ -477,14 +477,20 @@ final class HookServerTransportTests: XCTestCase {
         XCTAssertEqual(String(decoding: localAnswer.value ?? Data(), as: UTF8.self), "{}")
         localHook.close()
 
-        // One of the host's own goes: its socket takes a connection again.
+        // One of the host's own goes: its socket takes a connection again,
+        // once the island has seen it go.
         holding[0].close()
-        pump(for: 0.3)
-        let next = try XCTUnwrap(RawHook.connect(to: socketPath))
-        let answer = next.writeInBackground(Data(remotePayload("Stop", session: "after").utf8), thenRead: true)
-        pump(until: { answer.value != nil }, "no answer once a connection had closed")
-        XCTAssertEqual(String(decoding: answer.value ?? Data(), as: UTF8.self), "{}")
-        next.close()
+        var answered: Data?
+        let deadline = Date().addingTimeInterval(5)
+        while answered != Data("{}".utf8), Date() < deadline {
+            let next = try XCTUnwrap(RawHook.connect(to: socketPath))
+            let answer = next.writeInBackground(Data(remotePayload("Stop", session: "after").utf8), thenRead: true)
+            pump(until: { answer.value != nil }, "no answer once a connection had closed")
+            answered = answer.value
+            next.close()
+            if answered != Data("{}".utf8) { pump(for: 0.1) }
+        }
+        XCTAssertEqual(String(decoding: answered ?? Data(), as: UTF8.self), "{}", "the socket took no connection again")
     }
 
     /// A remote host may have so many requests waiting on an answer. One more
@@ -521,19 +527,20 @@ final class HookServerTransportTests: XCTestCase {
     }
 
     /// A remote host's unfinished requests share a budget of bytes: the
-    /// connection that would pass it is dropped at once.
+    /// connection that would pass it is dropped at once, the other read on.
     func testARemoteHostsUnfinishedRequestsShareABudget() throws {
         restartServer { $0.maxBufferedBytes = 100 }
         let first = try XCTUnwrap(RawHook.connect(to: socketPath))
         first.writeWithoutFinishing(String(repeating: " ", count: 80))
-        pump(for: 0.2)
         let second = try XCTUnwrap(RawHook.connect(to: socketPath))
         second.writeWithoutFinishing(String(repeating: " ", count: 40))
-        // Well inside the idle timeout (two minutes): only the budget ends it.
-        let dropped = second.readAnswerInBackground(timeout: 3)
-        pump(until: { dropped.value != nil }, timeout: 6, "a request past the host's budget was read on")
-        XCTAssertFalse(dropped.timedOut, "a request past the host's budget was read on")
-        XCTAssertEqual(dropped.value, Data())
+        // Well inside the idle timeout (two minutes): only the budget ends
+        // either — whichever the island read last.
+        let answers = [first, second].map { $0.readAnswerInBackground(timeout: 3) }
+        pump(until: { answers.allSatisfy { $0.value != nil } }, timeout: 6, "no answers")
+        let dropped = answers.filter { !$0.timedOut }
+        XCTAssertEqual(dropped.count, 1, "not one connection past the host's budget was dropped")
+        XCTAssertEqual(dropped.first?.value, Data())
         second.close()
         first.close()
     }
