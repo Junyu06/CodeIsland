@@ -42,7 +42,8 @@ extension AppState {
     /// successful one is cached per agent id because Codex recreates the
     /// SubagentState on every child turn.
     func maybeBackfillSubagentModel(sessionId: String, agentId: String, event: HookEvent) {
-        guard let session = sessions[sessionId],
+        // A remote child's transcript paths name files on its own host.
+        guard let session = sessions[sessionId], !session.isRemote,
               let subagent = session.subagents[agentId] else { return }
 
         if let cached = subagentModelObservations[sessionId]?[agentId] {

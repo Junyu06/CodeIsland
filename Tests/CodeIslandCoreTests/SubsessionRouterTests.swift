@@ -129,8 +129,10 @@ final class SubsessionRouterTests: XCTestCase {
     }
 
     func testSharedProcessIsGuessedOnlyOnTheHooksOwnHost() throws {
-        // A process id means nothing on another machine.
-        var remoteParent = subsessionCard(source: "codex", status: .running, cliPid: 7070)
+        // A process id means nothing on another machine. A remote card keeps
+        // its host's pid apart from `cliPid`, which names a process here.
+        var remoteParent = subsessionCard(source: "codex", status: .running)
+        remoteParent.remotePid = 7070
         remoteParent.remoteHostId = "devbox"
         let context = StubSubsessionContext(cards: [
             parent: subsessionCard(source: "codex", status: .running, cliPid: 7070),
@@ -143,7 +145,8 @@ final class SubsessionRouterTests: XCTestCase {
         XCTAssertEqual(try link(remote("devbox", codexThread()), context).parentCardId, "remote:devbox:remote-parent")
         XCTAssertNil(SubsessionRouter.link(in: remote("other-box", codexThread()), context: context), "nobody's child")
 
-        var opencode = subsessionCard(source: "opencode", status: .running, cliPid: 9090)
+        var opencode = subsessionCard(source: "opencode", status: .running)
+        opencode.remotePid = 9090
         opencode.remoteHostId = "devbox"
         let proxies = StubSubsessionContext(cards: ["remote:devbox:opencode-main": opencode])
         XCTAssertNil(try link(pluginProxy(), proxies).parentCardId)

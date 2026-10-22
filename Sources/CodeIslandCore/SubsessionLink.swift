@@ -195,7 +195,7 @@ public enum SubsessionCards {
             .filter { cardId, snap in
                 let snapSource = SessionSnapshot.normalizedSupportedSource(snap.source)
                 return snapSource == normalized
-                    && snap.cliPid == pid
+                    && snap.processId(onHost: remoteHostId) == pid
                     && isCard(cardId, onHost: remoteHostId)
                     && snap.lastActivity >= cutoff
                     && cardId != excludedCardId

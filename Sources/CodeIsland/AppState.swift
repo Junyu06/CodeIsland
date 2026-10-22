@@ -755,14 +755,17 @@ final class AppState {
         return refreshed
     }
 
+    /// A remote session's agent runs on its own host: no process here is
+    /// ever its own, to watch or to signal.
     private func setSessionProcessIdentity(_ process: ProcessIdentity, for sessionId: String) {
+        guard sessions[sessionId]?.isRemote != true else { return }
         sessions[sessionId]?.cliPid = process.pid
         sessions[sessionId]?.cliStartTime = process.startTime
     }
 
     private func shouldTerminateOrphanedProcess(sessionId: String, pid: pid_t) -> Bool {
         guard let session = sessions[sessionId] else { return true }
-        if session.isNativeAppMode { return false }
+        if session.isNativeAppMode || session.isRemote { return false }
         guard let source = SessionSnapshot.normalizedSupportedSource(session.source) else { return true }
         return !AgentProcessFinder.isNativeAppProcess(pid, source: source)
     }
@@ -778,6 +781,7 @@ final class AppState {
     }
 
     private func monitorProcess(sessionId: String, process: ProcessIdentity) {
+        guard sessions[sessionId]?.isRemote != true else { return }
         let attached = processMonitor.watch(sessionId: sessionId, process: process) { [weak self] in
             guard let self = self, self.sessions[sessionId] != nil else { return }
             self.handleProcessExit(sessionId: sessionId, exitedProcess: process)
@@ -1821,7 +1825,8 @@ final class AppState {
     /// rollout search, OpenCode's database), so it runs off the main actor,
     /// one at a time per card. A model a hook supplies meanwhile wins.
     private func maybeBackfillModel(for sessionId: String) {
-        guard let session = sessions[sessionId], session.model == nil else { return }
+        // A remote session's store and transcript are on its own host.
+        guard let session = sessions[sessionId], !session.isRemote, session.model == nil else { return }
         let now = Date()
         if let retryAt = modelReadRetryAt[sessionId], retryAt > now {
             return
@@ -3286,7 +3291,11 @@ final class AppState {
             // Never merge a discovery (CLI) session with an existing native app session —
             // they're fundamentally different even if they share source + cwd.
             let duplicateKey = sessions.first(where: { (_, existing) in
-                guard existing.source == info.source,
+                // A process found on this Mac is never a remote session, however
+                // its cwd reads: merged in, its pid and transcript would be this
+                // Mac's on the remote card.
+                guard !existing.isRemote,
+                      existing.source == info.source,
                       existing.cwd != nil, existing.cwd == info.cwd else { return false }
                 guard Self.discoveryAppModesMayRepresentSameSession(
                     existingIsNativeAppMode: existing.isNativeAppMode,
@@ -3515,7 +3524,12 @@ final class AppState {
             return false
         }
 
-        let candidates = sessions.map { (sessionId: $0.key, session: $0.value) }
+        // This Mac's rollouts and state DB know nothing of a remote thread, and
+        // its transcript path names a file on its own host; its hooks place it
+        // (CodexThreadSubsession).
+        let candidates = sessions
+            .filter { !$0.value.isRemote }
+            .map { (sessionId: $0.key, session: $0.value) }
         var transcriptMetadata: [String: CodexSubagentMetadata] = [:]
         var databaseLookupIds: Set<String> = []
 
@@ -3691,6 +3705,8 @@ final class AppState {
                     parent.termApp = candidate.session.termApp
                     parent.termBundleId = candidate.session.termBundleId
                     parent.transcriptPath = candidate.session.transcriptPath
+                    parent.remoteHostId = candidate.session.remoteHostId
+                    parent.remoteHostName = candidate.session.remoteHostName
                     parent.providerSessionId = parentId
                     // Closed ids only — parent is not actively working.
                     parent.status = .idle
@@ -3729,6 +3745,10 @@ final class AppState {
                 parent.termApp = candidate.session.termApp
                 parent.termBundleId = candidate.session.termBundleId
                 parent.transcriptPath = candidate.session.transcriptPath
+                // A remote Task's chat runs on the same host. Unmarked, the
+                // card would have that host's transcript path read here.
+                parent.remoteHostId = candidate.session.remoteHostId
+                parent.remoteHostName = candidate.session.remoteHostName
                 // Do not copy the Task/subagent process identity onto the parent chat.
                 parent.providerSessionId = parentId
                 parent.status = candidate.session.status == .idle ? .processing : candidate.session.status
@@ -4119,7 +4139,7 @@ final class AppState {
     @discardableResult
     private func separateMergedCodexSubagents() -> Bool {
         let parentCandidates = sessions.map { (sessionId: $0.key, session: $0.value) }
-        let childIds = Set(parentCandidates.flatMap { $0.session.subagents.keys })
+        let childIds = Set(parentCandidates.filter { !$0.session.isRemote }.flatMap { $0.session.subagents.keys })
         // One DB connection for the whole mode transition; never open SQLite
         // once per child (each open carries a busy timeout).
         let databaseRecords = CodexDiscovery.codexSpawnEdgeRecords(threadIds: childIds)
@@ -4158,6 +4178,7 @@ final class AppState {
                 child.remoteHostName = child.remoteHostName ?? parent.session.remoteHostName
                 child.cliPid = child.cliPid ?? parent.session.cliPid
                 child.cliStartTime = child.cliStartTime ?? parent.session.cliStartTime
+                child.remotePid = child.remotePid ?? parent.session.remotePid
                 child.status = subagent.status
                 child.currentTool = subagent.currentTool
                 child.toolDescription = subagent.toolDescription ?? subagent.agentType
@@ -4165,14 +4186,17 @@ final class AppState {
                 // Still the parent's child, on a card of its own: quiet.
                 child.parentSessionId = child.parentSessionId ?? parent.sessionId
 
-                let transcriptMetadata = child.transcriptPath.flatMap {
-                    CodexDiscovery.codexSubagentMetadata(inTranscriptPath: $0)
-                }
-                let metadata = transcriptMetadata ?? databaseRecords[agentId]?.metadata
+                // A remote child's rollout is on its own host: none of this
+                // Mac's rollouts, state DB or sessions folder is read for it.
+                let readsLocalStore = !parent.session.isRemote
+                let transcriptMetadata = readsLocalStore
+                    ? child.transcriptPath.flatMap { CodexDiscovery.codexSubagentMetadata(inTranscriptPath: $0) }
+                    : nil
+                let metadata = transcriptMetadata ?? (readsLocalStore ? databaseRecords[agentId]?.metadata : nil)
                 if child.sessionTitle == nil {
                     child.sessionTitle = metadata?.agentNickname ?? subagent.toolDescription ?? subagent.agentType
                 }
-                if child.transcriptPath == nil {
+                if readsLocalStore, child.transcriptPath == nil {
                     if let statePath = databaseRecords[agentId]?.transcriptPath,
                        FileManager.default.fileExists(atPath: statePath) {
                         child.transcriptPath = statePath
@@ -4187,7 +4211,7 @@ final class AppState {
                         )
                     }
                 }
-                if let transcriptPath = child.transcriptPath {
+                if readsLocalStore, let transcriptPath = child.transcriptPath {
                     let (model, messages) = CodexDiscovery.readRecentFromCodexTranscript(path: transcriptPath)
                     child.model = child.model ?? model
                     if !messages.isEmpty {

@@ -74,14 +74,21 @@ struct TerminalVisibilityDetector {
 
     /// Fast check: is the session's terminal app the frontmost application?
     /// Safe to call from the main thread — no AppleScript or subprocess calls.
+    ///
+    /// None of the checks look at a remote session: its terminal, tmux pane,
+    /// iTerm session, Kitty window or pid are its own host's, so asking this
+    /// Mac's terminals (and running their CLIs) about them answers nothing
+    /// about it. Can't tell — not visible, so nothing is suppressed.
     static func isTerminalFrontmostForSession(_ session: SessionSnapshot) -> Bool {
-        probe.isTerminalFrontmost(session)
+        guard !session.isRemote else { return false }
+        return probe.isTerminalFrontmost(session)
     }
 
     /// Full check: is the session's specific tab/pane currently visible?
     /// **Call from a background thread only** — AppleScript/CLI calls may block 50-200ms.
     static func isSessionTabVisible(_ session: SessionSnapshot) -> Bool {
-        probe.isSessionTabVisible(session)
+        guard !session.isRemote else { return false }
+        return probe.isSessionTabVisible(session)
     }
 
     /// Jump validation: did a click on this session land on it? Its tab is
@@ -89,6 +96,7 @@ struct TerminalVisibilityDetector {
     /// located, where the jump only raised the terminal.
     /// **Call from a background thread only**, like `isSessionTabVisible`.
     static func didJumpLand(_ session: SessionSnapshot) -> Bool {
+        guard !session.isRemote else { return false }
         let probe = self.probe
         if probe.isSessionTabVisible(session) { return true }
         return probe.isTerminalFrontmost(session) && probe.isSessionLocatable(session)

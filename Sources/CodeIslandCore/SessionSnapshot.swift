@@ -164,8 +164,12 @@ public struct SessionSnapshot: Sendable {
     /// CLAUDE_CODE_HOST_SESSION_ID) — what its `claude://code/continue` link
     /// takes to open that exact session instead of just raising the app.
     public var claudeDesktopSessionId: String?
-    public var cliPid: pid_t?            // CLI process PID (from bridge _ppid)
+    public var cliPid: pid_t?            // CLI process PID (from bridge _ppid); this Mac's sessions only
     public var cliStartTime: Date?       // Start time of the tracked CLI PID (guards PID reuse)
+    /// A remote session's agent process id on its own host (its hooks'
+    /// `_ppid`). It names no process on this Mac, so it is never `cliPid`:
+    /// only compared with other hooks from that host (`processId(onHost:)`).
+    public var remotePid: pid_t?
     /// UI harness (T3 Code, …) that spawned the CLI, found by walking the
     /// ancestry of `cliPid`. Resolved off the main actor and re-read rather
     /// than persisted: the harness may have restarted between runs. (#321)
@@ -686,6 +690,14 @@ public struct SessionSnapshot: Sendable {
     public var isRemote: Bool {
         guard let remoteHostId else { return false }
         return !remoteHostId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The agent's process id as hooks from `host` (nil: this Mac) report
+    /// it — nil when the session runs on another machine, where the same
+    /// number is a different process.
+    public func processId(onHost host: String?) -> pid_t? {
+        guard let host else { return isRemote ? nil : cliPid }
+        return isRemote && remoteHostId == host ? remotePid : nil
     }
 
     public var remoteDisplayName: String? {
@@ -1549,12 +1561,7 @@ private func applyHookEvent(
             sessions[sessionId]?.model = model
             sessions[sessionId]?.modelReportedAt = Date()
         }
-        if let newPid = hookProcessId(event) {
-            if sessions[sessionId]?.cliPid != newPid {
-                sessions[sessionId]?.cliPid = newPid
-                sessions[sessionId]?.cliStartTime = nil
-            }
-        }
+        applyHookProcessId(into: &sessions, sessionId: sessionId, event: event)
         if let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) {
             sessions[sessionId]?.source = source
         }
@@ -1806,6 +1813,18 @@ public func fillMissingParentMetadataFromSubagentEvent(
     sessionId: String,
     event: HookEvent
 ) {
+    // The host is the card's as much as the child's: a remote host's hook
+    // only ever describes a session on that host. Left out, a card that a
+    // remote subagent's hook created looked local to every check that keeps
+    // a remote session's pids, paths and terminal handles off this Mac.
+    if sessions[sessionId]?.remoteHostId == nil,
+       let remoteHostId = SubsessionRouter.remoteHostId(in: event.rawJSON) {
+        sessions[sessionId]?.remoteHostId = remoteHostId
+    }
+    if sessions[sessionId]?.remoteHostName == nil,
+       let remoteHostName = event.rawJSON["_remote_host_name"] as? String, !remoteHostName.isEmpty {
+        sessions[sessionId]?.remoteHostName = remoteHostName
+    }
     // Default SessionSnapshot.source is "claude". Upgrade when the hook carries a
     // real source so merge-first Cursor Tasks are not branded as Claude forever.
     if sessions[sessionId]?.source == "claude",
@@ -1850,10 +1869,7 @@ public func fillMissingParentMetadataFromSubagentEvent(
         sessions[sessionId]?.transcriptPath = transcriptPath
     }
 
-    if sessions[sessionId]?.cliPid == nil,
-       let pid = hookProcessId(event) {
-        sessions[sessionId]?.cliPid = pid
-    }
+    applyHookProcessId(into: &sessions, sessionId: sessionId, event: event, fillingOnly: true)
 
     applyHerdrRoute(into: &sessions, sessionId: sessionId, event: event, fillingOnly: true)
     // A subagent runs inside the parent's CLI, so it carries the same id.
@@ -1895,6 +1911,34 @@ private func applyHerdrRoute(
     if let binary = event.rawJSON["_herdr_bin_path"] as? String, !binary.isEmpty,
        !fillingOnly || sessions[sessionId]?.herdrBinaryPath == nil {
         sessions[sessionId]?.herdrBinaryPath = binary
+    }
+}
+
+/// Records the process the hook's agent runs as (`_ppid`). `fillingOnly`
+/// keeps one the card already has — a subagent's hook only fills gaps.
+///
+/// On this Mac that is the CLI the island watches (`cliPid`). A remote
+/// host's is kept apart (`remotePid`), for telling that host's sessions
+/// apart only: as `cliPid` it would have the island watch, probe and, on
+/// orphan cleanup, SIGTERM whatever process has that number here.
+private func applyHookProcessId(
+    into sessions: inout [String: SessionSnapshot],
+    sessionId: String,
+    event: HookEvent,
+    fillingOnly: Bool = false
+) {
+    guard let pid = hookProcessId(event) else { return }
+    if SubsessionRouter.remoteHostId(in: event.rawJSON) != nil {
+        if !fillingOnly || sessions[sessionId]?.remotePid == nil {
+            sessions[sessionId]?.remotePid = pid
+        }
+    } else if fillingOnly {
+        if sessions[sessionId]?.cliPid == nil {
+            sessions[sessionId]?.cliPid = pid
+        }
+    } else if sessions[sessionId]?.cliPid != pid {
+        sessions[sessionId]?.cliPid = pid
+        sessions[sessionId]?.cliStartTime = nil
     }
 }
 
@@ -2023,12 +2067,7 @@ public func extractMetadata(into sessions: inout [String: SessionSnapshot], sess
     if let env = event.rawJSON["_env"] as? [String: String] {
         applyEnvMetadata(into: &sessions, sessionId: sessionId, env: env)
     }
-    if let newPid = hookProcessId(event) {
-        if sessions[sessionId]?.cliPid != newPid {
-            sessions[sessionId]?.cliPid = newPid
-            sessions[sessionId]?.cliStartTime = nil
-        }
-    }
+    applyHookProcessId(into: &sessions, sessionId: sessionId, event: event)
     if let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) {
         sessions[sessionId]?.source = source
     } else if sessions[sessionId]?.source == "claude",

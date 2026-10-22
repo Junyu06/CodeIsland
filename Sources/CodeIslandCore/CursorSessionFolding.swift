@@ -305,7 +305,7 @@ public enum CursorSubsessionRouter {
             cards.compactMap { sessionId, snap in
                 let snapSource = SessionSnapshot.normalizedSupportedSource(snap.source)
                 guard snapSource == normalized,
-                      snap.cliPid == pid,
+                      snap.processId(onHost: remoteHostId) == pid,
                       SubsessionCards.isCard(sessionId, onHost: remoteHostId),
                       sessionId != excludedSessionId else {
                     return nil
