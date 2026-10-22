@@ -7923,6 +7923,7 @@ final class AppState {
         guard let source = payload["source"] as? [String: Any] else {
             return .root
         }
+        let threadId = (payload["id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let payloadParent = (payload["parent_thread_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         // Unit variants (`review`, `compact`, `memory_consolidation`) serialize as
         // a bare string and only record their parent on the payload. Without
@@ -7932,7 +7933,8 @@ final class AppState {
             return .subagent(CodexSubagentMetadata(
                 parentThreadId: payloadParent,
                 agentType: label,
-                agentNickname: nil
+                agentNickname: nil,
+                threadId: threadId
             ))
         }
         guard let subagent = source["subagent"] as? [String: Any],
@@ -7952,7 +7954,8 @@ final class AppState {
         return .subagent(CodexSubagentMetadata(
             parentThreadId: parent,
             agentType: agentType,
-            agentNickname: nickname
+            agentNickname: nickname,
+            threadId: threadId
         ))
     }
 
@@ -8060,7 +8063,8 @@ final class AppState {
                         metadata: CodexSubagentMetadata(
                             parentThreadId: parent,
                             agentType: agentType,
-                            agentNickname: nickname
+                            agentNickname: nickname,
+                            threadId: child
                         ),
                         status: nonEmptySQLiteColumnString(statement, index: 2),
                         transcriptPath: nonEmptySQLiteColumnString(statement, index: 6)

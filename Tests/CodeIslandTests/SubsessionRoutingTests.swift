@@ -354,6 +354,41 @@ final class SubsessionRoutingTests: XCTestCase {
         }
     }
 
+    /// Codex has filed a subagent's hooks under its parent's session id with
+    /// no `agent_id`, naming only the subagent's rollout. As they came they
+    /// were the parent's own: the subagent's Stop ended the parent's turn —
+    /// completion card, chime and push while the parent still worked. In
+    /// every mode they go by the subagent's own id on the parent's card.
+    func testThreadFiledUnderItsParentWithoutAnAgentIdNeverEndsTheParentsTurn() throws {
+        let parentPath = try writeRollout("parent.jsonl", sessionMeta: rootRollout(parentThread))
+        let childPath = try writeRollout("child.jsonl", sessionMeta: childRollout(childThread, parent: parentThread))
+        for mode in ["separate", "merge", "hide"] {
+            setMode(mode)
+            played = []
+            let appState = AppState()
+            let server = HookServer(appState: appState)
+            try deliver(codex("UserPromptSubmit", thread: parentThread, transcript: parentPath, ["prompt": "fan out"]), to: appState, server: server)
+            let tool = try deliver(codex("PreToolUse", thread: parentThread, transcript: childPath, ["tool_name": "exec_command"]), to: appState, server: server)
+            try deliver(codex("Stop", thread: parentThread, transcript: childPath, ["last_assistant_message": "child done"]), to: appState, server: server)
+
+            XCTAssertNotEqual(appState.sessions[parentThread]?.status, .idle, "\(mode): the child's Stop ended the parent's turn")
+            XCTAssertNil(appState.justCompletedSessionId, mode)
+            XCTAssertEqual(played, [], mode)
+            if mode == "hide" {
+                XCTAssertNotNil(tool.response, "hidden")
+            } else {
+                XCTAssertEqual(tool.sessionId, parentThread, mode)
+                XCTAssertEqual(tool.raw["agent_id"] as? String, childThread, mode)
+                XCTAssertEqual(tool.raw["agent_type"] as? String, "worker", mode)
+            }
+            XCTAssertNil(appState.sessions[parentThread]?.parentSessionId, mode)
+
+            try deliver(codex("Stop", thread: parentThread, transcript: parentPath, ["last_assistant_message": "all done"]), to: appState, server: server)
+            XCTAssertEqual(appState.justCompletedSessionId, parentThread, "\(mode): the parent's own Stop still ends its turn")
+            XCTAssertEqual(played, ["8bit_complete"], mode)
+        }
+    }
+
     /// Current Codex files a thread's hooks under the root's session id. In
     /// Hide its SubagentStart is hidden too, so a request it is blocked on
     /// starts its row on the root's card: under the thread's own role.

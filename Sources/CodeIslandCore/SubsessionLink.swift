@@ -69,10 +69,16 @@ public struct SubsessionLink: Equatable, Sendable {
     /// they always have; Show separately does not, since it is the default
     /// and a wrong guess would silence a session the user started.
     public let isInferred: Bool
-    /// The agent itself filed the hook under the parent's session, as
-    /// subagent ``agentId`` (Codex's own subagent hooks). It already sits
-    /// where Merge would put it.
+    /// The agent itself filed the hook under the parent's session
+    /// (``parentCardId``) rather than the child's own: it already sits where
+    /// Merge would put it. Codex's own subagent hooks name the child there,
+    /// as their `agent_id`; one that does not is ``isFiledAsParentsOwn``.
     public let isProviderFolded: Bool
+    /// With ``isProviderFolded``: the hook names no child (no `agent_id`;
+    /// Codex has filed a thread it does not report as a subagent that way),
+    /// so as it came it is the parent's own event — the child's Stop would
+    /// end the parent's turn. The router names it ``agentId`` where it sits.
+    public let isFiledAsParentsOwn: Bool
 
     public init(
         kind: Kind,
@@ -82,7 +88,8 @@ public struct SubsessionLink: Equatable, Sendable {
         parentAgentId: String? = nil,
         agentType: String? = nil,
         isInferred: Bool = false,
-        isProviderFolded: Bool = false
+        isProviderFolded: Bool = false,
+        isFiledAsParentsOwn: Bool = false
     ) {
         self.kind = kind
         self.childCardId = childCardId
@@ -92,6 +99,7 @@ public struct SubsessionLink: Equatable, Sendable {
         self.agentType = agentType
         self.isInferred = isInferred
         self.isProviderFolded = isProviderFolded
+        self.isFiledAsParentsOwn = isFiledAsParentsOwn
     }
 }
 

@@ -481,6 +481,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         XCTAssertEqual(metadata.parentThreadId, "parent")
         XCTAssertEqual(metadata.agentType, "worker")
         XCTAssertEqual(metadata.agentNickname, "Galileo")
+        XCTAssertEqual(metadata.threadId, "child")
     }
 
     func testCodexGuardianReviewMetadataReadsTopLevelParentThread() throws {
@@ -498,6 +499,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         let metadata = try XCTUnwrap(AppState.codexSubagentMetadata(inTranscriptPath: file.path))
 
         XCTAssertEqual(metadata.parentThreadId, "parent-thread")
+        XCTAssertEqual(metadata.threadId, "guardian-thread")
         XCTAssertEqual(metadata.agentType, "guardian")
         XCTAssertNil(metadata.agentNickname)
     }

@@ -6,11 +6,14 @@ public struct CodexSubagentMetadata: Equatable, Sendable {
     public let parentThreadId: String
     public let agentType: String?
     public let agentNickname: String?
+    /// The thread's own id (`session_meta.payload.id`), when the source names it.
+    public let threadId: String?
 
-    public init(parentThreadId: String, agentType: String?, agentNickname: String?) {
+    public init(parentThreadId: String, agentType: String?, agentNickname: String?, threadId: String? = nil) {
         self.parentThreadId = parentThreadId
         self.agentType = agentType
         self.agentNickname = agentNickname
+        self.threadId = threadId
     }
 }
 
@@ -110,14 +113,17 @@ public final class CodexRolloutCache {
 
 /// Codex's half of Agent Sub-Sessions: the parent of a Codex subagent thread.
 ///
-/// Codex has filed a subagent thread's hooks two ways:
+/// Codex has filed a subagent thread's hooks three ways:
 /// - under the thread's own `session_id`, with nothing naming its parent:
 ///   the parent comes from the thread's rollout (`session_meta`), or — while
 ///   that is not readable yet — from the parent's CLI process, which runs
 ///   the child;
 /// - under the root session's id, with the thread as `agent_id` and its role
 ///   as `agent_type` (current Codex): the hook already sits on the parent's
-///   card as a subagent.
+///   card as a subagent;
+/// - under its parent's id with nothing naming the thread but its rollout
+///   (a thread Codex does not report as a subagent): the hook sits on the
+///   parent's card as the parent's own, until the router names the thread.
 public enum CodexThreadSubsession {
     public static func link(
         in raw: [String: Any],
@@ -160,15 +166,22 @@ public enum CodexThreadSubsession {
         }
 
         // The rollout is a subagent's, yet the hook is filed under that
-        // subagent's parent with no `agent_id` (a thread Codex does not
-        // report as a subagent): the hook already sits on the parent's card.
-        if parentCardId == childCardId {
+        // subagent's parent (whether or not its card exists yet) with no
+        // `agent_id`: a thread Codex does not report as a subagent. It sits
+        // on the parent's card, but as the parent's own event: the thread's
+        // Stop would end the parent's turn. It goes by the thread's own id.
+        if let metadata,
+           parentCardId == childCardId
+            || HookEvent.cardSessionId(forRawSessionId: metadata.parentThreadId, in: raw) == childCardId {
+            let threadId = metadata.threadId ?? sessionId
             return SubsessionLink(
                 kind: .codexThread,
-                childCardId: childCardId,
-                agentId: sessionId,
+                childCardId: HookEvent.cardSessionId(forRawSessionId: threadId, in: raw),
+                agentId: threadId,
                 parentCardId: childCardId,
-                isProviderFolded: true
+                agentType: metadata.agentType,
+                isProviderFolded: true,
+                isFiledAsParentsOwn: true
             )
         }
 

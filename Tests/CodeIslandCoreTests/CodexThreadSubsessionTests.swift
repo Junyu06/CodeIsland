@@ -81,22 +81,70 @@ final class CodexThreadSubsessionTests: XCTestCase {
 
     func testRolloutOfAThreadFiledUnderItsParentWithoutAnAgentId() throws {
         // Codex filed the hook under the root's id with no `agent_id`, yet it
-        // ran in a subagent: it already sits on the root's card. Never a
-        // link from the root's card to itself, which would silence it.
+        // ran in a subagent: it already sits on the root's card, but as the
+        // root's own event, so the thread's Stop would end the root's turn.
+        // In every mode it goes by the thread's own id there. Never a link
+        // from the root's card to itself, which would silence it.
+        let named = CodexSubagentMetadata(
+            parentThreadId: "parent-thread", agentType: "worker", agentNickname: "Ohm", threadId: "child-thread"
+        )
         let context = StubSubsessionContext(
             cards: ["parent-thread": subsessionCard(source: "codex", providerSessionId: "parent-thread")],
-            rollouts: [rollout: .subagent(metadata)]
+            rollouts: [rollout: .subagent(named)]
+        )
+        let filed = hook(["session_id": "parent-thread"])
+        let link = try XCTUnwrap(CodexThreadSubsession.link(in: filed, context: context))
+        XCTAssertTrue(link.isProviderFolded)
+        XCTAssertTrue(link.isFiledAsParentsOwn)
+        XCTAssertEqual(link.agentId, "child-thread", "the rollout's own thread")
+        XCTAssertEqual(link.parentCardId, "parent-thread")
+
+        func placement(_ mode: SubsessionMode, blocking: Bool = false) -> SubsessionPlacement {
+            SubsessionRouter.placement(for: link, mode: mode, cards: context.cards, isBlockingRequest: { blocking })
+        }
+        XCTAssertEqual(placement(.separate), .fold(into: "parent-thread"))
+        XCTAssertEqual(placement(.merge), .fold(into: "parent-thread"))
+        XCTAssertEqual(placement(.hide), .hidden)
+        XCTAssertEqual(placement(.hide, blocking: true), .fold(into: "parent-thread"), "a request still reaches the user")
+
+        for mode in [SubsessionMode.separate, .merge] {
+            var raw = filed
+            XCTAssertEqual(
+                SubsessionRouter.route(&raw, link: link, mode: mode, cards: context.cards, isBlockingRequest: { false }),
+                .rewritten
+            )
+            XCTAssertEqual(raw["session_id"] as? String, "parent-thread", "\(mode)")
+            XCTAssertEqual(raw["agent_id"] as? String, "child-thread", "\(mode)")
+            XCTAssertEqual(raw["agent_type"] as? String, "worker", "\(mode)")
+            XCTAssertNil(SubsessionRouter.parentCardId(in: raw), "\(mode)")
+        }
+
+        // A rollout that names no thread: the hook still goes by an id of
+        // its own on the card, never as the root's own event.
+        context.rollouts[rollout] = .subagent(metadata)
+        let unnamed = try XCTUnwrap(CodexThreadSubsession.link(in: filed, context: context))
+        XCTAssertEqual(unnamed.agentId, "parent-thread")
+        XCTAssertEqual(
+            SubsessionRouter.placement(for: unnamed, mode: .merge, cards: context.cards, isBlockingRequest: { false }),
+            .fold(into: "parent-thread")
+        )
+    }
+
+    func testThreadFiledUnderAParentWithNoCardYetIsStillNamed() throws {
+        // The rollout names the session the hook is filed under as the
+        // thread's parent: the hook is the thread's even before that card
+        // exists, whatever else shares the process.
+        let named = CodexSubagentMetadata(
+            parentThreadId: "parent-thread", agentType: "worker", agentNickname: nil, threadId: "child-thread"
+        )
+        let context = StubSubsessionContext(
+            cards: ["busy-sibling": subsessionCard(source: "codex", status: .running, cliPid: 7070)],
+            rollouts: [rollout: .subagent(named)]
         )
         let link = try XCTUnwrap(CodexThreadSubsession.link(in: hook(["session_id": "parent-thread"]), context: context))
-        XCTAssertTrue(link.isProviderFolded)
-        XCTAssertEqual(
-            SubsessionRouter.placement(for: link, mode: .separate, cards: context.cards, isBlockingRequest: { false }),
-            .unchanged
-        )
-        XCTAssertEqual(
-            SubsessionRouter.placement(for: link, mode: .hide, cards: context.cards, isBlockingRequest: { false }),
-            .hidden
-        )
+        XCTAssertTrue(link.isFiledAsParentsOwn)
+        XCTAssertEqual(link.parentCardId, "parent-thread")
+        XCTAssertEqual(link.agentId, "child-thread")
     }
 
     func testRemoteThreadsRolloutIsNeverReadHere() {

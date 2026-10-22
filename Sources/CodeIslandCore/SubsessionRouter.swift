@@ -105,16 +105,16 @@ public enum SubsessionRouter {
         isBlockingRequest: () -> Bool
     ) -> SubsessionPlacement {
         if link.isProviderFolded {
-            // Show separately and Merge leave it where the agent filed it;
+            guard let parent = link.parentCardId else { return .unchanged }
             // Hide drops it until a request it is blocked on has put the
             // child on the card.
-            guard mode == .hide,
-                  let parent = link.parentCardId,
-                  cards[parent]?.subagents[link.agentId] == nil,
-                  !isBlockingRequest() else {
-                return .unchanged
+            if mode == .hide, cards[parent]?.subagents[link.agentId] == nil, !isBlockingRequest() {
+                return .hidden
             }
-            return .hidden
+            // Show separately and Merge leave it where the agent filed it.
+            // One that names no child is folded where it sits, which names
+            // it: as it came it would be the parent's own event.
+            return link.isFiledAsParentsOwn ? .fold(into: parent) : .unchanged
         }
 
         // A plugin proxy reports its agent's own turn a second way (see
@@ -196,8 +196,9 @@ public enum SubsessionRouter {
         case .fold(let host):
             if fold(&raw, link: link, into: host) { return .rewritten }
             // The payload cannot address that card: the child keeps one of
-            // its own.
-            guard case .ownCard(let parent) = ownCard(link, mode: mode) else { return .unchanged }
+            // its own — or, filed under its parent's session, stays there.
+            guard !link.isProviderFolded,
+                  case .ownCard(let parent) = ownCard(link, mode: mode) else { return .unchanged }
             return stamp(&raw, parent: parent) ? .rewritten : .unchanged
         }
     }
