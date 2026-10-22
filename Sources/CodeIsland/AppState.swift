@@ -1879,7 +1879,16 @@ final class AppState {
         // Now that the event has settled: does the user hear about it, and
         // how. One decision, carried out in the order the outlets always ran
         // in — the push, the completion, then the sound.
-        let attention = decideAttention(.hookEvent(reduction.facts), sessionId: sessionId, subject: attentionSubject)
+        //
+        // A card the Cursor fold above just moved into its parent's (or
+        // dropped) was a Task's: its turn is its parent's business, like a
+        // child's — no chime, no completion card for a card that is gone, no
+        // push as the user's own turn, nothing to follow up.
+        var subject = attentionSubject
+        if sessions[sessionId] == nil {
+            subject.isChild = true
+        }
+        let attention = decideAttention(.hookEvent(reduction.facts), sessionId: sessionId, subject: subject)
         pushHookEvent(attention.push, facts: reduction.facts, sessionId: sessionId)
         announceCompletion(attention, sessionId: sessionId)
         for effect in reduction.effects {

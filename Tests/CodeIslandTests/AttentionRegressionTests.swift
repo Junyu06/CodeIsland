@@ -121,4 +121,46 @@ final class AttentionRegressionTests: XCTestCase {
         XCTAssertEqual(appState.sessions["P"]?.lastTurnFailed, false, "the parent's turn finished fine")
         XCTAssertEqual(PushNotifier.shared.lastDecision, .sent([.bark]), "the parent's completion is pushed")
     }
+
+    /// Merge mode: a Cursor Task fires Claude Code's hooks (no `--source`, no
+    /// transcript), the index knows its transcript, and the Cursor fold in
+    /// `handleEvent` rebrands and drops the card within the same event. Its
+    /// Stop is a Task's turn end, yet it used to ring "done", push a
+    /// completion as the user's own turn (isSubagent false), pop a completion
+    /// card for a session that no longer exists, and start a follow-up for it.
+    func testAFoldedCursorTasksStopIsNotAnnouncedAsTheUsersTurn() async throws {
+        UserDefaults.standard.set("merge", forKey: SettingsKey.pluginSessionMode)
+        let previousScanner = AppState.cursorSubagentIndexScanner
+        defer { AppState.cursorSubagentIndexScanner = previousScanner }
+        let parentId = "e1247fd5-d9a0-48ef-8457-0304606b1833"
+        let childId = "2528cb91-6379-48f2-aff8-40f4b804dafa"
+        let childTranscript = "/Users/u/.cursor/projects/x/agent-transcripts/\(parentId)/subagents/\(childId).jsonl"
+        AppState.cursorSubagentIndexScanner = {
+            CursorSubagentTranscriptIndex(pathsBySessionId: [childId: [childTranscript]], builtAt: Date())
+        }
+        let appState = appStateWithFollowUps()
+        var parent = SessionSnapshot()
+        parent.source = "cursor"
+        parent.status = .running
+        parent.providerSessionId = parentId
+        parent.transcriptPath = "/Users/u/.cursor/projects/x/agent-transcripts/\(parentId)/\(parentId).jsonl"
+        appState.sessions[parentId] = parent
+        var ghost = SessionSnapshot()
+        ghost.source = "claude"
+        ghost.status = .running
+        appState.sessions[childId] = ghost
+        appState.applyCursorSubsessionModeToKnownSessions()
+        await waitUntil("index never folded the ghost") { appState.sessions[childId] == nil }
+
+        appState.handleEvent(try event(["hook_event_name": "UserPromptSubmit", "session_id": childId, "prompt": "task"]))
+        XCTAssertEqual(played, [], "a Task starting is its parent's business too")
+        PushNotifier.shared.resetForTesting()
+        appState.handleEvent(try event(["hook_event_name": "Stop", "session_id": childId, "last_assistant_message": "task done"]))
+
+        XCTAssertNil(appState.sessions[childId], "precondition: the fold dropped the Task card in the same event")
+        XCTAssertNil(appState.justCompletedSessionId, "no completion card for a card that no longer exists")
+        XCTAssertNil(PushNotifier.shared.lastDecision, "a Task's turn end is not pushed as the user's")
+        XCTAssertTrue(appState.followUps.scheduler.trackedKeys.isEmpty, "nothing to follow up")
+        XCTAssertEqual(played, [], "a Task finishing is its parent's business")
+    }
 }

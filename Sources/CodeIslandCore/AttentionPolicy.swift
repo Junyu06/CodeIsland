@@ -371,8 +371,9 @@ public struct HookEventFacts: Equatable, Sendable {
 
 /// What the rules read about the session a moment happened to.
 public struct AttentionSubject: Equatable, Sendable {
-    /// The session is a child another agent spawned, working for its parent
-    /// (`SessionSnapshot.parentSessionId`).
+    /// The session is a child another agent spawned, working for its parent:
+    /// it names one (`SessionSnapshot.parentSessionId`), or the app just
+    /// folded its card into its parent's.
     public var isChild: Bool
     /// The user stopped the session's turn (Esc / Ctrl-C).
     public var interrupted: Bool
