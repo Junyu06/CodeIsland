@@ -1891,9 +1891,6 @@ private func claudeDesktopSessionId(in event: HookEvent) -> String? {
 }
 
 private func shouldReopenSubagentOnPrompt(event: HookEvent, session: SessionSnapshot?) -> Bool {
-    if (event.rawJSON["_cursor_subagent"] as? Bool) == true {
-        return true
-    }
     // A child session folded into its parent's card (a Cursor Task, a Codex
     // thread, a pi-subagents child) starts every turn with a prompt, and none
     // sends a SubagentStart: one sent after its last Stop is a new turn of
@@ -1916,7 +1913,7 @@ private func isCodexSubagentEvent(_ event: HookEvent, session: SessionSnapshot?)
 
 /// Whether folded-child prompt/response text should appear on the parent card.
 private func shouldSurfaceCursorSubagentChat(event: HookEvent, session: SessionSnapshot?) -> Bool {
-    if (event.rawJSON["_cursor_subagent"] as? Bool) == true {
+    if SubsessionRouter.foldedKind(of: event) == .cursorTask {
         return true
     }
     return CursorSubsessionRouter.isCursorFamilySource(

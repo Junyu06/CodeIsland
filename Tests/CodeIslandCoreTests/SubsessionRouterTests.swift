@@ -7,11 +7,25 @@ import XCTest
 final class SubsessionRouterTests: XCTestCase {
     private let parent = "parent-session"
     private let child = "child-session"
+    private let cursorChat = "e1247fd5-d9a0-48ef-8457-0304606b1833"
+    private let cursorTask = "2528cb91-6379-48f2-aff8-40f4b804dafa"
+
+    private var cursorTranscript: String {
+        "/Users/u/.cursor/projects/x/agent-transcripts/\(cursorChat)/\(cursorChat).jsonl"
+    }
 
     // MARK: - Payloads, one per kind of evidence
 
     private func declared(_ event: String = "PreToolUse") -> [String: Any] {
         ["hook_event_name": event, "session_id": child, "_source": "pi", DeclaredSubsession.parentKey: parent]
+    }
+
+    private func cursorByTranscript(_ event: String = "beforeReadFile") -> [String: Any] {
+        ["hook_event_name": event, "session_id": cursorTask, "_source": "cursor", "transcript_path": cursorTranscript]
+    }
+
+    private func cursorByProcess(_ event: String = "beforeReadFile") -> [String: Any] {
+        ["hook_event_name": event, "session_id": cursorTask, "_source": "cursor", "_ppid": 4242]
     }
 
     // MARK: - Helpers
@@ -48,12 +62,59 @@ final class SubsessionRouterTests: XCTestCase {
         XCTAssertEqual(try placement(declared("PermissionRequest"), .hide, withParent, blocking: true), .ownCard(linkedTo: parent))
     }
 
+    func testCursorTaskNamedByItsTranscriptInEveryMode() throws {
+        let context = StubSubsessionContext()
+        XCTAssertEqual(try placement(cursorByTranscript(), .separate, context), .ownCard(linkedTo: cursorChat))
+        XCTAssertEqual(
+            try placement(cursorByTranscript(), .merge, context), .fold(into: cursorChat),
+            "the transcript names the chat's own session id: its card may be created"
+        )
+        XCTAssertEqual(try placement(cursorByTranscript(), .hide, context), .hidden)
+    }
+
+    func testCursorTaskFoundByItsIdeProcessInEveryMode() throws {
+        var chat = subsessionCard(source: "cursor", status: .running, transcriptPath: cursorTranscript, cliPid: 4242)
+        chat.providerSessionId = cursorChat
+        let context = StubSubsessionContext(cards: [cursorChat: chat])
+        let guess = try link(cursorByProcess(), context)
+        XCTAssertTrue(guess.isInferred)
+        XCTAssertEqual(guess.parentCardId, cursorChat)
+        XCTAssertEqual(try placement(cursorByProcess(), .separate, context), .unchanged, "Show separately does not act on a guess")
+        XCTAssertEqual(try placement(cursorByProcess(), .merge, context), .fold(into: cursorChat))
+        XCTAssertEqual(try placement(cursorByProcess(), .hide, context), .hidden)
+    }
+
+    func testHookOfASessionNobodySpawnedHasNoLink() {
+        let context = StubSubsessionContext()
+        XCTAssertNil(SubsessionRouter.link(in: ["hook_event_name": "Stop", "session_id": parent], context: context))
+        XCTAssertNil(SubsessionRouter.link(in: [
+            "hook_event_name": "Stop", "session_id": cursorChat, "_source": "cursor", "transcript_path": cursorTranscript,
+        ], context: context))
+    }
+
     // MARK: - A child stays where it is
 
     func testChildWithACardOfItsOwnKeepsItWhateverTheMode() throws {
         let context = StubSubsessionContext(cards: [parent: subsessionCard(source: "pi"), child: subsessionCard(source: "pi")])
         for mode in [SubsessionMode.merge, .hide] {
             XCTAssertEqual(try placement(declared(), mode, context), .ownCard(linkedTo: parent), "\(mode)")
+        }
+    }
+
+    func testFoldedChildFollowsItsRowWhateverTheModeOrEvidence() throws {
+        var host = subsessionCard(source: "cursor", status: .running)
+        var row = SubagentState(agentId: cursorTask, agentType: "cursor-subagent")
+        row.subsessionKind = .cursorTask
+        host.subagents[cursorTask] = row
+        // Two chats on the IDE process: the `_ppid` fallback can no longer
+        // single one out, but the Task already lives on `host`.
+        let context = StubSubsessionContext(cards: [
+            "chat-a": host,
+            "chat-b": subsessionCard(source: "cursor", status: .running, cliPid: 4242),
+            "chat-c": subsessionCard(source: "cursor", status: .running, cliPid: 4242),
+        ])
+        for mode in [SubsessionMode.separate, .merge, .hide] {
+            XCTAssertEqual(try placement(cursorByProcess(), mode, context), .fold(into: "chat-a"), "\(mode)")
         }
     }
 
@@ -103,7 +164,18 @@ final class SubsessionRouterTests: XCTestCase {
 
     // MARK: - Resolution order
 
+    func testDeclaredParentBeatsEveryOtherResolver() throws {
+        var raw = cursorByTranscript()
+        raw[DeclaredSubsession.parentKey] = parent
+        XCTAssertEqual(try link(raw, StubSubsessionContext()).kind, .declared)
+    }
+
     func testSessionIsNeverItsOwnParent() {
+        // A Task card that reused the chat's id as its provider session id.
+        var task = subsessionCard(source: "cursor")
+        task.providerSessionId = cursorChat
+        let context = StubSubsessionContext(cards: [cursorTask: task])
+        XCTAssertEqual(SubsessionRouter.link(in: cursorByTranscript(), context: context)?.parentCardId, cursorChat)
         XCTAssertNil(DeclaredSubsession.link(in: ["session_id": child, DeclaredSubsession.parentKey: child]))
     }
 
@@ -113,6 +185,24 @@ final class SubsessionRouterTests: XCTestCase {
         ]), "linked")
         XCTAssertEqual(SubsessionRouter.parentCardId(in: ["session_id": child, DeclaredSubsession.parentKey: parent]), parent)
         XCTAssertNil(SubsessionRouter.parentCardId(in: ["session_id": child, SubsessionRouter.linkedParentKey: " "]))
+    }
+
+    func testProcessIdOutsidePidRangeIsIgnored() {
+        XCTAssertEqual(SubsessionRouter.positivePpid(in: ["_ppid": "4242"]), 4242)
+        XCTAssertEqual(SubsessionRouter.positivePpid(in: ["_ppid": NSNumber(value: 4242)]), 4242)
+        XCTAssertNil(SubsessionRouter.positivePpid(in: ["_ppid": "99999999999"]))
+        XCTAssertNil(SubsessionRouter.positivePpid(in: ["_ppid": NSNumber(value: Int64(1) << 40)]))
+        XCTAssertNil(SubsessionRouter.positivePpid(in: ["_ppid": 0]))
+        // A malformed one never reaches a PID comparison, which trapped on it.
+        let context = StubSubsessionContext(cards: [
+            cursorChat: subsessionCard(source: "cursor", status: .running, cliPid: 4242),
+            parent: subsessionCard(source: "codex", status: .running, cliPid: 4242),
+        ])
+        for source in ["cursor", "codex"] {
+            XCTAssertNil(SubsessionRouter.link(in: [
+                "hook_event_name": "PreToolUse", "session_id": cursorTask, "_source": source, "_ppid": "99999999999",
+            ], context: context), source)
+        }
     }
 
     func testUnknownSettingReadsAsShowSeparately() {

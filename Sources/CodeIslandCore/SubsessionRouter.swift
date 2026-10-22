@@ -62,6 +62,7 @@ public enum SubsessionRouter {
         // second-guess it.
         let link = DeclaredSubsession.link(in: raw)
             ?? foldedLink(in: raw, cards: context.cards)
+            ?? CursorSubsessionRouter.link(in: raw, context: context, now: now)
         // A session cannot be its own parent.
         guard let link, link.isProviderFolded || link.parentCardId != link.childCardId else { return nil }
         return link
@@ -288,6 +289,30 @@ public enum SubsessionRouter {
 
     public static func sessionId(in raw: [String: Any]) -> String? {
         nonEmptyString(raw["session_id"]) ?? nonEmptyString(raw["sessionId"])
+    }
+
+    public static func transcriptPath(in raw: [String: Any]) -> String? {
+        nonEmptyString(raw["transcript_path"]) ?? nonEmptyString(raw["transcriptPath"])
+    }
+
+    /// Positive process id from `_ppid` (Int / Int32 / NSNumber / decimal
+    /// String); nil past `pid_t`'s range, which a malformed payload could
+    /// otherwise turn into a trap where it is compared with a card's PID.
+    public static func positivePpid(in raw: [String: Any]) -> Int? {
+        let parsed: Int?
+        if let p = raw["_ppid"] as? Int {
+            parsed = p
+        } else if let p = raw["_ppid"] as? Int32 {
+            parsed = Int(p)
+        } else if let p = raw["_ppid"] as? NSNumber {
+            parsed = p.intValue
+        } else if let s = raw["_ppid"] as? String {
+            parsed = Int(s.trimmingCharacters(in: .whitespacesAndNewlines))
+        } else {
+            parsed = nil
+        }
+        guard let parsed, parsed > 0, parsed <= Int(pid_t.max) else { return nil }
+        return parsed
     }
 
     static func nonEmptyString(_ value: Any?) -> String? {

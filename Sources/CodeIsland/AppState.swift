@@ -2438,16 +2438,7 @@ final class AppState {
     }
 
     func findSessionId(providerSessionId: String) -> String? {
-        if sessions[providerSessionId] != nil {
-            return providerSessionId
-        }
-        let codexAppId = AppState.codexAppSessionPrefix + providerSessionId
-        if sessions[codexAppId] != nil {
-            return codexAppId
-        }
-        return sessions.first(where: { _, snap in
-            snap.providerSessionId == providerSessionId
-        })?.key
+        SubsessionCards.cardId(forProviderSessionId: providerSessionId, in: sessions)
     }
 
     /// Resolve a Codex parent in the same Desktop/CLI namespace as its child.
@@ -4365,6 +4356,15 @@ final class AppState {
         return didMutate
     }
 
+    /// Whether an approval or question on this card still waits for the user.
+    /// The passes over known cards leave such a card alone: removing or
+    /// folding it would deny the request unseen. The next pass after it is
+    /// answered moves the card as usual.
+    private func hasWaitingRequest(onCard sessionId: String) -> Bool {
+        permissionQueue.contains(where: { ($0.event.sessionId ?? "default") == sessionId })
+            || questionQueue.contains(where: { ($0.event.sessionId ?? "default") == sessionId })
+    }
+
     /// Apply Agent Sub-Sessions to known Cursor Task/subagent cards
     /// (`transcriptPath` is the parent chat; `session_id` is the child).
     /// `merge` / `hide` only; `separate` is handled by `separateMergedCursorSubagents()`.
@@ -4386,7 +4386,8 @@ final class AppState {
             for candidate in candidates {
                 let source = candidate.session.source
                 guard source == "cursor" || source == "cursor-cli" else { continue }
-                guard cursorFoldIdentity(for: candidate) != nil else { continue }
+                guard cursorFoldIdentity(for: candidate) != nil,
+                      !hasWaitingRequest(onCard: candidate.sessionId) else { continue }
                 if sessions[candidate.sessionId] != nil {
                     removeSession(candidate.sessionId)
                     didMutate = true
@@ -4398,7 +4399,8 @@ final class AppState {
         for candidate in candidates {
             let source = candidate.session.source
             guard source == "cursor" || source == "cursor-cli" else { continue }
-            guard let fold = cursorFoldIdentity(for: candidate) else { continue }
+            guard let fold = cursorFoldIdentity(for: candidate),
+                  !hasWaitingRequest(onCard: candidate.sessionId) else { continue }
             let parentId = fold.parentId
             let childId = fold.childId
 
@@ -4497,6 +4499,8 @@ final class AppState {
             if candidate.session.lastActivity > subagent.lastActivity {
                 subagent.lastActivity = candidate.session.lastActivity
             }
+            // The Task's later hooks follow its row here.
+            subagent.subsessionKind = .cursorTask
             sessions[parentKey]?.subagents[childId] = subagent
 
             if sessions[parentKey]?.status != .waitingApproval

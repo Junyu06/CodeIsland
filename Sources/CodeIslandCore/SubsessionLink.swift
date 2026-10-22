@@ -121,6 +121,24 @@ public protocol SubsessionContext {
 
 /// Lookups over the island's cards that resolving a child's parent needs.
 public enum SubsessionCards {
+    /// The card filed under `providerSessionId`: its own key, its Codex
+    /// Desktop key, or a card that records it as its provider session id.
+    public static func cardId(
+        forProviderSessionId providerSessionId: String,
+        in cards: [String: SessionSnapshot]
+    ) -> String? {
+        if cards[providerSessionId] != nil {
+            return providerSessionId
+        }
+        let codexAppId = "codexapp:" + providerSessionId
+        if cards[codexAppId] != nil {
+            return codexAppId
+        }
+        return cards.first(where: { _, snap in
+            snap.providerSessionId == providerSessionId
+        })?.key
+    }
+
     /// The card a child session with this subagent id is folded into, if
     /// any. Only rows that are child sessions count (``SubagentState/subsessionKind``):
     /// a Codex parent's own SubagentStart row for a thread whose hooks keep a
