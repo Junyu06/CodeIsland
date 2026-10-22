@@ -301,8 +301,9 @@ public enum PushEventClassifier {
     }
 
     /// Whether a completion belongs to a subagent rather than the
-    /// conversation the user started: an explicit subagent id, a Codex
-    /// child folded into its parent, or a Cursor Task card kept separate.
+    /// conversation the user started: an explicit subagent id (every child
+    /// session folded into its parent's card carries one), or a Cursor Task
+    /// card kept separate.
     public static func isSubagentCompletion(
         agentId: String?,
         raw: [String: Any],
@@ -310,7 +311,6 @@ public enum PushEventClassifier {
         session: SessionSnapshot?
     ) -> Bool {
         if let agentId, !agentId.isEmpty { return true }
-        if raw["_codex_subagent"] as? Bool == true { return true }
         guard let session, CursorSubsessionRouter.isCursorFamilySource(session.source) else { return false }
         return CursorSubsessionRouter.isLikelyCursorTaskCard(
             sessionId: sessionId,

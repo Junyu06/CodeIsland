@@ -348,7 +348,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         let stop = try deliver("Stop", thread: "parent-thread", transcript: parentTranscript)
 
         XCTAssertEqual(stop["session_id"] as? String, "parent-thread")
-        XCTAssertNil(stop["_codex_subagent"])
+        XCTAssertNil(stop["agent_id"])
         XCTAssertNil(appState.sessions["codexapp:parent-thread"]?.subagents["parent-thread"])
     }
 

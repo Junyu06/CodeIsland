@@ -344,7 +344,6 @@ final class SubsessionRouterTests: XCTestCase {
         XCTAssertEqual(codex["agent_id"] as? String, child)
         XCTAssertEqual(codex["agent_type"] as? String, "worker", "the rollout's role")
         XCTAssertEqual(codex[SubsessionRouter.foldedKey] as? String, "codex")
-        XCTAssertEqual(codex["_codex_subagent"] as? Bool, true)
 
         var misbranded: [String: Any] = [
             "hook_event_name": "PreToolUse", "session_id": cursorTask, "_source": "claude",

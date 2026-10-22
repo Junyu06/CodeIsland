@@ -154,7 +154,12 @@ final class HookEventFactsTests: XCTestCase {
 
     func testASubagentsTurnEndIsReportedAsSuch() throws {
         var sessions: [String: SessionSnapshot] = [:]
-        let child = try reduce(["hook_event_name": "Stop", "session_id": "child-thread", "_source": "codex", "_codex_subagent": true], &sessions).facts
+        // A Cursor Task on a card of its own: its transcript names its chat.
+        let chat = "e1247fd5-d9a0-48ef-8457-0304606b1833"
+        let child = try reduce([
+            "hook_event_name": "Stop", "session_id": "2528cb91-6379-48f2-aff8-40f4b804dafa", "_source": "cursor",
+            "transcript_path": "/Users/u/.cursor/projects/x/agent-transcripts/\(chat)/\(chat).jsonl",
+        ], &sessions).facts
         XCTAssertTrue(child.endedTurn)
         XCTAssertTrue(child.subagentTurn)
 

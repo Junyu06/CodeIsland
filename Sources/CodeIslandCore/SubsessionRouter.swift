@@ -241,9 +241,7 @@ public enum SubsessionRouter {
     /// Where kinds differ:
     /// - a plugin proxy's hooks join the card as its own events, not as a
     ///   subagent's (see below);
-    /// - a Cursor Task's hook keeps or gains a Cursor `_source`;
-    /// - a Codex thread's carries `_codex_subagent`, which
-    ///   `PushEventClassifier` reads (its `agent_id` says as much).
+    /// - a Cursor Task's hook keeps or gains a Cursor `_source`.
     @discardableResult
     public static func fold(_ raw: inout [String: Any], link: SubsessionLink, into hostCardId: String) -> Bool {
         guard let sessionId = payloadSessionId(addressing: hostCardId, in: raw) else { return false }
@@ -269,16 +267,10 @@ public enum SubsessionRouter {
         // It named the parent of the old `session_id`; the hook is now the
         // host card's, so the link no longer applies.
         removeLinks(from: &raw)
-        switch link.kind {
-        case .cursorTask:
-            // Misbranded Claude-default Task hooks must land as Cursor on the parent.
-            if !CursorSubsessionRouter.isCursorFamilySource((raw["_source"] as? String) ?? (raw["source"] as? String)) {
-                raw["_source"] = "cursor"
-            }
-        case .codexThread:
-            raw["_codex_subagent"] = true
-        case .declared, .pluginProxy:
-            break
+        // Misbranded Claude-default Task hooks must land as Cursor on the parent.
+        if link.kind == .cursorTask,
+           !CursorSubsessionRouter.isCursorFamilySource((raw["_source"] as? String) ?? (raw["source"] as? String)) {
+            raw["_source"] = "cursor"
         }
         return true
     }

@@ -193,7 +193,6 @@ final class PushPolicyTests: XCTestCase {
 
     func testSubagentCompletionDetection() {
         XCTAssertTrue(PushEventClassifier.isSubagentCompletion(agentId: "agent-1", raw: [:], sessionId: "s", session: nil))
-        XCTAssertTrue(PushEventClassifier.isSubagentCompletion(agentId: nil, raw: ["_codex_subagent": true], sessionId: "s", session: nil))
         XCTAssertFalse(PushEventClassifier.isSubagentCompletion(agentId: nil, raw: [:], sessionId: "s", session: SessionSnapshot()))
 
         var cursorTask = SessionSnapshot()
