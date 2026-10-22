@@ -529,6 +529,16 @@ def _connect_to_island():
     return None
 
 
+def _wire(payload):
+    """The payload as it is sent: in UTF-8 as it is — `\\uXXXX` escapes would
+    double a CJK text against the island's limit on a remote host's request —
+    or escaped where it cannot be (a lone surrogate)."""
+    try:
+        return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(payload).encode("utf-8")
+
+
 def _send_event(payload, expects_response, stays_for_reply=True):
     """Sends the event and reads the island's reply to EOF; returns the reply
     when the hook waits for one. A hook nobody waits on reads it too, for a
@@ -542,7 +552,7 @@ def _send_event(payload, expects_response, stays_for_reply=True):
         return None
     sock.settimeout(BLOCKING_TIMEOUT_SECONDS if expects_response else TIMEOUT_SECONDS)
     try:
-        sock.sendall(json.dumps(payload).encode("utf-8"))
+        sock.sendall(_wire(payload))
         sock.shutdown(socket.SHUT_WR)
         if not expects_response:
             if not stays_for_reply:

@@ -106,7 +106,14 @@ class HookServer {
                     connection.cancel()
                 case .tooLarge:
                     log.warning("Payload too large (over \(limits.maxRequestBytes) bytes), dropping connection")
-                    connection.respond(Self.oversizedPayloadAnswer)
+                    // A remote host's limit is the smaller one, and a large
+                    // file an agent writes there passes it: its agent asks
+                    // in its own way rather than being told no.
+                    if case .remoteHost = originBox.value {
+                        connection.respond(Data())
+                    } else {
+                        connection.respond(Self.oversizedPayloadAnswer)
+                    }
                 case .received(let data):
                     // The socket names the host, and an edge's facts are
                     // parsed and interpreted, here too, off the main thread.

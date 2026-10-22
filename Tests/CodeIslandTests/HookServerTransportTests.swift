@@ -386,10 +386,12 @@ final class HookServerTransportTests: XCTestCase {
             .count
     }
 
-    /// More than the island reads of one request is refused, and nothing
-    /// reaches a card.
+    /// More than the island reads of one request is refused on this Mac's
+    /// socket, and nothing reaches a card.
     func testAnOversizedRequestIsDenied() throws {
-        let hook = try XCTUnwrap(RawHook.connect(to: socketPath))
+        let local = try startLocalServer()
+        defer { stopLocalServer(local) }
+        let hook = try XCTUnwrap(RawHook.connect(to: local.socketPath))
         let answer = hook.writeInBackground(Data(repeating: UInt8(ascii: " "), count: 10_485_761), thenRead: true)
         pump(until: { answer.value != nil }, timeout: 10, "no answer to an oversized request")
         XCTAssertTrue(String(decoding: answer.value ?? Data(), as: UTF8.self).contains(#""behavior":"deny""#))
@@ -421,12 +423,14 @@ final class HookServerTransportTests: XCTestCase {
     }
 
     /// A remote host's request may be a megabyte, no more: the rest is not
-    /// read, and nothing reaches a card.
-    func testARemoteHostsRequestOverAMegabyteIsDenied() throws {
+    /// read, nothing reaches a card, and the answer is nothing — a large file
+    /// an agent writes there is not refused, its agent asks in its own way.
+    func testARemoteHostsRequestOverAMegabyteIsLeftToItsAgent() throws {
         let hook = try XCTUnwrap(RawHook.connect(to: socketPath))
         let answer = hook.writeInBackground(Data(repeating: UInt8(ascii: " "), count: 1_048_577), thenRead: true)
         pump(until: { answer.value != nil }, timeout: 10, "no answer to an oversized request")
-        XCTAssertTrue(String(decoding: answer.value ?? Data(), as: UTF8.self).contains(#""behavior":"deny""#))
+        XCTAssertFalse(answer.timedOut, "an oversized request was read on")
+        XCTAssertEqual(answer.value, Data(), "an oversized request got an answer")
         XCTAssertNil(appState.pendingPermission)
         hook.close()
     }

@@ -22,13 +22,15 @@ quirk is then fixed once, in HookIntake, for every edge.
   reach the socket by name and nothing else — and checked to be that user's,
   that mode and no symlink, beneath a `/tmp` that does not let other users
   move it. sshd picks the forwarded socket's mode itself; in that folder it
-  does not matter. Once the tunnel is up, the socket is checked too (and,
-  where agents run as other users, made 0666 without following a symlink)
-  before anything is installed; a folder or a socket that fails closes the
-  tunnel, and the host says why. A hook command an older install wrote
-  names `/tmp/codeisland-<uid>.sock`, and an agent started before the
-  reinstall still runs it: the remote hook reads that path, once no socket
-  of the island's user is there, as `/tmp/codeisland-<uid>/island.sock`.
+  does not matter. Once the tunnel is up, the socket is checked too —
+  waited for a while first, since sshd makes it a moment after ssh starts
+  — and, where agents run as other users, made 0666 without following a
+  symlink, before anything is installed; a folder or a socket that fails
+  closes the tunnel, and the host says why. A hook command an older install
+  wrote names `/tmp/codeisland-<uid>.sock`, and an agent started before the
+  reinstall still runs it: where no island answers there (nothing there,
+  or the socket a finished tunnel left behind), the remote hook uses
+  `/tmp/codeisland-<uid>/island.sock` instead.
 - Only to a socket owned by the edge's own user, never through a symlink
   (`lstat`): the path is a predictable name in `/tmp`, and a socket another
   user created there first would get every event and could answer it. On a
@@ -63,8 +65,11 @@ quirk is then fixed once, in HookIntake, for every edge.
   request of at most 1 MB (this Mac's hooks keep 10 MB), complete within
   5 minutes however steadily it arrives, at most 64 connections open and
   32 requests waiting on an answer at once, and 8 MB of unfinished requests
-  between them. A connection past that is closed at once, and a request past
-  the held cap is answered with nothing, so its agent asks in its own way.
+  between them. A connection past that is closed at once; a request past
+  the held cap, or over the size limit, is answered with nothing, so its
+  agent asks in its own way (this Mac's oversized request is denied). The
+  remote hook sends text as it is, in UTF-8, not as `\uXXXX` escapes that
+  would double a CJK request against that limit.
 - Write one JSON object, then half-close the write side (`shutdown(SHUT_WR)`).
 - A hook that waits for an answer (below) reads it to EOF, as long as it
   takes, prints it to stdout exactly as received (an empty answer means print

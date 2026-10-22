@@ -406,6 +406,41 @@ final class HookSocketOwnershipTests: XCTestCase {
         }
     }
 
+    /// The hook sends text as it is, in UTF-8: `\uXXXX` escapes would double
+    /// a CJK text against the island's limit on a remote host's request. A
+    /// lone surrogate, which UTF-8 cannot carry, is escaped instead.
+    func testTheHookSendsTextAsItIs() throws {
+        let hookURL = URL(fileURLWithPath: scratch + "/codeisland-remote-hook.py")
+        try Data(XCTUnwrap(RemoteInstaller.remoteHookSource()).utf8).write(to: hookURL)
+        let driver = """
+        import importlib.util, json, sys
+        spec = importlib.util.spec_from_file_location("hook", sys.argv[1])
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        text = hook._wire({"content": "\\u5199\\u6587\\u4ef6"})
+        lone = hook._wire({"content": "a\\ud800b"})
+        print(json.dumps({
+            "raw": "\\u5199".encode("utf-8") in text and b"\\\\u" not in text,
+            "same": json.loads(text.decode("utf-8")) == {"content": "\\u5199\\u6587\\u4ef6"},
+            "lone": b"\\\\ud800" in lone,
+        }))
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-c", driver, hookURL.path]
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        let out = stdout.fileHandleForReading.readDataToEndOfFile()
+        let err = String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0, err)
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: out) as? [String: Bool])
+        XCTAssertEqual(result, ["raw": true, "same": true, "lone": true])
+    }
+
     /// Each platform's answer is read where its uid is: Linux's struct ucred
     /// (pid, uid, gid), OpenBSD's struct sockpeercred (uid, gid, pid), the
     /// struct xucred of macOS and FreeBSD (version, uid, …). A platform with
