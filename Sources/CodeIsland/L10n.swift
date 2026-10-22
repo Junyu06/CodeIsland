@@ -471,7 +471,7 @@ final class L10n: ObservableObject {
         "remote_retry_slow": "Still unreachable after %d attempts; trying again in %d min",
         "remote_waiting_network": "Offline; reconnects when the network is back",
         "remote_other_users": "Agents Run as Other Users",
-        "remote_other_users_hint": "For agents in containers or under sudo on this host. Lets every user there reach CodeIsland's socket, so any of them can send events and requests under this host's name. Leave off unless your agents run as a user other than the SSH user.",
+        "remote_other_users_hint": "For agents in containers or under sudo on this host. Lets every user there reach CodeIsland's socket: any of them can send events and requests under this host's name and see the answers to their own requests, but not answer anyone else's. Leave off unless your agents run as a user other than the SSH user.",
         "remote_socket_folder_unsafe": "%@ is not a folder only you can use, so this host's hooks have nowhere safe to arrive. Remove it, then connect again.",
         "remote_socket_unavailable": "CodeIsland can't listen at %@ for this host's hooks, so it doesn't connect.",
 
@@ -1061,7 +1061,7 @@ final class L10n: ObservableObject {
         "remote_retry_slow": "Nach %d Versuchen nicht erreichbar; nächster Versuch in %d Min.",
         "remote_waiting_network": "Offline – verbindet sich wieder, sobald das Netzwerk zurück ist",
         "remote_other_users": "Agents laufen als andere Benutzer",
-        "remote_other_users_hint": "Für Agents in Containern oder unter sudo auf diesem Host. Jeder Benutzer dort kann dann den Socket von CodeIsland erreichen und im Namen dieses Hosts Ereignisse und Anfragen senden. Nur einschalten, wenn deine Agents nicht als SSH-Benutzer laufen.",
+        "remote_other_users_hint": "Für Agents in Containern oder unter sudo auf diesem Host. Jeder Benutzer dort kann dann den Socket von CodeIsland erreichen: im Namen dieses Hosts Ereignisse und Anfragen senden und die Antworten auf seine eigenen Anfragen sehen, aber keine Anfrage eines anderen beantworten. Nur einschalten, wenn deine Agents nicht als SSH-Benutzer laufen.",
         "remote_socket_folder_unsafe": "%@ ist kein Ordner, den nur du nutzen kannst – die Hooks dieses Hosts hätten keinen sicheren Ort zum Ankommen. Entferne ihn und verbinde erneut.",
         "remote_socket_unavailable": "CodeIsland kann unter %@ nicht auf die Hooks dieses Hosts lauschen und verbindet ihn daher nicht.",
 
@@ -1651,7 +1651,7 @@ final class L10n: ObservableObject {
         "remote_retry_slow": "已连续失败 %d 次，%d 分钟后再试",
         "remote_waiting_network": "网络已断开，恢复后自动重新连接",
         "remote_other_users": "Agent 以其他用户身份运行",
-        "remote_other_users_hint": "适用于在此主机的容器中或通过 sudo 运行的 Agent。开启后，此主机上的所有用户都能连接 CodeIsland 的套接字，并能以此主机的名义发送事件和请求。除非 Agent 不以 SSH 用户身份运行，否则请保持关闭。",
+        "remote_other_users_hint": "适用于在此主机的容器中或通过 sudo 运行的 Agent。开启后，此主机上的所有用户都能连接 CodeIsland 的套接字：能以此主机的名义发送事件和请求，并看到对自己请求的答复，但无法答复他人的请求。除非 Agent 不以 SSH 用户身份运行，否则请保持关闭。",
         "remote_socket_folder_unsafe": "%@ 不是只有你能使用的文件夹，此主机的 hooks 没有安全的接收位置。请删除它后重新连接。",
         "remote_socket_unavailable": "CodeIsland 无法在 %@ 监听此主机的 hooks，因此不会连接。",
 
@@ -2241,7 +2241,7 @@ final class L10n: ObservableObject {
         "remote_retry_slow": "已連續失敗 %d 次，%d 分鐘後再試",
         "remote_waiting_network": "網路已中斷，恢復後自動重新連線",
         "remote_other_users": "Agent 以其他使用者身分執行",
-        "remote_other_users_hint": "適用於在此主機的容器中或透過 sudo 執行的 Agent。開啟後，此主機上的所有使用者都能連線到 CodeIsland 的通訊端，並能以此主機的名義傳送事件與請求。除非 Agent 不以 SSH 使用者身分執行，否則請保持關閉。",
+        "remote_other_users_hint": "適用於在此主機的容器中或透過 sudo 執行的 Agent。開啟後，此主機上的所有使用者都能連線到 CodeIsland 的通訊端：能以此主機的名義傳送事件與請求，並看到對自己請求的回覆，但無法回覆他人的請求。除非 Agent 不以 SSH 使用者身分執行，否則請保持關閉。",
         "remote_socket_folder_unsafe": "%@ 不是只有你能使用的資料夾，此主機的 hooks 沒有安全的接收位置。請刪除它後重新連線。",
         "remote_socket_unavailable": "CodeIsland 無法在 %@ 監聽此主機的 hooks，因此不會連線。",
 
@@ -2831,7 +2831,7 @@ final class L10n: ObservableObject {
         "remote_retry_slow": "%d 回続けて失敗しました。%d 分後に再試行します",
         "remote_waiting_network": "オフライン：ネットワーク復帰後に自動で再接続します",
         "remote_other_users": "エージェントを別ユーザーで実行",
-        "remote_other_users_hint": "このホストのコンテナ内や sudo で動くエージェント向けです。オンにすると、ホスト上のすべてのユーザーが CodeIsland のソケットに接続でき、このホストの名前でイベントやリクエストを送れるようになります。エージェントが SSH ユーザー以外で動く場合を除き、オフのままにしてください。",
+        "remote_other_users_hint": "このホストのコンテナ内や sudo で動くエージェント向けです。オンにすると、ホスト上のすべてのユーザーが CodeIsland のソケットに接続でき、このホストの名前でイベントやリクエストを送り、自分のリクエストへの応答を受け取れるようになります。ただし、他のユーザーのリクエストには応答できません。エージェントが SSH ユーザー以外で動く場合を除き、オフのままにしてください。",
         "remote_socket_folder_unsafe": "%@ はあなた専用のフォルダではないため、このホストのフックを安全に受け取れません。削除してから再接続してください。",
         "remote_socket_unavailable": "CodeIsland は %@ でこのホストのフックを待ち受けできないため、接続しません。",
 
@@ -3421,7 +3421,7 @@ final class L10n: ObservableObject {
         "remote_retry_slow": "%d회 연속 실패, %d분 후 다시 시도합니다",
         "remote_waiting_network": "오프라인: 네트워크가 복구되면 다시 연결합니다",
         "remote_other_users": "에이전트가 다른 사용자로 실행됨",
-        "remote_other_users_hint": "이 호스트의 컨테이너나 sudo로 실행되는 에이전트용입니다. 켜면 호스트의 모든 사용자가 CodeIsland 소켓에 연결해 이 호스트 이름으로 이벤트와 요청을 보낼 수 있습니다. 에이전트가 SSH 사용자가 아닌 다른 사용자로 실행되는 경우가 아니면 끈 상태로 두세요.",
+        "remote_other_users_hint": "이 호스트의 컨테이너나 sudo로 실행되는 에이전트용입니다. 켜면 호스트의 모든 사용자가 CodeIsland 소켓에 연결해 이 호스트 이름으로 이벤트와 요청을 보내고 자신의 요청에 대한 응답을 볼 수 있습니다. 다른 사용자의 요청에는 응답할 수 없습니다. 에이전트가 SSH 사용자가 아닌 다른 사용자로 실행되는 경우가 아니면 끈 상태로 두세요.",
         "remote_socket_folder_unsafe": "%@은(는) 나만 쓸 수 있는 폴더가 아니어서 이 호스트의 훅을 안전하게 받을 곳이 없습니다. 삭제한 뒤 다시 연결하세요.",
         "remote_socket_unavailable": "CodeIsland가 %@에서 이 호스트의 훅을 수신할 수 없어 연결하지 않습니다.",
 
@@ -4011,7 +4011,7 @@ final class L10n: ObservableObject {
         "remote_retry_slow": "%d denemeden sonra hâlâ ulaşılamıyor; %d dk sonra yeniden denenecek",
         "remote_waiting_network": "Çevrimdışı; ağ geri geldiğinde yeniden bağlanacak",
         "remote_other_users": "Ajanlar Başka Kullanıcı Olarak Çalışıyor",
-        "remote_other_users_hint": "Bu sunucuda konteyner içinde veya sudo ile çalışan ajanlar için. Açıldığında sunucudaki her kullanıcı CodeIsland soketine bağlanabilir ve bu sunucu adına olay ve istek gönderebilir. Ajanlarınız SSH kullanıcısından farklı bir kullanıcıyla çalışmıyorsa kapalı bırakın.",
+        "remote_other_users_hint": "Bu sunucuda konteyner içinde veya sudo ile çalışan ajanlar için. Açıldığında sunucudaki her kullanıcı CodeIsland soketine bağlanabilir: bu sunucu adına olay ve istek gönderebilir ve kendi isteklerinin yanıtlarını görebilir, ancak başkasının isteğini yanıtlayamaz. Ajanlarınız SSH kullanıcısından farklı bir kullanıcıyla çalışmıyorsa kapalı bırakın.",
         "remote_socket_folder_unsafe": "%@ yalnızca sizin kullanabildiğiniz bir klasör değil; bu sunucunun kancaları için güvenli bir varış yeri yok. Klasörü kaldırıp yeniden bağlanın.",
         "remote_socket_unavailable": "CodeIsland, bu sunucunun kancalarını %@ üzerinde dinleyemiyor; bu yüzden bağlanmıyor.",
 

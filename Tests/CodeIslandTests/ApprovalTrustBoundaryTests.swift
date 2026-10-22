@@ -450,6 +450,24 @@ final class ApprovalTrustBoundaryTests: XCTestCase {
         }
     }
 
+    // MARK: - What the opt-in hint says the host's other users can do
+
+    /// With "Agents Run as Other Users" on, the host's other users can send
+    /// events and requests under its name and see the answers to their own
+    /// requests — and no more: none of what they send answers another's
+    /// request (the tests here). The hint says just that, in every language.
+    func testTheOtherUsersHintStatesWhatTheyCanDo() {
+        let english = L10n.strings["en"]?["remote_other_users_hint"] ?? ""
+        XCTAssertTrue(english.contains("send events and requests under this host's name"), english)
+        XCTAssertTrue(english.contains("see the answers to their own requests"), english)
+        XCTAssertTrue(english.contains("not answer anyone else's"), english)
+        for (language, table) in L10n.strings where language != "en" {
+            let hint = table["remote_other_users_hint"] ?? ""
+            XCTAssertFalse(hint.isEmpty, language)
+            XCTAssertNotEqual(hint, english, "\(language) reads the English hint")
+        }
+    }
+
     // MARK: - A host's socket: one connection never answers another's request
 
     private var socketPath: String?
