@@ -1,5 +1,4 @@
 import SwiftUI
-import CoreServices
 import os.log
 import CodeIslandCore
 
@@ -16,6 +15,14 @@ struct AppSubsessionContext: SubsessionContext {
     }
 }
 
+/// The session store the island's views observe, and the coordinator around
+/// it, on the main actor: hook events, approvals and questions, completions
+/// and attention land here. The slow work it coordinates runs elsewhere —
+/// session discovery in `SessionDiscoveryCoordinator` and the `Discovery/`
+/// namespaces, a known card's store reads through `SessionStoreReaders`,
+/// both off the main actor; exit watches in `SessionProcessMonitor`; the
+/// compact bar's rotation in `CompactBarRotation` — and AppState integrates
+/// what they find.
 @MainActor
 @Observable
 final class AppState {
