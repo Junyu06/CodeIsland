@@ -300,6 +300,7 @@ final class HookConnection: @unchecked Sendable {
     private var sourcesOnDescriptor = 0
     private var received = Data()
     private var unsent = Data()
+    private var answered = false
     private var finishing = false
     private var closed = false
     private var closeHandlers: [@Sendable () -> Void] = []
@@ -342,10 +343,13 @@ final class HookConnection: @unchecked Sendable {
         source.resume()
     }
 
-    /// Writes `answer` — nothing, when it is empty — then closes.
+    /// Writes `answer` — nothing, when it is empty — then closes. The first
+    /// answer is the one: a later one, even while the first is still being
+    /// written, is dropped.
     func respond(_ answer: Data) {
         queue.async { [self] in
-            guard !finishing else { return }
+            guard !answered, !finishing else { return }
+            answered = true
             unsent = answer
             writeUnsent()
         }

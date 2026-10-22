@@ -395,6 +395,37 @@ final class HookConnectionTests: XCTestCase {
         XCTAssertEqual(got, 0, "the hook still waits: \(got < 0 ? String(cString: strerror(errno)) : "a byte")")
     }
 
+    /// Everything the island writes to `hook`, to its EOF (or 5 s of silence).
+    private func readToEOF(_ hook: Int32) -> Data {
+        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(hook, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = recv(hook, &buffer, buffer.count, 0)
+            if count > 0 {
+                data.append(contentsOf: buffer[..<count])
+            } else if count < 0, errno == EINTR {
+                continue
+            } else {
+                return data
+            }
+        }
+    }
+
+    /// The first answer is the one: a second, arriving while the first is
+    /// still being written, is dropped, not spliced into it.
+    func testTheFirstAnswerWins() throws {
+        let (connection, hook) = try connectionPair()
+        let first = Data(repeating: UInt8(ascii: "A"), count: 200_000)  // more than the socket holds
+        connection.respond(first)
+        connection.respond(Data("BBBB".utf8))
+
+        let answer = readToEOF(hook)
+        XCTAssertEqual(answer.count, first.count)
+        XCTAssertEqual(answer, first, "a second answer was spliced into the first")
+    }
+
     /// A watched connection closes the moment its hook goes, and not before.
     func testAWatchedHookIsSeenGoingAtOnce() throws {
         let (connection, hook) = try connectionPair(peerWatch: HookPeerWatch())
