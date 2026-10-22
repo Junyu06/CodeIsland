@@ -238,4 +238,23 @@ final class AttentionRegressionTests: XCTestCase {
             appState.surface == .completionCard(sessionId: "A")
         }
     }
+
+    /// Follow-up jingles used to go through the turn-failure debounce with no
+    /// session, so every failed-turn reminder shared one bucket (a 60 s
+    /// sliding window): a second session's failed-turn reminder was silent.
+    func testFailedTurnRemindersOfTwoSessionsBothRing() async throws {
+        UserDefaults.standard.set("glance", forKey: SettingsKey.completionNotificationStyle)
+        let appState = appStateWithFollowUps()
+        appState.handleEvent(try event(["hook_event_name": "StopFailure", "session_id": "X-\(UUID().uuidString)", "error": "rate_limit"]))
+        now = now.addingTimeInterval(30)
+        appState.handleEvent(try event(["hook_event_name": "StopFailure", "session_id": "Y-\(UUID().uuidString)", "error": "rate_limit"]))
+        XCTAssertEqual(played, ["8bit_error", "8bit_error"], "each session's own failure rings")
+
+        played = []
+        now = now.addingTimeInterval(31)
+        await appState.followUps.tick(now: now)   // X's reminder
+        now = now.addingTimeInterval(30)
+        await appState.followUps.tick(now: now)   // Y's reminder
+        XCTAssertEqual(played, ["8bit_error", "8bit_error"], "one reminder per failed turn, each audible")
+    }
 }

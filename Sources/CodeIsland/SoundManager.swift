@@ -58,13 +58,24 @@ class SoundManager {
         }
     }
 
-    /// A sound cue that has not been through `AttentionPolicy.settle` yet (a
-    /// follow-up reminder's): the user's sound settings are applied here,
-    /// by the policy's own rule (`AttentionPolicy.audibleSound`).
-    /// `sessionId` scopes the turn-failure debounce; nil shares one bucket.
+    /// A sound cue that has not been through `AttentionPolicy.settle`: the
+    /// user's sound settings are applied here, by the policy's own rule
+    /// (`AttentionPolicy.audibleSound`). `sessionId` scopes the turn-failure
+    /// debounce; nil shares one bucket.
     func handleEvent(_ eventName: String, sessionId: String? = nil, now: Date = Date()) {
         guard let cue = AttentionPolicy.audibleSound(eventName, sounds: preferences, hold: hold) else { return }
         play(cue: cue, sessionId: sessionId, now: now)
+    }
+
+    /// A follow-up reminder's cue: the user's sound settings apply as to any
+    /// cue, the turn-failure debounce does not. Reminders already come an
+    /// interval apart, one per cue per tick; the debounce, there for a
+    /// session failing again seconds later, would swallow another session's
+    /// failed-turn reminder that happened to fall inside its window.
+    func playReminder(_ cue: String) {
+        guard let cue = AttentionPolicy.audibleSound(cue, sounds: preferences, hold: hold),
+              let entry = Self.eventSounds.first(where: { $0.event == cue }) else { return }
+        emit(entry.sound)
     }
 
     /// Plays a cue `AttentionPolicy` let through. All that is left to decide

@@ -64,7 +64,7 @@ final class FollowUpReminderController {
     @ObservationIgnored var tabVisible: @Sendable (SessionSnapshot) -> Bool = { session in
         TerminalVisibilityDetector.isSessionTabVisible(session)
     }
-    @ObservationIgnored var playSound: (String) -> Void = { SoundManager.shared.handleEvent($0) }
+    @ObservationIgnored var playSound: (String) -> Void = { SoundManager.shared.playReminder($0) }
     /// Tests drive `tick(now:)` by hand and turn the real timer off.
     @ObservationIgnored var armsTimer = true
 
@@ -421,7 +421,8 @@ final class FollowUpReminderController {
         // Same sound as the original event, once per kind per tick — a turn
         // that died rings the error jingle again, not "done" (AttentionPolicy's
         // `.reminderDue`). The regular gates (master switch, per-event toggle)
-        // still apply: SoundManager holds the cue to the policy's sound rules.
+        // still apply: SoundManager holds the cue to the policy's sound rules
+        // (but not to the turn-failure debounce, which is for real failures).
         var sounds: [String] = []
         for reminder in reminders {
             guard let sound = AttentionPolicy.intents(
