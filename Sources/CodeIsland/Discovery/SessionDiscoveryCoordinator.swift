@@ -87,6 +87,12 @@ final class SessionDiscoveryCoordinator {
     private var pendingRescan = false
     nonisolated(unsafe) private var codexDesktopScanTask: Task<Void, Never>?
     private var lastCodexDesktopPollAt: Date?
+    /// Bumped by `stop()`: a scan from before it lands dropped, and leaves
+    /// alone the handle of a scan started since.
+    private var generation = 0
+    /// From `stop()` until `start()`: a cleanup tick or watcher event still
+    /// queued from before starts no scan.
+    private var isStopped = false
 
     init(scanners: Scanners = .current) {
         self.scanners = scanners
@@ -100,9 +106,18 @@ final class SessionDiscoveryCoordinator {
         codexDesktopScanTask?.cancel()
     }
 
+    /// Start discovering: the initial scan, then the watcher. Discovery runs
+    /// from creation; this resumes it after `stop()`.
+    func start() {
+        isStopped = false
+        requestScan()
+        startProjectsWatcher()
+    }
+
     /// Scan every enabled source; a request made while a scan runs is
     /// coalesced into one rescan after it.
     func requestScan() {
+        guard !isStopped else { return }
         if scanTask != nil {
             pendingRescan = true
             return
@@ -110,11 +125,12 @@ final class SessionDiscoveryCoordinator {
 
         pendingRescan = false
         let scan = scanners.sessions
+        let generation = self.generation
         scanTask = Task.detached { [weak self] in
             let discovered = scan()
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
-                guard let self else { return }
+                guard let self, self.generation == generation else { return }
                 guard !Task.isCancelled else {
                     self.scanTask = nil
                     return
@@ -148,6 +164,7 @@ final class SessionDiscoveryCoordinator {
     /// `runningBundleIdentifiers` is only asked for once the interval has
     /// elapsed: building it goes out to LaunchServices.
     func pollCodexDesktopIfDue(now: Date, runningBundleIdentifiers: () -> Set<String>) {
+        guard !isStopped else { return }
         // Check the cheap clock predicate before the expensive app list: the poll
         // is rate-limited to every 6s, so five of every six ticks can skip it.
         let codexPollIntervalElapsed = lastCodexDesktopPollAt.map {
@@ -166,13 +183,14 @@ final class SessionDiscoveryCoordinator {
     /// Read Codex Desktop's threads from its state database; a request made
     /// while one read runs is dropped.
     func requestCodexDesktopScan() {
-        guard codexDesktopScanTask == nil else { return }
+        guard !isStopped, codexDesktopScanTask == nil else { return }
         let scan = scanners.codexDesktopSessions
+        let generation = self.generation
         codexDesktopScanTask = Task.detached { [weak self] in
             let discovered = scan()
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
-                guard let self else { return }
+                guard let self, self.generation == generation else { return }
                 guard !Task.isCancelled else {
                     self.codexDesktopScanTask = nil
                     return
@@ -185,7 +203,7 @@ final class SessionDiscoveryCoordinator {
 
     /// FSEventStream on known session-store roots — fires when transcript/event files change.
     func startProjectsWatcher() {
-        guard fsEventStream == nil else { return }
+        guard !isStopped, fsEventStream == nil else { return }
         let watchRoots = scanners.watchRoots()
         guard !watchRoots.isEmpty else { return }
 
@@ -227,14 +245,18 @@ final class SessionDiscoveryCoordinator {
     /// Re-arm the watcher after the watched roots changed, and rescan at once
     /// so sessions already running under a newly added root show up.
     func restartProjectsWatcher() {
+        guard !isStopped else { return }
         tearDownProjectsWatcher()
         startProjectsWatcher()
         requestScan()
     }
 
-    /// Stop watching and scanning: the watcher, both scans in flight, a
-    /// pending rescan and the Codex Desktop poll's clock.
+    /// Stop watching and scanning until `start()`: the watcher, both scans in
+    /// flight (what they find is dropped), a pending rescan and the Codex
+    /// Desktop poll's clock.
     func stop() {
+        isStopped = true
+        generation += 1
         tearDownProjectsWatcher()
         scanTask?.cancel()
         scanTask = nil

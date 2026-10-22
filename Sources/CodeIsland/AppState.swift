@@ -3111,10 +3111,10 @@ final class AppState {
         // Restore persisted sessions before process scan (deduped by scan)
         restoreSessions()
 
-        // Initial scan for already-running sessions, respecting per-source toggles.
-        discovery.requestScan()
-        // Watch all known session-store roots so discovery keeps working when hooks are missed.
-        discovery.startProjectsWatcher()
+        // Initial scan for already-running sessions, respecting per-source toggles,
+        // then watch all known session-store roots so discovery keeps working when
+        // hooks are missed.
+        discovery.start()
     }
 
     /// Re-arm discovery after the watched roots changed — an extra config dir
