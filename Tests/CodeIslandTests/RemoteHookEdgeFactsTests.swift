@@ -1,0 +1,273 @@
+import XCTest
+@testable import CodeIsland
+import CodeIslandCore
+
+/// The remote hook sends facts (`_edge`) and HookServer interprets them with
+/// HookIntake, the bridge's interpretation. These run the shipped
+/// codeisland-remote-hook.py's `main()` against a throwaway socket, hand what
+/// it sends to `HookServer.intake`, and send the island's answer back the
+/// way HookServer would.
+@MainActor
+final class RemoteHookEdgeFactsTests: XCTestCase {
+    private var sandbox: URL!
+    private var hookURL: URL!
+    private var socketPath: String!
+
+    override func setUpWithError() throws {
+        sandbox = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codeisland-remote-edge-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+        let source = try XCTUnwrap(RemoteInstaller.remoteHookSource(), "remote hook resource missing")
+        hookURL = sandbox.appendingPathComponent("codeisland-remote-hook.py")
+        try Data(source.utf8).write(to: hookURL)
+        // sun_path holds 104 bytes; the temporary directory's path is too long.
+        socketPath = "/tmp/ci-re-\(UUID().uuidString.prefix(8)).sock"
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: sandbox)
+        try? FileManager.default.removeItem(atPath: socketPath)
+    }
+
+    /// Runs the hook's `main()` on `stdin` as CODEISLAND_SOURCE=`source`; the
+    /// stand-in island answers `reply`. Returns the raw bytes the hook sent
+    /// (nil: it sent nothing) and what it printed.
+    private func runHook(
+        source: String,
+        stdin: String,
+        reply: Data = Data()
+    ) throws -> (sent: Data?, stdout: String) {
+        let driver = """
+        import base64, importlib.util, io, json, os, socket, sys, threading
+        hook_path, socket_path, stdin_text, reply = sys.argv[1], sys.argv[2], sys.argv[3], base64.b64decode(sys.argv[4])
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(socket_path)
+        server.listen(1)
+        server.settimeout(5)
+        received = {}
+        def serve():
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            data = b""
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            received["payload"] = base64.b64encode(data).decode()
+            if reply:
+                conn.sendall(reply)
+            conn.close()
+        thread = threading.Thread(target=serve)
+        thread.start()
+        spec = importlib.util.spec_from_file_location("hook", hook_path)
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        hook._get_tty = lambda: "/dev/pts/7"
+        sys.stdin = io.TextIOWrapper(io.BytesIO(stdin_text.encode("utf-8")), encoding="utf-8")
+        printed = io.StringIO()
+        real_stdout, sys.stdout = sys.stdout, printed
+        try:
+            hook.main()
+        finally:
+            sys.stdout = real_stdout
+        thread.join(6)
+        print(json.dumps({"sent": received.get("payload"), "stdout": printed.getvalue()}))
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-c", driver, hookURL.path, socketPath, stdin, reply.base64EncodedString()]
+        var environment = ProcessInfo.processInfo.environment
+        environment["HOME"] = sandbox.path
+        environment["CODEISLAND_SOCKET_PATH"] = socketPath
+        environment["CODEISLAND_SOURCE"] = source
+        environment["CODEISLAND_REMOTE_HOST_ID"] = "host-1"
+        environment["CODEISLAND_REMOTE_HOST_NAME"] = "Build Box"
+        process.environment = environment
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+        let out = stdout.fileHandleForReading.readDataToEndOfFile()
+        let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0, "hook driver failed: \(err)")
+        try? FileManager.default.removeItem(atPath: socketPath)
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: out) as? [String: Any])
+        let sent = (result["sent"] as? String).flatMap { Data(base64Encoded: $0) }
+        return (sent, result["stdout"] as? String ?? "")
+    }
+
+    private func intake(_ sent: Data?, file: StaticString = #filePath, line: UInt = #line) throws -> (event: [String: Any], intake: HookIntake) {
+        let sent = try XCTUnwrap(sent, "the hook sent nothing", file: file, line: line)
+        guard case .route(let routed, let edge?) = HookServer.intake(sent) else {
+            XCTFail("the island did not read the hook's facts", file: file, line: line)
+            throw XCTSkip("no intake")
+        }
+        let event = try XCTUnwrap(JSONSerialization.jsonObject(with: routed) as? [String: Any], file: file, line: line)
+        return (event, edge)
+    }
+
+    // MARK: - Facts out, the bridge's reading in
+
+    func testRemoteEventIsReadLikeTheBridgesWouldBe() throws {
+        let stdin = #"{"hook_event_name":"UserPromptSubmit","session_id":"sess-1","cwd":"/work/proj","prompt":"Fix it"}"#
+        let (sent, stdout) = try runHook(source: "claude", stdin: stdin, reply: Data("{}".utf8))
+        XCTAssertEqual(stdout, "", "nothing waits on a prompt, nothing is printed")
+
+        let raw = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(sent)) as? [String: Any])
+        let edge = try XCTUnwrap(raw["_edge"] as? [String: Any])
+        XCTAssertEqual(edge["v"] as? Int, 1)
+        XCTAssertEqual(edge["source"] as? String, "claude")
+        XCTAssertEqual(edge["tty"] as? String, "/dev/pts/7")
+        XCTAssertEqual((edge["host"] as? [String: Any])?["id"] as? String, "host-1")
+        XCTAssertEqual(edge["stdin_sha256"] as? String, CursorHookPayload.deliveryDigest(of: Data(stdin.utf8)))
+        XCTAssertNil(edge["env"], "a remote hook sends no environment")
+        XCTAssertNil(edge["ppid"], "nor a process id")
+        for key in ["_source", "_remote_host_id", "_tty"] {
+            XCTAssertNil(raw[key], "\(key) is the island's to derive")
+        }
+
+        let (event, intake) = try intake(sent)
+        XCTAssertEqual(event["_source"] as? String, "claude")
+        XCTAssertEqual(event["_remote_host_id"] as? String, "host-1")
+        XCTAssertEqual(event["_remote_host_name"] as? String, "Build Box")
+        XCTAssertEqual(event["_tty"] as? String, "/dev/pts/7")
+        XCTAssertEqual(event["session_id"] as? String, "sess-1")
+        XCTAssertEqual(event["cwd"] as? String, "/work/proj")
+        XCTAssertNil(event["_edge"])
+        XCTAssertNil(event["_ppid"])
+        XCTAssertFalse(intake.waitsForAnswer)
+    }
+
+    /// A blocking request: the island's answer goes back as the agent reads
+    /// it, and the hook prints it.
+    func testPermissionAnswerReachesTheAgent() throws {
+        let stdin = #"{"hook_event_name":"PermissionRequest","session_id":"sess-2","cwd":"/work/proj","tool_name":"Bash","tool_input":{"command":"make"}}"#
+        let (sent, _) = try runHook(source: "claude", stdin: stdin)
+        let (_, intake) = try intake(sent)
+        XCTAssertTrue(intake.waitsForAnswer)
+        let allow = Data(#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#.utf8)
+        let answer = try XCTUnwrap(intake.stdout(forAnswer: allow))
+
+        let (_, printed) = try runHook(source: "claude", stdin: stdin, reply: answer)
+        XCTAssertEqual(printed, String(decoding: allow, as: UTF8.self) + "\n")
+    }
+
+    /// Gemini reads `{"decision": …}`; the island now puts the answer that
+    /// way for the remote hook too, as the bridge does for the local one.
+    func testGeminiAnswerIsPutOnTheIsland() throws {
+        let stdin = #"{"hook_event_name":"BeforeTool","session_id":"gem-1","tool_name":"run_shell_command"}"#
+        let (sent, _) = try runHook(source: "gemini", stdin: stdin)
+        let (event, intake) = try intake(sent)
+        XCTAssertEqual(event["_source"] as? String, "gemini")
+        let deny = Data(#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8)
+        let answer = try XCTUnwrap(intake.stdout(forAnswer: deny))
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), #"{"decision":"deny"}"#)
+
+        let (_, printed) = try runHook(source: "gemini", stdin: stdin, reply: answer)
+        XCTAssertEqual(printed, #"{"decision":"deny"}"# + "\n")
+    }
+
+    /// The island answers a hook it does not hold at once and with nothing;
+    /// the hook then prints nothing.
+    func testNothingIsPrintedForAnEmptyAnswer() throws {
+        let stdin = #"{"hook_event_name":"PermissionRequest","session_id":"conv-1","cursor_version":"3.25.9","question":"Run?"}"#
+        let (sent, printed) = try runHook(source: "claude", stdin: stdin, reply: Data())
+        XCTAssertEqual(printed, "")
+        guard case .answerNothing = HookServer.intake(try XCTUnwrap(sent)) else {
+            return XCTFail("a Cursor hook is not held on the island")
+        }
+    }
+
+    /// A hook with no session id used to stop at the remote hook; it now
+    /// reaches the island, which drops it — without anyone waiting on it.
+    func testHookWithoutSessionIsDroppedOnTheIsland() throws {
+        let (sent, printed) = try runHook(source: "claude", stdin: #"{"hook_event_name":"Stop"}"#)
+        XCTAssertEqual(printed, "")
+        guard case .answerNothing = HookServer.intake(try XCTUnwrap(sent)) else {
+            return XCTFail("a hook with no session is dropped")
+        }
+    }
+
+    // MARK: - Agreement and compatibility
+
+    /// The remote hook decides on its own whether to wait for an answer (no
+    /// round trip for the rest); it must wait exactly when HookIntake holds
+    /// the hook, or a held card would answer nobody.
+    func testRemoteHookWaitsExactlyWhenTheIslandHoldsTheHook() throws {
+        // Every name EventNormalizer maps, and a few it passes through.
+        let names = [
+            "beforeSubmitPrompt", "beforeShellExecution", "afterShellExecution", "beforeReadFile",
+            "afterFileEdit", "beforeMCPExecution", "afterMCPExecution", "afterAgentThought",
+            "afterAgentResponse", "stop", "BeforeTool", "AfterTool", "BeforeAgent", "AfterAgent",
+            "sessionStart", "sessionEnd", "userPromptSubmitted", "preToolUse", "postToolUse",
+            "errorOccurred", "agentSpawn", "userPromptSubmit", "session_start", "session_end",
+            "user_prompt_submit", "pre_tool_use", "post_tool_use", "post_tool_use_failure",
+            "permission_request", "permission_denied", "stop_failure", "StopFailure",
+            "subagent_start", "subagent_stop", "pre_compact", "post_compact", "notification",
+            "pre_tool_call", "post_tool_call", "pre_llm_call", "post_llm_call", "on_session_start",
+            "on_session_end", "on_session_finalize", "on_session_reset", "TaskStart", "TaskResume",
+            "TaskComplete", "TaskCancel",
+            "PermissionRequest", "Notification", "PreToolUse", "PostToolUse", "Stop", "SessionStart",
+            "SessionEnd", "UserPromptSubmit", "SubagentStop", "PreCompact", "Elicitation",
+        ]
+        var payloads: [[String: Any]] = []
+        for name in names {
+            payloads.append(["hook_event_name": name, "session_id": "s"])
+            payloads.append(["hook_event_name": name, "session_id": "s", "question": "Which one?"])
+            payloads.append(["hook_event_name": name, "session_id": "s", "question": ["not": "a string"]])
+        }
+        payloads.append(["event": "PermissionRequest", "session_id": "s"])
+
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: payloads), as: UTF8.self)
+        let driver = """
+        import importlib.util, json, sys
+        spec = importlib.util.spec_from_file_location("hook", sys.argv[1])
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        print(json.dumps([hook._waits_for_answer(p) for p in json.loads(sys.argv[2])]))
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-c", driver, hookURL.path, json]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        let waits = try XCTUnwrap(JSONSerialization.jsonObject(with: stdout.fileHandleForReading.readDataToEndOfFile()) as? [Bool])
+        XCTAssertEqual(waits.count, payloads.count)
+
+        for (payload, edgeWaits) in zip(payloads, waits) {
+            var delivered = payload
+            delivered["_edge"] = ["v": 1, "source": "claude", "host": ["id": "h", "name": "h"]] as [String: Any]
+            guard case .interpreted(let intake)? = HookEdgeFacts.delivery(in: delivered) else {
+                XCTFail("\(payload): dropped")
+                continue
+            }
+            XCTAssertEqual(edgeWaits, intake.waitsForAnswer, "\(payload)")
+        }
+    }
+
+    /// Remote hooks installed before facts existed (0.3.1) keep interpreting
+    /// their hooks themselves; the island takes their payload byte for byte.
+    func testPayloadsFromOlderRemoteHooksPassUntouched() throws {
+        let legacy = Data(#"{"hook_event_name":"Stop","session_id":"sess-9","cwd":"/work/proj","_source":"claude","_remote_host_id":"host-1","_remote_host_name":"Build Box","_tty":"/dev/pts/7","last_assistant_message":"Done."}"#.utf8)
+        guard case .route(let routed, let edge) = HookServer.intake(legacy) else {
+            return XCTFail("a legacy payload is routed")
+        }
+        XCTAssertEqual(routed, legacy)
+        XCTAssertNil(edge)
+    }
+
+    func testVersionMatchesTheInstaller() throws {
+        let source = try XCTUnwrap(RemoteInstaller.remoteHookSource())
+        let script = RemoteInstaller.configureRemoteHooksScript(host: RemoteHost(id: "h", name: "h", host: "example.com"))
+        let version = try XCTUnwrap(source.split(separator: "\n").first { $0.hasPrefix("VERSION = ") })
+        XCTAssertTrue(script.contains(String(version).replacingOccurrences(of: "VERSION = ", with: "version = ")), String(version))
+    }
+}

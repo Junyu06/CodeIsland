@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
+# CodeIsland's hook on a remote host. It does not interpret the hook: it sends
+# the agent's stdin as is, with what it observed in `_edge` (source, cwd, tty,
+# host, a digest of the stdin), and the island reads both with HookIntake, the
+# interpretation codeisland-bridge runs on the Mac (docs/hook-edge-protocol.md).
+# What only this host can see — transcripts, the Hermes store — is read here.
+import hashlib
 import json
 import os
 import socket
 import subprocess
 import sys
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
+# The `_edge` facts version (HookEdgeFacts.version on the island).
+EDGE_FACTS_VERSION = 1
 # Per-user socket path (#193): CodeIsland injects CODEISLAND_SOCKET_PATH via the hook
 # command, but fall back to a uid-scoped path so multiple users on a shared host never
 # collide on a single /tmp/codeisland.sock.
@@ -22,99 +30,25 @@ BLOCKING_TIMEOUT_SECONDS = 86400
 TRANSCRIPT_TAIL_BYTES = 262144
 
 
-def _normalize_event(name):
-    """Best-effort normalization matching CodeIslandCore.EventNormalizer."""
-    if not isinstance(name, str):
-        return ""
-    # Cursor (camelCase)
-    if name == "beforeSubmitPrompt":
-        return "UserPromptSubmit"
-    if name == "beforeShellExecution":
-        return "PreToolUse"
-    if name == "afterShellExecution":
-        return "PostToolUse"
-    if name == "beforeReadFile":
-        return "PreToolUse"
-    if name == "afterFileEdit":
-        return "PostToolUse"
-    if name == "beforeMCPExecution":
-        return "PreToolUse"
-    if name == "afterMCPExecution":
-        return "PostToolUse"
-    if name == "afterAgentThought":
-        return "Notification"
-    if name == "afterAgentResponse":
-        return "AfterAgentResponse"
-    if name == "stop":
-        return "Stop"
-    # Gemini
-    if name == "BeforeTool":
-        return "PermissionRequest"
-    if name == "AfterTool":
-        return "PostToolUse"
-    if name == "BeforeAgent":
-        return "SubagentStart"
-    if name == "AfterAgent":
-        return "SubagentStop"
-    # GitHub Copilot CLI
-    if name == "sessionStart":
-        return "SessionStart"
-    if name == "sessionEnd":
-        return "SessionEnd"
-    if name == "userPromptSubmitted":
-        return "UserPromptSubmit"
-    if name == "preToolUse":
-        return "PreToolUse"
-    if name == "postToolUse":
-        return "PostToolUse"
-    if name == "errorOccurred":
-        return "Notification"
-    # TraeCli (snake_case)
-    if name == "session_start":
-        return "SessionStart"
-    if name == "session_end":
-        return "SessionEnd"
-    if name == "user_prompt_submit":
-        return "UserPromptSubmit"
-    if name == "pre_tool_use":
-        return "PreToolUse"
-    if name == "post_tool_use":
-        return "PostToolUse"
-    if name == "post_tool_use_failure":
-        return "PostToolUseFailure"
-    if name == "permission_request":
-        return "PermissionRequest"
-    if name == "subagent_start":
-        return "SubagentStart"
-    if name == "subagent_stop":
-        return "SubagentStop"
-    if name == "pre_compact":
-        return "PreCompact"
-    if name == "post_compact":
-        return "PostCompact"
-    if name == "notification":
-        return "Notification"
-    # Hermes (Nous Research) — snake_case, diverged from Claude/Gemini (#226).
-    # `subagent_stop` is already handled above.
-    if name == "pre_tool_call":
-        return "PreToolUse"
-    if name == "post_tool_call":
-        return "PostToolUse"
-    if name == "pre_llm_call":
-        return "UserPromptSubmit"
-    if name == "post_llm_call":
-        return "AgentTurnSettled"
-    if name == "on_session_start":
-        return "SessionStart"
-    # Despite its name, Hermes fires on_session_end at the end of every turn.
-    if name == "on_session_end":
-        return "Stop"
-    # The real end of a session (/new, quitting, gateway shutdown).
-    if name == "on_session_finalize":
-        return "SessionEnd"
-    if name == "on_session_reset":
-        return "SessionEnd"
-    return name
+# Whether the hook waits for the island's answer: a permission request, or a
+# question. Decided here so that no other hook waits on a round trip; the
+# island has the last word and answers a hook it does not hold (one Cursor
+# runs) at once, with nothing. The event names are those EventNormalizer maps
+# to PermissionRequest and Notification.
+_PERMISSION_EVENTS = {"PermissionRequest", "permission_request", "BeforeTool"}
+_NOTIFICATION_EVENTS = {"Notification", "notification", "afterAgentThought", "errorOccurred"}
+
+
+def _event_name(data):
+    name = data.get("hook_event_name") or data.get("event")
+    return name if isinstance(name, str) else None
+
+
+def _waits_for_answer(data):
+    name = _event_name(data)
+    if name in _PERMISSION_EVENTS:
+        return True
+    return name in _NOTIFICATION_EVENTS and isinstance(data.get("question"), str)
 
 
 def _claude_config_dir():
@@ -453,11 +387,19 @@ def _scan_hermes_store(session_id):
         conn.close()
 
 
-def _read_stdin_json():
+def _read_stdin():
     try:
-        return json.load(sys.stdin)
+        return sys.stdin.buffer.read()
+    except Exception:
+        return b""
+
+
+def _parse_object(raw):
+    try:
+        data = json.loads(raw)
     except Exception:
         return None
+    return data if isinstance(data, dict) else None
 
 
 def _send_event(payload, expects_response):
@@ -508,12 +450,41 @@ def _get_tty():
     return None
 
 
-def _is_cursor_payload(data):
-    """Cursor runs the Claude Code hooks it imports with its own input, which
-    always carries `cursor_version` (#377). Over Remote-SSH that is this script
-    under CODEISLAND_SOURCE=claude, so the card would otherwise say Claude."""
-    version = data.get("cursor_version")
-    return isinstance(version, str) and bool(version.strip())
+def _getcwd():
+    try:
+        return os.getcwd()
+    except OSError:
+        return None
+
+
+def _edge_facts(raw, data):
+    """What this hook observed, for the island to interpret (HookEdgeFacts)."""
+    edge = {
+        "v": EDGE_FACTS_VERSION,
+        "source": SOURCE,
+        "host": {"id": REMOTE_HOST_ID, "name": REMOTE_HOST_NAME},
+        "stdin_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    cwd = _getcwd()
+    if cwd:
+        edge["cwd"] = cwd
+    # A payload that names its terminal already (the remote OpenCode plugin's)
+    # spares the process walk.
+    if not data.get("_tty"):
+        tty = _get_tty()
+        if tty:
+            edge["tty"] = tty
+    return edge
+
+
+def _merge_extras(payload, extras, event_name):
+    for key, value in extras.items():
+        if value and not payload.get(key):
+            payload[key] = value
+    if event_name == "UserPromptSubmit" and not payload.get("prompt"):
+        prompt = extras.get("last_user_message")
+        if prompt:
+            payload["prompt"] = prompt
 
 
 def main():
@@ -521,60 +492,27 @@ def main():
         print(VERSION)
         return 0
 
-    data = _read_stdin_json()
+    raw = _read_stdin()
+    data = _parse_object(raw)
     if not data:
         return 1
 
-    event_name = data.get("hook_event_name") or data.get("event")
+    event_name = _event_name(data)
     session_id = data.get("session_id")
-    cwd = data.get("cwd") or os.getcwd()
-    if not event_name or not session_id:
-        return 1
-
-    normalized_event = _normalize_event(event_name)
-    is_cursor = _is_cursor_payload(data)
-    source = "cursor" if is_cursor else SOURCE
-
+    cwd = data.get("cwd") or _getcwd()
     payload = dict(data)
-    payload["hook_event_name"] = event_name
-    payload["session_id"] = session_id
-    payload["cwd"] = cwd
-    payload["_source"] = payload.get("_source") or source
-    payload["_remote_host_id"] = payload.get("_remote_host_id") or REMOTE_HOST_ID
-    payload["_remote_host_name"] = payload.get("_remote_host_name") or REMOTE_HOST_NAME
-    payload["_tty"] = payload.get("_tty") or _get_tty()
 
-    if source == "claude":
-        extras = _scan_claude_jsonl(session_id, cwd)
-        for key, value in extras.items():
-            if value and not payload.get(key):
-                payload[key] = value
-        if normalized_event == "UserPromptSubmit" and not payload.get("prompt"):
-            prompt = extras.get("last_user_message")
-            if prompt:
-                payload["prompt"] = prompt
+    # What only this host can read: the agent's transcript, Hermes's store.
+    if SOURCE == "claude":
+        _merge_extras(payload, _scan_claude_jsonl(session_id, cwd), event_name)
 
     if SOURCE == "qoder":
-        extras = _scan_qoder_jsonl(session_id, cwd)
-        for key, value in extras.items():
-            if value and not payload.get(key):
-                payload[key] = value
-        if normalized_event == "UserPromptSubmit" and not payload.get("prompt"):
-            prompt = extras.get("last_user_message")
-            if prompt:
-                payload["prompt"] = prompt
+        _merge_extras(payload, _scan_qoder_jsonl(session_id, cwd), event_name)
 
     if SOURCE == "codebuddy":
-        extras = _scan_codebuddy_jsonl(session_id, cwd)
-        for key, value in extras.items():
-            if value and not payload.get(key):
-                payload[key] = value
-        if normalized_event == "UserPromptSubmit" and not payload.get("prompt"):
-            prompt = extras.get("last_user_message")
-            if prompt:
-                payload["prompt"] = prompt
+        _merge_extras(payload, _scan_codebuddy_jsonl(session_id, cwd), event_name)
 
-    if SOURCE == "codex" and normalized_event not in {"SessionStart", "UserPromptSubmit"}:
+    if SOURCE == "codex" and event_name not in {"SessionStart", "UserPromptSubmit"}:
         extras = _scan_codex_jsonl(payload.get("transcript_path"))
         if extras.get("last_assistant_message") and not payload.get("last_assistant_message"):
             payload["last_assistant_message"] = extras["last_assistant_message"]
@@ -589,32 +527,12 @@ def main():
         if store:
             payload["_hermes_store"] = store
 
-    # Blocking events: permission prompts + question prompts. Never for a hook
-    # Cursor runs: it reads stdout against its own schema for the step, so an
-    # island answer is not one it acts on.
-    expects_response = not is_cursor and (
-        normalized_event == "PermissionRequest"
-        or (normalized_event == "Notification" and payload.get("question"))
-    )
-    response = _send_event(payload, expects_response)
+    payload["_edge"] = _edge_facts(raw, data)
+    response = _send_event(payload, _waits_for_answer(data))
+    # The island sends the answer as the agent reads it (Gemini's decision
+    # included), or nothing when there is none to give.
     if response:
-        if SOURCE == "google-antigravity" or SOURCE == "gemini":
-            try:
-                res_obj = json.loads(response)
-                behavior = res_obj.get("hookSpecificOutput", {}).get("decision", {}).get("behavior")
-                if behavior in ("allow", "always"):
-                    print(json.dumps({"decision": "allow"}))
-                else:
-                    print(json.dumps({"decision": "deny"}))
-            except Exception:
-                if '"behavior":"allow"' in response or '"behavior":"always"' in response:
-                    print(json.dumps({"decision": "allow"}))
-                elif '"behavior":"deny"' in response:
-                    print(json.dumps({"decision": "deny"}))
-                else:
-                    print(response)
-        else:
-            print(response)
+        print(response)
     return 0
 
 

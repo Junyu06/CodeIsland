@@ -3,10 +3,12 @@ import Foundation
 /// One hook delivery, interpreted: the event the island gets, whether the
 /// hook waits for the island's answer, and how that answer reaches its agent.
 ///
-/// Every edge delivers through this one interpretation: codeisland-bridge
+/// Every edge delivers through this one interpretation. codeisland-bridge
 /// gathers the facts itself — its argv, environment, stdin and process tree —
-/// and runs it before it connects. A provider quirk such as Cursor running
-/// Claude Code's hooks (#377) is then handled here once, not in every edge.
+/// and runs it before it connects; an edge that cannot run Swift (the remote
+/// hook) sends what it observed in `_edge` (``HookEdgeFacts``) and HookServer
+/// runs it on arrival. A provider quirk such as Cursor running Claude Code's
+/// hooks (#377) is then handled here once, not in every edge.
 ///
 /// It reads nothing but the ``Facts`` it is handed. The ones that cost a
 /// process lookup or a subprocess (an ancestor's argv, the tmux client) are
@@ -59,7 +61,8 @@ public struct HookIntake {
         /// `--event`: for agents whose stdin does not name the event.
         public var eventTag: String?
         /// The source to stamp when nothing declares or infers one. The
-        /// bridge has none: the island then defaults to Claude.
+        /// bridge has none (the island then defaults to Claude); see
+        /// ``HookEdgeFacts/facts(from:localMachine:)`` for an edge's.
         public var defaultSource: String?
         /// The hook's environment. Only ``HookIntake/environmentKeys`` are read.
         public var environment: [String: String]
@@ -213,6 +216,9 @@ public struct HookIntake {
         var json = Self.dropsPartsOfStdin(sourceTag: facts.sourceTag)
             ? HermesHookPayload.trimmedForForwarding(stdin)
             : stdin
+        // Facts are not part of the event. The bridge reads its own and drops
+        // any piped in with the stdin, so nothing interprets a hook twice.
+        json.removeValue(forKey: HookEdgeFacts.key)
         let env = facts.environment
         let sourceTag = facts.sourceTag
         let eventTag = facts.eventTag

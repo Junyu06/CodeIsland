@@ -1,5 +1,6 @@
 import XCTest
 @testable import CodeIsland
+import CodeIslandCore
 
 /// #364 — remote Hermes. The Mac can't open a remote host's
 /// `~/.hermes/state.db`, so the remote hook reads the session's title and
@@ -148,14 +149,15 @@ final class RemoteHookHermesStoreTests: XCTestCase {
         XCTAssertEqual(extra["user_message"] as? String, "Next step?")
         let store = try XCTUnwrap(sent["_hermes_store"] as? [String: Any])
         XCTAssertEqual(store["title"] as? String, "Fix the login bug")
-        XCTAssertEqual(sent["_source"] as? String, "hermes")
-    }
-
-    func testOnSessionEndNormalizesToStop() throws {
-        let names = try XCTUnwrap(runDriver("""
-            print(json.dumps([hook._normalize_event(n) for n in (
-                "on_session_end", "post_llm_call", "pre_llm_call", "on_session_finalize")]))
-            """) as? [String])
-        XCTAssertEqual(names, ["Stop", "AgentTurnSettled", "UserPromptSubmit", "SessionEnd"])
+        // The source is the island's reading of the hook's facts.
+        XCTAssertNil(sent["_source"])
+        let edge = try XCTUnwrap(sent["_edge"] as? [String: Any])
+        XCTAssertEqual(edge["source"] as? String, "hermes")
+        guard case .interpreted(let intake)? = HookEdgeFacts.delivery(in: sent) else {
+            return XCTFail("the island drops the hook")
+        }
+        XCTAssertEqual(intake.payload["_source"] as? String, "hermes")
+        XCTAssertNil(intake.payload["_hermes_home"], "the store is read on the remote host")
+        XCTAssertEqual((intake.payload["_hermes_store"] as? [String: Any])?["title"] as? String, "Fix the login bug")
     }
 }

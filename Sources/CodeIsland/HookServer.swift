@@ -420,7 +420,58 @@ class HookServer {
         }
     }
 
-    private func processRequest(data: Data, connection: NWConnection) {
+    /// The interpretation of each pending edge delivery that sent facts
+    /// (`_edge`), by connection: its answer goes back as its agent reads it.
+    private var edgeIntakes: [ObjectIdentifier: HookIntake] = [:]
+
+    /// A delivery before it is routed (``intake(_:)``).
+    enum Intake {
+        /// Route `payload`. `edge` is HookIntake's reading of an edge that
+        /// sent facts, nil for a payload its edge interpreted itself.
+        case route(_ payload: Data, edge: HookIntake?)
+        /// Answer nothing, and stop.
+        case answerNothing
+    }
+
+    /// An edge that cannot interpret its hook sends what it observed in
+    /// `_edge` instead (``HookEdgeFacts``); HookIntake reads it here, as
+    /// codeisland-bridge does on its own side. A payload without facts is its
+    /// edge's own interpretation and passes as it is.
+    static func intake(_ data: Data) -> Intake {
+        guard HookEdgeFacts.mayCarryFacts(data),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let delivery = HookEdgeFacts.delivery(in: payload) else {
+            return .route(data, edge: nil)
+        }
+        guard case .interpreted(let intake) = delivery,
+              let interpreted = try? JSONSerialization.data(withJSONObject: intake.payload) else {
+            return .answerNothing
+        }
+        // Whether the hook waits is HookIntake's call, not the edge's: one it
+        // does not hold (a hook Cursor runs, #377) is answered at once with
+        // nothing, as the bridge prints nothing for it, and gets no card to
+        // wait on — its agent takes no answer from the island.
+        if !intake.waitsForAnswer,
+           let event = HookEvent(json: intake.payload),
+           routeKind(for: event) != .event {
+            return .answerNothing
+        }
+        return .route(interpreted, edge: intake)
+    }
+
+    private func processRequest(data received: Data, connection: NWConnection) {
+        let connectionId = ObjectIdentifier(connection)
+        edgeIntakes[connectionId] = nil
+        let data: Data
+        switch Self.intake(received) {
+        case .answerNothing:
+            sendResponse(connection: connection, data: Data())
+            return
+        case .route(let payload, let edge):
+            edgeIntakes[connectionId] = edge
+            data = payload
+        }
+
         // Sub-session pre-filter: a child session's hook (a Codex thread, a
         // Cursor Task, a declared child, a plugin proxy) follows Agent
         // Sub-Sessions — its own linked card, its parent's card, or hidden.
@@ -624,6 +675,15 @@ class HookServer {
         // Mark as responded BEFORE cancel() so the disconnect monitor ignores our own teardown.
         if let context = connectionContexts[ObjectIdentifier(connection)] {
             context.responded = true
+        }
+        // An edge that sent facts gets what the bridge would have printed.
+        var data = data
+        if let intake = edgeIntakes.removeValue(forKey: ObjectIdentifier(connection)) {
+            data = intake.stdout(forAnswer: data) ?? Data()
+        }
+        guard !data.isEmpty else {
+            connection.cancel()
+            return
         }
         connection.send(content: data, completion: .contentProcessed { _ in
             connection.cancel()
