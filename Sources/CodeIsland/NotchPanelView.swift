@@ -325,7 +325,7 @@ struct NotchPanelView: View {
                                 session: session,
                                 sessionId: sid,
                                 appState: appState,
-                                alwaysSavesRule: CodexPermissionRules.isCodexEvent(pending.event),
+                                alwaysSavesRule: CodexPermissionRules.alwaysSavesRule(for: pending.event),
                                 onAllow: { appState.approvePermission(always: false, expectedSessionId: sid) },
                                 onAlwaysAllow: { appState.approvePermission(always: true, expectedSessionId: sid) },
                                 onDeny: { appState.denyPermission(expectedSessionId: sid) },
@@ -1488,7 +1488,8 @@ private struct ApprovalToolDetailView: View {
 enum ApprovalHints {
     /// What "Always" commits to differs by agent: Claude-style hooks add a
     /// rule for the rest of the session, Codex gets a rule saved to disk
-    /// (CodexPermissionRules) that outlives it.
+    /// (CodexPermissionRules) that outlives it — except a remote Codex, whose
+    /// "Always" lasts the session (CodexPermissionRules.alwaysSavesRule).
     static func always(savesRule: Bool) -> String {
         L10n.shared[savesRule ? "always_hint_saved" : "always_hint_session"]
     }
@@ -1507,6 +1508,8 @@ enum ApprovalHints {
 /// Where "Always allow" puts its rule — what the approval card's link says.
 enum ApprovalAlwaysScope: Equatable {
     /// Claude-style hooks: a rule for this tool, for the rest of the session.
+    /// A remote Codex gets the same, kept by the island (its rules are on
+    /// its own host).
     case session
     /// Codex: a prefix rule in ~/.codex/rules, kept for every session.
     case codexRules
@@ -4406,7 +4409,7 @@ private struct SessionCard: View {
                 style: .link,
                 fontSize: buttonFontSize,
                 enabled: enabled,
-                help: queuedHint ?? ApprovalHints.always(savesRule: CodexPermissionRules.isCodexEvent(event)),
+                help: queuedHint ?? ApprovalHints.always(savesRule: CodexPermissionRules.alwaysSavesRule(for: event)),
                 action: { appState.approvePermission(always: true, expectedSessionId: sessionId) }
             )
             Spacer(minLength: 8)

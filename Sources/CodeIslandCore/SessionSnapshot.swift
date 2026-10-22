@@ -196,6 +196,11 @@ public struct SessionSnapshot: Sendable {
     public var aiworkClientType: String?
     public var remoteHostId: String?
     public var remoteHostName: String?
+    /// Tools the user chose "Always allow … this session" for on a card whose
+    /// agent keeps no rule for it: a remote Codex, whose rules live on its
+    /// own host. Its later requests for them are allowed without a card. Goes
+    /// with the card — a SessionStart rebuilds it — and is never persisted.
+    public var alwaysAllowedTools: Set<String> = []
     /// nil = unchecked, false = not YOLO, true = YOLO
     public var isYoloMode: Bool?
     /// Checked-out git branch for cwd; refreshed on cwd changes and Stop

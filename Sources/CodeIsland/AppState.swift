@@ -1893,6 +1893,19 @@ final class AppState {
             return
         }
 
+        // "Always allow … this session" on a remote Codex card
+        // (approvePermission): nothing on its host remembers it, so it is
+        // answered here.
+        if let toolName = event.toolName,
+           CodexPermissionRules.isCodexEvent(event),
+           !CodexPermissionRules.alwaysSavesRule(for: event),
+           sessions[sessionId]?.alwaysAllowedTools.contains(toolName) == true {
+            continuation.resume(returning: Data(
+                #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#.utf8
+            ))
+            return
+        }
+
         // Clear any pending questions from THIS agent (mutually exclusive within an agent;
         // a background subagent's request must not deny the main thread's question)
         drainQuestions(forSession: sessionId, reason: "newPermissionRequest", where: { $0.agentId == event.agentId })
@@ -2020,7 +2033,15 @@ final class AppState {
         dismissedPermissionSessionIds.remove(sessionId)
         let responseData: Data
         if always, CodexPermissionRules.isCodexEvent(pending.event) {
-            _ = CodexPermissionRules().persistAlwaysAllowRule(for: pending.event)
+            if CodexPermissionRules.alwaysSavesRule(for: pending.event) {
+                _ = CodexPermissionRules().persistAlwaysAllowRule(for: pending.event)
+            } else if let toolName = pending.event.toolName, !toolName.isEmpty {
+                // A remote Codex reads its rules on its own host, and none
+                // may be written to this Mac's. "Always" holds for this
+                // session instead — what the card said — and the island
+                // answers the session's next requests for the tool.
+                sessions[sessionId]?.alwaysAllowedTools.insert(toolName)
+            }
             let response = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
             responseData = Data(response.utf8)
         } else if always, Self.isZcodeEvent(pending.event) {

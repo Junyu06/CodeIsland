@@ -85,6 +85,36 @@ final class NotchCardRedesignTests: XCTestCase {
         XCTAssertTrue(ApprovalHints.always(scope: .session).contains("session"))
     }
 
+    /// A remote Codex's "Always" saves nothing on this Mac and holds for the
+    /// session, so its card must not claim a rule saved under ~/.codex.
+    func testRemoteCodexAlwaysLinkClaimsNoSavedRule() throws {
+        func codexRequest(_ tool: String, remoteHost: String?) throws -> HookEvent {
+            var payload: [String: Any] = [
+                "hook_event_name": "PermissionRequest", "session_id": "s1",
+                "_source": "codex", "tool_name": tool, "tool_input": ["command": "make"],
+            ]
+            payload["_remote_host_id"] = remoteHost
+            return try XCTUnwrap(HookEvent(from: JSONSerialization.data(withJSONObject: payload)))
+        }
+        for tool in ["Bash", "mcp__docs__search"] {
+            let remote = try codexRequest(tool, remoteHost: "devbox")
+            let scope = ApprovalAlwaysScope(savesRule: CodexPermissionRules.alwaysSavesRule(for: remote), tool: tool)
+            XCTAssertEqual(scope, .session, tool)
+            XCTAssertFalse(ApprovalCopy.alwaysLink(tool: tool, scope: scope).contains("~/.codex"), tool)
+            XCTAssertFalse(ApprovalHints.always(scope: scope).contains("~/.codex"), tool)
+            XCTAssertFalse(
+                ApprovalHints.always(savesRule: CodexPermissionRules.alwaysSavesRule(for: remote)).contains("~/.codex"),
+                "the session list's inline row, \(tool)"
+            )
+
+            let local = try codexRequest(tool, remoteHost: nil)
+            XCTAssertNotEqual(
+                ApprovalAlwaysScope(savesRule: CodexPermissionRules.alwaysSavesRule(for: local), tool: tool), .session,
+                "a local Codex still saves its rule, \(tool)"
+            )
+        }
+    }
+
     func testQueuePositionOnlyWithMoreThanOneWaiting() {
         XCTAssertNil(NotchCardQueueLabel.text(position: 1, total: 1))
         XCTAssertEqual(NotchCardQueueLabel.text(position: 2, total: 3), "2 of 3")

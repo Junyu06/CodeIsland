@@ -12,6 +12,21 @@ struct CodexPermissionRules {
         SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) == "codex"
     }
 
+    /// A request from a remote host (`_remote_host_id`, whatever its value:
+    /// only this Mac's own hooks leave it out). That Codex reads its config
+    /// and rules on its own host, so nothing under this Mac's CODEX_HOME
+    /// describes it, and nothing written there reaches it.
+    static func isRemoteEvent(_ event: HookEvent) -> Bool {
+        event.rawJSON["_remote_host_id"] != nil
+    }
+
+    /// Whether "Always allow" saves a Codex rule (persistAlwaysAllowRule) —
+    /// what the approval card's link says it does. A remote Codex request's
+    /// "Always" holds for its session instead (AppState.approvePermission).
+    static func alwaysSavesRule(for event: HookEvent) -> Bool {
+        isCodexEvent(event) && !isRemoteEvent(event)
+    }
+
     /// The Codex root the event's session runs under — its config.toml and
     /// rules are the ones that apply. A session started with CODEX_HOME set to
     /// an extra root registered in Settings is recognised by the transcript
@@ -214,6 +229,8 @@ struct CodexPermissionRules {
 
     @discardableResult
     func persistAlwaysAllowRule(for event: HookEvent) -> Bool {
+        // A remote command or tool must never become a rule for this Mac's Codex.
+        guard !Self.isRemoteEvent(event) else { return false }
         let codexHome = Self.codexHome(for: event)
         if let mcpTool = Self.mcpToolApprovalTarget(for: event) {
             return persistMCPToolApproval(serverID: mcpTool.serverID, toolName: mcpTool.toolName, codexHome: codexHome)
