@@ -282,13 +282,15 @@ enum RemoteInstaller {
 
         def set_shared_mode(fd, checked):
             # Never through a symlink. Where chmod cannot leave a symlink alone
-            # (Linux), a descriptor of the socket itself (O_PATH) is changed
-            # through /proc instead. The last resort follows a symlink only in
-            # a folder nobody but this user can write to.
+            # (Linux before glibc 2.32: Python raises NotImplementedError, or
+            # ValueError with dir_fd), a descriptor of the socket itself
+            # (O_PATH) is changed through /proc instead. The last resort
+            # follows a symlink only in a folder nobody but this user can
+            # write to.
             try:
                 os.chmod(name, 0o666, dir_fd=fd, follow_symlinks=False)
                 return
-            except NotImplementedError:
+            except (NotImplementedError, ValueError):
                 pass
             except OSError as e:
                 if e.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL):

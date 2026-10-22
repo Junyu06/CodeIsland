@@ -35,10 +35,11 @@ final class RemoteSocketFolderTests: XCTestCase {
     }
 
     /// Runs `script` with python3, as `getuid` if given (`os.getuid` patched:
-    /// a test cannot be another user), the way a host's login shell runs
+    /// a test cannot be another user), after `prelude` (a host's Python, as
+    /// a test makes it), the way a host's login shell runs
     /// ``RemoteInstaller/pythonCommand(_:)``.
-    private func run(_ script: String, asUID fakeUID: Int? = nil, shell: String = "/bin/sh") throws -> Run {
-        let program = fakeUID.map { "import os\nos.getuid = lambda: \($0)\n" + script } ?? script
+    private func run(_ script: String, asUID fakeUID: Int? = nil, prelude: String = "", shell: String = "/bin/sh") throws -> Run {
+        let program = prelude + (fakeUID.map { "import os\nos.getuid = lambda: \($0)\n" } ?? "") + script
         let process = Process()
         process.executableURL = URL(fileURLWithPath: shell)
         process.arguments = ["-c", RemoteInstaller.pythonCommand(program)]
@@ -66,9 +67,9 @@ final class RemoteSocketFolderTests: XCTestCase {
         return RemoteInstaller.preparedSocketPath(fromProbe: ran.output, errorOutput: ran.errorOutput, exitCode: ran.exitCode, base: base)
     }
 
-    private func verify(_ socketPath: String, shared: Bool = false) throws -> RemoteSocketCheckFailure? {
+    private func verify(_ socketPath: String, shared: Bool = false, prelude: String = "") throws -> RemoteSocketCheckFailure? {
         let script = RemoteInstaller.verifyRemoteSocketScript(socketPath: socketPath, agentsRunAsOtherUsers: shared)
-        let ran = try run(script)
+        let ran = try run(script, prelude: prelude)
         return RemoteInstaller.socketProblem(fromCheck: ran.output, errorOutput: ran.errorOutput, exitCode: ran.exitCode, socketPath: socketPath)
     }
 
@@ -224,6 +225,30 @@ final class RemoteSocketFolderTests: XCTestCase {
         chmod(path, 0o600)  // as sshd's own mask leaves it
         XCTAssertNil(try verify(path, shared: true))
         XCTAssertEqual(try mode(path), 0o666)
+    }
+
+    /// A host whose Python cannot chmod without following a symlink — Linux
+    /// before glibc 2.32 raises ValueError with dir_fd, NotImplementedError
+    /// without — still gives the socket its mode, another way.
+    func testASocketGetsItsModeWhereChmodMustFollowSymlinks() throws {
+        guard case .success(let path) = try prepare(shared: true) else { return XCTFail("no folder") }
+        try leaveSocket(at: path)
+        for refusal in ["ValueError(\"chmod: cannot use dir_fd and follow_symlinks together\")",
+                        "NotImplementedError(\"chmod: follow_symlinks unavailable on this platform\")"] {
+            chmod(path, 0o600)
+            let prelude = """
+                import os
+                _chmod = os.chmod
+                def _no_nofollow(path, mode, *, dir_fd=None, follow_symlinks=True):
+                    if not follow_symlinks:
+                        raise \(refusal)
+                    return _chmod(path, mode, dir_fd=dir_fd)
+                os.chmod = _no_nofollow
+
+                """
+            XCTAssertNil(try verify(path, shared: true, prelude: prelude), refusal)
+            XCTAssertEqual(try mode(path), 0o666, refusal)
+        }
     }
 
     /// Nothing there, or something other than a socket — a symlink, even to
