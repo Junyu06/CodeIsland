@@ -8,6 +8,10 @@
 // • session_id validation (drop events without it)
 // • CODEISLAND_SKIP env var support
 // • Debug logging (CODEISLAND_DEBUG)
+//
+// What a hook means is HookIntake's call (CodeIslandCore), the one
+// interpretation every edge shares: the bridge gathers the facts it reads —
+// argv, environment, stdin, process tree — and delivers what it returns.
 // ============================================================
 
 import Foundation
@@ -127,12 +131,6 @@ func debugLog(_ message: String) {
     }
 }
 
-func nonEmptyString(_ value: Any?) -> String? {
-    guard let raw = value as? String else { return nil }
-    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    return trimmed.isEmpty ? nil : trimmed
-}
-
 func connectSocket(_ path: String, timeoutMs: Int32 = 3000) -> Int32? {
     let sock = socket(AF_UNIX, SOCK_STREAM, 0)
     guard sock >= 0 else { return nil }
@@ -238,29 +236,16 @@ if let idx = args.firstIndex(of: "--event"), idx + 1 < args.count {
 // decision, so answer before any of the early exits below can leave stdout
 // empty (island not running, CODEISLAND_SKIP, a deadline). The island only
 // observes Antigravity tool calls; the decision stays with Antigravity (#339).
-var wroteAntigravityDecision = false
-func writeAntigravityDecisionIfNeeded(eventName: String?) {
-    guard !wroteAntigravityDecision,
-          let stdout = AntigravityHookContract.hookStdout(source: sourceTag, eventName: eventName) else { return }
-    wroteAntigravityDecision = true
+var wroteImmediateStdout = false
+func writeImmediateStdout(_ stdout: String?) {
+    guard !wroteImmediateStdout, let stdout else { return }
+    wroteImmediateStdout = true
     FileHandle.standardOutput.write(Data(stdout.utf8))
 }
-writeAntigravityDecisionIfNeeded(eventName: eventTag)
+writeImmediateStdout(HookIntake.immediateStdout(sourceTag: sourceTag, eventName: eventTag))
 
-// Quick exit: skip if CODEISLAND_SKIP is set
-guard env["CODEISLAND_SKIP"] == nil else { exit(0) }
-
-// Grok Build imports ~/.claude and ~/.cursor hooks for compatibility in
-// addition to its own $GROK_HOME/hooks files. Once the dedicated CodeIsland
-// Grok hook is installed, forwarding those imported copies would deliver every
-// lifecycle event two or three times (and can mislabel it as Claude/Cursor).
-// Grok injects these variables for every hook subprocess, so keep only the
-// explicitly managed `--source grok` invocation in that runtime. Keep this
-// decision in CodeIslandCore so the production gate is directly testable.
-let isGrokRuntime = GrokHookForwardingPolicy.isGrokRuntime(environment: env)
-if !GrokHookForwardingPolicy.shouldForward(source: sourceTag, environment: env) {
-    exit(0)
-}
+// Quick exit: CODEISLAND_SKIP, or a hook Grok imported from another agent's config
+guard HookIntake.admits(sourceTag: sourceTag, environment: env) else { exit(0) }
 
 // Quick exit: socket doesn't exist or isn't a socket
 var statBuf = stat()
@@ -271,166 +256,20 @@ guard stat(socketPath, &statBuf) == 0, (statBuf.st_mode & S_IFMT) == S_IFSOCK el
 alarm(5)
 let input = FileHandle.standardInput.readDataToEndOfFile()
 alarm(0)  // stdin done, cancel preliminary alarm
-let parsedInput = try? JSONSerialization.jsonObject(with: input) as? [String: Any]
-// Hermes sends the whole conversation (`extra.conversation_history`) with every
-// pre/post_llm_call. Nothing reads it, so it stays out of the log and the event.
-let hermesInput = sourceTag == "hermes" ? parsedInput.map(HermesHookPayload.trimmedForForwarding) : nil
-if let hermesInput,
-   let data = try? JSONSerialization.data(withJSONObject: hermesInput),
+let stdinObject = HookIntake.stdinObject(input, sourceTag: sourceTag)
+// What HookIntake leaves out of the event (Hermes's copy of the conversation)
+// stays out of the log too.
+if HookIntake.dropsPartsOfStdin(sourceTag: sourceTag),
+   let stdinObject,
+   let data = try? JSONSerialization.data(withJSONObject: stdinObject),
    let inputStr = String(data: data, encoding: .utf8) {
     debugLog("raw input: \(inputStr)")
 } else if let inputStr = String(data: input, encoding: .utf8) {
     debugLog("raw input: \(inputStr)")
 }
 
-guard !input.isEmpty, var json = hermesInput ?? parsedInput else {
+guard !input.isEmpty, let stdinObject else {
     exit(0)
-}
-
-// Cursor also runs CodeIsland's Claude Code hook (it imports Claude Code
-// hooks) with its own payload, so a source-less event may be Cursor's (#377).
-// A step CodeIsland is wired to in both configs reaches the bridge twice with
-// the same stdin; its digest lets the island keep one of the two.
-let isCursorPayload = CursorHookPayload.isCursorHook(json)
-if isCursorPayload {
-    json[CursorHookPayload.digestKey] = CursorHookPayload.deliveryDigest(of: input)
-}
-
-// Hermes runs each hook with the firing profile's HERMES_HOME; the island reads
-// that session's title and messages from the store there (`state.db`).
-if sourceTag == "hermes", let hermesHome = nonEmptyString(env["HERMES_HOME"]) {
-    json["_hermes_home"] = (hermesHome as NSString).expandingTildeInPath
-}
-
-// Grok normally includes these camelCase fields on stdin. The environment
-// fallbacks cover hook variants and make the bridge resilient to truncated
-// passive payloads without inventing a PID-based session identifier.
-if isGrokRuntime {
-    if json["hookEventName"] == nil,
-       let event = nonEmptyString(env["GROK_HOOK_EVENT"]) {
-        json["hookEventName"] = event
-    }
-    if json["sessionId"] == nil,
-       let sessionId = nonEmptyString(env["GROK_SESSION_ID"]) {
-        json["sessionId"] = sessionId
-    }
-    if json["cwd"] == nil,
-       let workspaceRoot = nonEmptyString(json["workspaceRoot"])
-            ?? nonEmptyString(env["GROK_WORKSPACE_ROOT"]) {
-        json["cwd"] = workspaceRoot
-    }
-}
-
-// Generic compatibility: accept common camelCase aliases from third-party forks
-if json["hook_event_name"] == nil {
-    if let event = nonEmptyString(json["hookEventName"]) {
-        json["hook_event_name"] = event
-    } else if let event = nonEmptyString(json["eventName"]) {
-        json["hook_event_name"] = event
-    } else if let event = nonEmptyString(json["event"]) {
-        json["hook_event_name"] = event
-    } else if let event = eventTag {
-        json["hook_event_name"] = event
-    }
-}
-if json["session_id"] == nil {
-    if let sessionId = nonEmptyString(json["sessionId"]) {
-        json["session_id"] = sessionId
-    } else if let payload = json["payload"] as? [String: Any],
-              let sessionId = nonEmptyString(payload["session_id"]) ?? nonEmptyString(payload["sessionId"]) {
-        json["session_id"] = sessionId
-    } else if let data = json["data"] as? [String: Any],
-              let sessionId = nonEmptyString(data["session_id"]) ?? nonEmptyString(data["sessionId"]) {
-        json["session_id"] = sessionId
-    } else if let conversationId = nonEmptyString(json["conversationId"]) {
-        // Google Antigravity (Gemini-based) stdin carries no session_id; it uses
-        // `conversationId` as the stable per-conversation key (#215).
-        json["session_id"] = conversationId
-    }
-}
-
-// Google Antigravity sends the transcript path as camelCase `transcriptPath`;
-// the rest of CodeIsland reads snake_case `transcript_path` (used by the JSONL
-// tailer + cwd inference). Bridge the alias when only the camelCase form exists.
-if json["transcript_path"] == nil, let tp = nonEmptyString(json["transcriptPath"]) {
-    json["transcript_path"] = tp
-}
-
-// Grok's hook payload does not carry a transcript path. Its documented session
-// layout is deterministic, and chat_history.jsonl uses the user/assistant row
-// shapes already understood by CodeIsland's incremental tailer. The path is
-// only forwarded once the file exists (see GrokSessionPaths).
-if isGrokRuntime,
-   json["transcript_path"] == nil,
-   let sessionId = nonEmptyString(json["session_id"]),
-   let cwd = nonEmptyString(json["cwd"]) {
-    let rawHome = nonEmptyString(env["GROK_HOME"])
-    let grokHome: String
-    if let rawHome {
-        if rawHome == "~" {
-            grokHome = FileManager.default.homeDirectoryForCurrentUser.path
-        } else if rawHome.hasPrefix("~/") {
-            grokHome = FileManager.default.homeDirectoryForCurrentUser.path
-                + "/" + rawHome.dropFirst(2)
-        } else {
-            grokHome = rawHome
-        }
-    } else {
-        grokHome = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".grok").path
-    }
-    if let path = GrokSessionPaths.existingChatHistoryPath(
-        grokHome: grokHome,
-        cwd: cwd,
-        sessionId: sessionId
-    ) {
-        json["transcript_path"] = path
-    }
-}
-
-// Copilot CLI adaptation: its stdin JSON lacks session_id and hook_event_name.
-// Normalize Copilot's camelCase payload and pass through sessionId when present.
-if sourceTag == "copilot" {
-    if json["hook_event_name"] == nil, let event = eventTag {
-        json["hook_event_name"] = event
-    }
-    if json["session_id"] == nil, let sessionId = nonEmptyString(json["sessionId"]) {
-        json["session_id"] = sessionId
-    }
-    // Map Copilot-specific field names to internal conventions
-    if let toolName = json["toolName"] as? String {
-        json["tool_name"] = toolName
-    }
-    if let toolArgsStr = json["toolArgs"] as? String,
-       let argsData = toolArgsStr.data(using: .utf8),
-       let argsObj = try? JSONSerialization.jsonObject(with: argsData) as? [String: Any] {
-        json["tool_input"] = argsObj
-    }
-}
-
-// Cline adaptation: sends hookName and taskId instead of hook_event_name and session_id.
-if sourceTag == "cline" {
-    if json["hook_event_name"] == nil, let name = nonEmptyString(json["hookName"]) {
-        json["hook_event_name"] = name
-    }
-    if json["session_id"] == nil, let taskId = nonEmptyString(json["taskId"]) {
-        json["session_id"] = taskId
-    }
-    // Cline structures tool info as flat fields inside preToolUse/postToolUse objects:
-    // PreToolUse:  { preToolUse:  { toolName: "execute_command", parameters: { ... } } }
-    // PostToolUse: { postToolUse: { toolName: "execute_command", parameters: { ... }, result: ..., success: bool } }
-    if json["tool_name"] == nil {
-        if let preToolUse = json["preToolUse"] as? [String: Any],
-           let toolName = nonEmptyString(preToolUse["toolName"] as? String) {
-            json["tool_name"] = toolName
-            if json["tool_input"] == nil, let parameters = preToolUse["parameters"] as? [String: Any] {
-                json["tool_input"] = parameters
-            }
-        } else if let postToolUse = json["postToolUse"] as? [String: Any],
-                  let toolName = nonEmptyString(postToolUse["toolName"] as? String) {
-            json["tool_name"] = toolName
-        }
-    }
 }
 
 // Resolve process ancestry once — used for both session_id fallback (#148) and
@@ -438,255 +277,61 @@ if sourceTag == "cline" {
 // `getppid()` is a transient shell rather than the long-lived CLI process.
 let immediateParentPID = getppid()
 let ancestry = buildAncestry(startingAt: immediateParentPID)
-let coreAncestry = ancestry.map { (pid: Int32($0.pid), executablePath: $0.executablePath) }
 
-// Source tag (e.g. "codex" when called via --source codex). If the caller did not pass
-// one (e.g. the omo OpenCode plugin triggering Claude hooks without --source), infer
-// the real source from the process ancestry so we don't misattribute the event to
-// whichever hook path fired it. See issue #95.
-// In addition, the cursor-agent / qodercli CLIs share their hooks file with
-// the matching desktop IDE, so a `--source cursor` tag from a hook fired by
-// cursor-agent should be promoted to "cursor-cli" (#134). The override only
-// applies when ancestry actually shows a CLI binary.
-// Events that arrived via a plugin proxy (no declared source but ancestry
-// inferred a real source — e.g. the omo OpenCode plugin firing Claude hooks)
-// are marked `_via_plugin` so the host app can route them per
-// pluginSessionMode (#123). A direct plugin's own `_source` counts as declared,
-// and Claude Code firing its own (source-less) hook is not a proxy. Neither is
-// Cursor firing it: Cursor's payload declares Cursor (#377).
-let bridgeSource = CLIProcessResolver.bridgeSource(
+let facts = HookIntake.Facts(
     sourceTag: sourceTag,
-    payloadSource: json["_source"] as? String,
-    cursorPayload: isCursorPayload,
-    ancestry: coreAncestry
+    eventTag: eventTag,
+    environment: env.filter { HookIntake.environmentKeys.contains($0.key) },
+    parentPID: Int32(immediateParentPID),
+    ancestry: ancestry.map { ancestor in
+        HookIntake.Ancestor(
+            pid: Int32(ancestor.pid),
+            executablePath: ancestor.executablePath,
+            arguments: { processArguments(for: ancestor.pid) },
+            bundleIdentifier: { ancestor.executablePath.flatMap(bundleIdentifier(forExecutable:)) }
+        )
+    },
+    workingDirectory: FileManager.default.currentDirectoryPath,
+    tty: { detectTTY() },
+    homeDirectory: { FileManager.default.homeDirectoryForCurrentUser.path },
+    stdinDigest: { CursorHookPayload.deliveryDigest(of: input) },
+    tmuxClientTTY: { pane in
+        // Get client TTY — use explicit path (hook PATH may lack homebrew)
+        guard let tmuxBin = findBinary("tmux") else { return nil }
+        return runCommand(tmuxBin, args: ["display-message", "-p", "-t", pane, "-F", "#{client_tty}"])
+    },
+    fileExists: { FileManager.default.fileExists(atPath: $0) }
 )
-let effectiveSource = bridgeSource.source
-if let source = effectiveSource {
-    json["_source"] = source
-}
-if bridgeSource.viaPlugin {
-    json["_via_plugin"] = true
-}
 
-let resolvedTrackedPID = CLIProcessResolver.resolvedTrackedPID(
-    immediateParentPID: Int32(immediateParentPID),
-    source: effectiveSource,
-    ancestry: coreAncestry
-)
-json["_ppid"] = resolvedTrackedPID
-if resolvedTrackedPID != immediateParentPID {
-    json["_hook_ppid"] = Int32(immediateParentPID)
-}
-// Cline hooks are shell scripts spawned by a VSCode extension — the immediate
-// parent is a transient shell, not a persistent agent process. Tracking this
-// short-lived PID as cliPid causes cleanupIdleSessions to detect it as dead
-// within seconds and remove the session. Clear it so no PID is tracked.
-if effectiveSource == "cline" {
-    json["_ppid"] = 0
-}
-// Callers that know their process is not the agent's lifetime opt out. OpenCode 2
-// runs plugins in a shared background service that outlives the client that
-// spawned it: tracked as the CLI, it would be SIGTERMed as a "reparented orphan"
-// the moment that first client quits, taking every session with it (#332).
-if json["_untracked_process"] as? Bool == true {
-    json["_ppid"] = 0
-    json.removeValue(forKey: "_hook_ppid")
-}
-
-// Validate: must have non-empty session_id
-if json["session_id"] == nil,
-   let source = sourceTag,
-   !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-    // Fallback for third-party providers that don't include a stable session ID.
-    // Use the root same-source binary in the ancestry so sub-agent processes
-    // (e.g. Cursor IDE spawning multiple parallel agent subprocesses, #148)
-    // collapse onto a single session card instead of fanning into N cards
-    // (one per sub-agent ppid).
-    let sessionPID = CLIProcessResolver.resolvedSessionPID(
-        immediateParentPID: Int32(immediateParentPID),
-        source: effectiveSource ?? source,
-        ancestry: coreAncestry
-    )
-    json["session_id"] = "\(source)-ppid-\(sessionPID)"
-    debugLog("session_id missing, generated fallback id: \(json["session_id"] ?? "")")
-}
-guard let sessionId = json["session_id"] as? String, !sessionId.isEmpty else {
+guard var intake = HookIntake(stdin: stdinObject, facts: facts) else {
     debugLog("no session_id, dropping")
     exit(0)
 }
+if intake.sessionIdIsFallback {
+    debugLog("session_id missing, generated fallback id: \(intake.sessionId)")
+}
 
-// Event type detection
-let eventName = json["hook_event_name"] as? String ?? ""
-let normalizedEventName = EventNormalizer.normalize(eventName)
 // agy wired through Gemini-style hooks names the event on stdin, not in --event.
-writeAntigravityDecisionIfNeeded(eventName: eventName)
-let isGeminiBasedSource = sourceTag == "google-antigravity" || sourceTag == "gemini"
-    || effectiveSource == "google-antigravity" || effectiveSource == "gemini"
-// Antigravity's PreToolUse is NOT a blocking approval: it was already answered
-// above, and holding it for an island card only stacked a second prompt in
-// front of Antigravity's own (#339).
-let isPermission = normalizedEventName == "PermissionRequest"
-let isQuestion = (normalizedEventName == "Notification" || eventName == "afterAgentThought")
-    && json["question"] as? String != nil
-// A hook Cursor runs never waits on the island. Cursor does not import Claude
-// Code's PermissionRequest or Notification hook, and it reads a hook's stdout
-// against its own schema for the step: an answer in the island's format is not
-// one it acts on, and on a permission step (`preToolUse` among them) an answer
-// it cannot use blocks the tool. Printing nothing leaves the call to Cursor.
-let isBlocking = (isPermission || isQuestion) && !isCursorPayload
+writeImmediateStdout(intake.immediateStdout)
 
-debugLog("event=\(eventName) normalized=\(normalizedEventName) session=\(sessionId) permission=\(isPermission) question=\(isQuestion)")
+let isBlocking = intake.waitsForAnswer
+debugLog("event=\(intake.eventName) normalized=\(intake.normalizedEventName) session=\(intake.sessionId) permission=\(intake.isPermission) question=\(intake.isQuestion)")
 
 // Arm deadline for env collection + connect + send (protects all events).
 // For blocking events, this is disarmed right before the long recvAll wait.
 alarm(isBlocking ? 8 : 4)
 
 // --- Deep terminal environment collection ---
-// Terminal app identification (only include when present)
-if let termApp = env["TERM_PROGRAM"], !termApp.isEmpty {
-    json["_term_app"] = termApp
-}
-if let termBundle = env["__CFBundleIdentifier"], !termBundle.isEmpty {
-    json["_term_bundle"] = termBundle
-}
-// ChatGPT starts Codex Desktop's app-server without __CFBundleIdentifier.
-// Without a bundle its hooks were keyed as a CLI thread, a second card next
-// to the `codexapp:` one discovery makes for the same Desktop thread.
-if nonEmptyString(json["_term_bundle"]) == nil, effectiveSource == "codex" {
-    let ancestors = ancestry.map {
-        ProcessAncestor(
-            pid: Int32($0.pid),
-            executablePath: $0.executablePath,
-            arguments: processArguments(for: $0.pid),
-            bundleIdentifier: $0.executablePath.flatMap(bundleIdentifier(forExecutable:))
-        )
-    }
-    if let desktopBundle = CLIProcessResolver.codexDesktopTermBundle(ancestry: ancestors) {
-        json["_term_bundle"] = desktopBundle
-    }
-}
-
-// iTerm2 session — extract GUID after "w0t0p0:" prefix for AppleScript matching
-if let iterm = env["ITERM_SESSION_ID"], !iterm.isEmpty {
-    if let colonIdx = iterm.firstIndex(of: ":") {
-        json["_iterm_session"] = String(iterm[iterm.index(after: colonIdx)...])
-    } else {
-        json["_iterm_session"] = iterm
-    }
-}
-
-// Kitty window
-if let kitty = env["KITTY_WINDOW_ID"], !kitty.isEmpty {
-    json["_kitty_window"] = kitty
-}
-
-// tmux detection — deep info collection
-if let tmux = env["TMUX"], !tmux.isEmpty {
-    json["_tmux"] = tmux
-    if let pane = env["TMUX_PANE"], !pane.isEmpty {
-        json["_tmux_pane"] = pane
-        // Get client TTY — use explicit path (hook PATH may lack homebrew)
-        if let tmuxBin = findBinary("tmux"),
-           let clientTTY = runCommand(tmuxBin, args: ["display-message", "-p", "-t", pane, "-F", "#{client_tty}"]) {
-            json["_tmux_client_tty"] = clientTTY
-        }
-    }
-}
-
-// TTY path
-let tty = detectTTY()
-if !tty.isEmpty {
-    json["_tty"] = tty
-}
-
-// cmux surface / workspace (env vars injected by cmux)
-// cmux auto-injects CMUX_SURFACE_ID and CMUX_WORKSPACE_ID into each terminal on launch
-// Bridge simply carries them into the payload during env collection; no extra process calls needed
-if let cmuxSurface = env["CMUX_SURFACE_ID"], !cmuxSurface.isEmpty {
-    json["_cmux_surface_id"] = cmuxSurface
-}
-if let cmuxWorkspace = env["CMUX_WORKSPACE_ID"], !cmuxWorkspace.isEmpty {
-    json["_cmux_workspace_id"] = cmuxWorkspace
-}
-
-// Zellij multiplexer detection — pane id + optional session name for precise tab focus
-if let zellij = env["ZELLIJ"], !zellij.isEmpty {
-    json["_zellij"] = zellij
-    if let pane = env["ZELLIJ_PANE_ID"], !pane.isEmpty {
-        json["_zellij_pane_id"] = pane
-    }
-    if let session = env["ZELLIJ_SESSION_NAME"], !session.isEmpty {
-        json["_zellij_session_name"] = session
-    }
-}
-
-// WezTerm / Kaku pane id — both forks set WEZTERM_PANE; Kaku is a WezTerm fork (bundle id fun.tw93.kaku)
-if let weztermPane = env["WEZTERM_PANE"], !weztermPane.isEmpty {
-    json["_wezterm_pane"] = weztermPane
-}
-
-// Herdr injects an exact pane plus owning server socket into every managed pane.
-// Require the complete pair so a pane id is never sent to Herdr's default server.
-if env["HERDR_ENV"] == "1",
-   let pane = env["HERDR_PANE_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines), !pane.isEmpty,
-   let socket = env["HERDR_SOCKET_PATH"]?.trimmingCharacters(in: .whitespacesAndNewlines), !socket.isEmpty {
-    json["_herdr_pane_id"] = pane
-    json["_herdr_socket_path"] = socket
-    if let binary = env["HERDR_BIN_PATH"]?.trimmingCharacters(in: .whitespacesAndNewlines), !binary.isEmpty {
-        json["_herdr_bin_path"] = binary
-    }
-}
-
-// Superset (Electron agent-orchestration terminal) — TERM_PROGRAM is spoofed to "kitty"
-// and __CFBundleIdentifier is stripped from the PTY env, so the only reliable Superset
-// signal is its own SUPERSET_* env vars (which survive Superset's env allowlist). The mere
-// presence of any SUPERSET_* var uniquely means "running inside Superset"; the activator
-// uses that to route to com.superset.desktop instead of the real kitty app. (#213)
-if let supersetWs = env["SUPERSET_WORKSPACE_ID"], !supersetWs.isEmpty {
-    json["_superset_workspace_id"] = supersetWs
-}
-// Pane / terminal id — captured for future pane-precision if Superset ever ships a focus CLI;
-// either var's presence is also a reliable Superset signal on its own.
-if let supersetPane = env["SUPERSET_PANE_ID"] ?? env["SUPERSET_TERMINAL_ID"], !supersetPane.isEmpty {
-    json["_superset_pane_id"] = supersetPane
-}
-
-// Orca (Electron ADE that runs each task in its own git worktree + terminal).
-// TERM_PROGRAM is normally "Orca", but Orca deletes it for Claude Agent Teams
-// sessions — with no __CFBundleIdentifier in the PTY env either, click-to-jump
-// then fell all the way through to `bringToFront("Terminal")` and opened a blank
-// Terminal.app window. ORCA_TERMINAL_HANDLE is also the handle
-// `orca terminal switch --terminal` takes, which is the only way to tell two
-// worktrees of the same repo apart. (#302)
-if let orcaHandle = env["ORCA_TERMINAL_HANDLE"], !orcaHandle.isEmpty {
-    json["_orca_terminal_handle"] = orcaHandle
-}
-if let orcaWorktree = env["ORCA_WORKTREE_ID"], !orcaWorktree.isEmpty {
-    json["_orca_worktree_id"] = orcaWorktree
-}
-
-// Claude Desktop Code tab: Claude Desktop's own id for this session. The hook's
-// session_id is the CLI's id, which Claude Desktop's `claude://code/continue`
-// link does not accept; this one opens that exact session on click.
-if let host = env["CLAUDE_CODE_HOST_SESSION_ID"], !host.isEmpty {
-    json["_claude_desktop_session"] = host
-}
-
-// Inject cwd if not already present. Gemini CLI / Google Antigravity hooks do not
-// include a `cwd` field, so CodeIsland cannot resolve the project name and falls back
-// to "Session". Populating it here lets the approval card show the actual folder name.
-if json["cwd"] == nil {
-    json["cwd"] = FileManager.default.currentDirectoryPath
-}
+intake.addTerminalContext()
 
 // --- Serialize enriched JSON ---
-guard let enriched = try? JSONSerialization.data(withJSONObject: json) else { exit(0) }
+guard let enriched = try? JSONSerialization.data(withJSONObject: intake.payload) else { exit(0) }
 
 // --- Connect to Unix socket ---
-if isGeminiBasedSource && isPermission {
+if intake.deliveryDelay > 0 {
     // Delay slightly to give the terminal TTY time to display the prompt
     // before showing the notch approval card.
-    usleep(250_000)
+    usleep(useconds_t(intake.deliveryDelay * 1_000_000))
 }
 let connectTimeoutMs: Int32 = isBlocking ? 3000 : 1000
 guard let sock = connectSocket(socketPath, timeoutMs: connectTimeoutMs) else {
@@ -717,34 +362,9 @@ if isBlocking {
 // of NWListener's main-thread handler and the event is lost
 let response = recvAll(sock)
 
-// Blocking events: forward response to stdout
-if isBlocking && !response.isEmpty {
-    if sourceTag == "google-antigravity" || effectiveSource == "google-antigravity" || sourceTag == "gemini" || effectiveSource == "gemini" {
-        if let jsonObj = try? JSONSerialization.jsonObject(with: response) as? [String: Any],
-           let hookOutput = jsonObj["hookSpecificOutput"] as? [String: Any],
-           let decisionObj = hookOutput["decision"] as? [String: Any],
-           let behavior = decisionObj["behavior"] as? String {
-            let translatedBehavior = (behavior == "allow" || behavior == "always") ? "allow" : "deny"
-            let responseDict = ["decision": translatedBehavior]
-            if let responseData = try? JSONSerialization.data(withJSONObject: responseDict) {
-                FileHandle.standardOutput.write(responseData)
-            } else {
-                FileHandle.standardOutput.write(response)
-            }
-        } else {
-            // Fallback: search for "allow" or "deny" in raw string to be resilient
-            let responseStr = String(data: response, encoding: .utf8) ?? ""
-            if responseStr.contains("\"behavior\":\"allow\"") || responseStr.contains("\"behavior\":\"always\"") {
-                FileHandle.standardOutput.write(Data("{\"decision\":\"allow\"}".utf8))
-            } else if responseStr.contains("\"behavior\":\"deny\"") {
-                FileHandle.standardOutput.write(Data("{\"decision\":\"deny\"}".utf8))
-            } else {
-                FileHandle.standardOutput.write(response)
-            }
-        }
-    } else {
-        FileHandle.standardOutput.write(response)
-    }
+// Blocking events: forward response to stdout, in the form the agent reads
+if let stdout = intake.stdout(forAnswer: response) {
+    FileHandle.standardOutput.write(stdout)
 }
 
 close(sock)

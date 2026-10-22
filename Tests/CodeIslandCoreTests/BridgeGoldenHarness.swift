@@ -265,7 +265,12 @@ final class BridgeGoldenRunner {
         return String(hash, radix: 16)
     }
 
+    /// The bridge built next to the test bundle, or the build named by
+    /// `CODEISLAND_BRIDGE_UNDER_TEST` (a release build, say).
     static func bridgeUnderTest(for testCase: AnyClass) throws -> URL {
+        if let path = ProcessInfo.processInfo.environment["CODEISLAND_BRIDGE_UNDER_TEST"] {
+            return URL(fileURLWithPath: path)
+        }
         let url = Bundle(for: testCase).bundleURL
             .deletingLastPathComponent()
             .appendingPathComponent("codeisland-bridge")

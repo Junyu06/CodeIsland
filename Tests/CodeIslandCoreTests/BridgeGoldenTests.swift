@@ -10,6 +10,8 @@ import XCTest
 ///   hashing so dictionary order is comparable.
 /// - `CODEISLAND_GOLDEN_RECORD=<file>` writes ``BridgeGoldenExpectations``
 ///   from the reference build (or the one under test) instead of checking.
+/// - `CODEISLAND_BRIDGE_UNDER_TEST=<path>` tests that build instead of the
+///   one next to the test bundle.
 final class BridgeGoldenTests: XCTestCase {
     /// One process tree for the whole class: launching a freshly copied
     /// executable the first time costs a code-signing check.
