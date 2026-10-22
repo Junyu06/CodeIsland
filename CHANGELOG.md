@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v1.0.39] - 2026-10-22
 
 ### English
 - **Releases ship the code they list again.** v1.0.36, v1.0.37 and v1.0.38 carried v1.0.35's app and hook bridge under new version numbers. After the build Mac moved to Xcode 27, SwiftPM's new default build system wrote its products to `.build/out/Products/Release`, while the release script kept copying from `.build/<arch>-apple-macosx/release`, where the v1.0.35 build still sat. Everything those three releases list arrives with this one. The release script now pins SwiftPM's native build system (the new one also writes both architectures to the same folder, so the second overwrote the first, and records the 14.0 deployment target as the SDK, which runs AppKit in its old-SDK compatibility mode), asks SwiftPM where the products are (#379, thanks @Naitellos), deletes the previous ones before building and refuses a binary with the wrong architecture or SDK
