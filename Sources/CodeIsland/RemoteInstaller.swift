@@ -3,6 +3,36 @@ import Foundation
 struct RemoteInstallResult: Sendable {
     let ok: Bool
     let message: String
+    /// The island's socket on the host could not be vouched for: the tunnel
+    /// that leads there must not stay up. Nothing was installed.
+    var socketProblem: RemoteSocketCheckFailure? = nil
+}
+
+/// What stops the island's socket on a remote host from being one only the
+/// SSH user can reach — or, on a host whose agents run as other users, one
+/// they can reach through a folder nobody else can change.
+enum RemoteSocketCheckFailure: Error, Equatable, Sendable {
+    /// The check could not run: ssh's own words (the host is unreachable,
+    /// refused the login, has no python3).
+    case unreachable(String)
+    /// The folder the socket goes in (`path`) is not, and cannot be made,
+    /// the SSH user's alone: what was found.
+    case folderUnsafe(path: String, detail: String)
+    /// The socket the tunnel made at `path` is not the SSH user's, in that
+    /// folder, or could not be given the mode the host needs.
+    case socketUnverified(path: String, detail: String)
+
+    /// What Settings → Remote shows for the host.
+    func message(_ l10n: L10n) -> String {
+        switch self {
+        case .unreachable(let detail):
+            return detail
+        case .folderUnsafe(let path, let detail):
+            return String(format: l10n["remote_host_socket_folder_unsafe"], path, detail)
+        case .socketUnverified(let path, let detail):
+            return String(format: l10n["remote_host_socket_unverified"], path, detail)
+        }
+    }
 }
 
 private struct RemoteCommandResult: Sendable {
@@ -18,6 +48,20 @@ enum RemoteInstaller {
     private static let remoteOpencodePluginVersion = "v8"
 
     static func installAll(host: RemoteHost, remoteSocketPath: String) async -> RemoteInstallResult {
+        // First the socket the tunnel has just made: until it is vouched
+        // for, nothing else happens, and the tunnel goes.
+        let check = await runSSH(
+            host: host,
+            command: pythonCommand(verifyRemoteSocketScript(
+                socketPath: remoteSocketPath,
+                agentsRunAsOtherUsers: host.agentsRunAsOtherUsers
+            )),
+            timeout: 15
+        )
+        if let problem = socketProblem(fromCheck: check.stdout, errorOutput: check.stderr, exitCode: check.exitCode, socketPath: remoteSocketPath) {
+            return RemoteInstallResult(ok: false, message: "Socket not verified", socketProblem: problem)
+        }
+
         guard let source = remoteHookSource() else {
             return RemoteInstallResult(ok: false, message: "Missing remote hook resource")
         }
@@ -44,40 +88,252 @@ enum RemoteInstaller {
         return RemoteInstallResult(ok: true, message: summary)
     }
 
-    /// Probe the remote user's UID and return a per-user socket path so that multiple
-    /// OS users on a shared host don't collide on a single `/tmp/codeisland.sock` (#193).
-    /// Falls back to the legacy shared path when the probe fails (older / restricted host).
-    static func prepareRemoteSocketPath(host: RemoteHost) async -> String {
-        // `id -u` is a bare external command, so it returns the remote uid identically
-        // under any login shell (bash / zsh / fish / csh). A fancier `$(...)` pipeline
-        // would break under non-POSIX login shells like fish and silently fall back.
-        let probe = await runSSH(host: host, command: "id -u", timeout: 8)
-        let uid = probe.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        if probe.ok, isUID(uid) {
-            return remoteSocketPath(forUID: uid)
-        }
-        // Probe failed (old / restricted host) — fall back to the legacy shared path.
-        // StreamLocalBindUnlink=yes on the forward already clears any stale socket, so
-        // we avoid a second SSH round-trip here (it would just add latency on a host
-        // that's likely failing to connect anyway).
-        return host.remoteSocketPath
+    /// Makes, before anything is forwarded, the folder on the host the
+    /// island's socket goes in (``remoteSocketPath(forUID:)``), and returns
+    /// the socket's path there.
+    ///
+    /// sshd makes the forwarded socket with a mode of its own choosing
+    /// (StreamLocalBindMask, in sshd_config), and the install that used to
+    /// set it ran later, if at all. In a folder only the SSH user can enter,
+    /// the socket's mode no longer matters: the folder is made 0700 by that
+    /// user — 0711 on a host whose agents run as other users, who may then
+    /// reach the socket by name and nothing else — and checked to be theirs,
+    /// that mode and no symlink. Per user (#193), so users sharing a host
+    /// never meet. A folder that is not, and cannot be made, the SSH user's
+    /// alone fails the connect: nothing is forwarded.
+    static func prepareRemoteSocketPath(host: RemoteHost) async -> Result<String, RemoteSocketCheckFailure> {
+        let probe = await runSSH(
+            host: host,
+            command: pythonCommand(prepareRemoteSocketFolderScript(agentsRunAsOtherUsers: host.agentsRunAsOtherUsers)),
+            timeout: 15
+        )
+        return preparedSocketPath(fromProbe: probe.stdout, errorOutput: probe.stderr, exitCode: probe.exitCode)
     }
 
-    /// The per-user socket path on the remote host for the SSH user `uid`
-    /// (#193).
-    static func remoteSocketPath(forUID uid: String) -> String {
-        "/tmp/codeisland-\(uid).sock"
+    /// Where the island's sockets go on a remote host: a folder per SSH
+    /// user beneath it.
+    static let remoteSocketBase = "/tmp"
+
+    /// The folder on the remote host for the SSH user `uid`'s socket.
+    static func remoteSocketFolder(forUID uid: String, base: String = remoteSocketBase) -> String {
+        "\(base)/codeisland-\(uid)"
     }
 
-    /// The SSH user's uid, as the per-user socket path names it
-    /// (``remoteSocketPath(forUID:)``); nil for the legacy shared path a
-    /// failed probe falls back to.
+    /// The island's socket on the remote host for the SSH user `uid`
+    /// (#193), in that user's folder.
+    static func remoteSocketPath(forUID uid: String, base: String = remoteSocketBase) -> String {
+        remoteSocketFolder(forUID: uid, base: base) + "/island.sock"
+    }
+
+    /// The SSH user's uid, as the socket's path names it
+    /// (``remoteSocketPath(forUID:base:)``); nil for any other path.
     static func loginUID(inRemoteSocketPath path: String) -> String? {
-        let prefix = "/tmp/codeisland-", suffix = ".sock"
+        let prefix = remoteSocketBase + "/codeisland-", suffix = "/island.sock"
         guard path.hasPrefix(prefix), path.hasSuffix(suffix),
               path.count > prefix.count + suffix.count else { return nil }
         let uid = String(path.dropFirst(prefix.count).dropLast(suffix.count))
         return isUID(uid) ? uid : nil
+    }
+
+    /// What the folder check on the host (``prepareRemoteSocketFolderScript(agentsRunAsOtherUsers:base:)``)
+    /// found: the socket's path in a folder that passed, or why not.
+    static func preparedSocketPath(
+        fromProbe output: String,
+        errorOutput: String,
+        exitCode: Int32,
+        base: String = remoteSocketBase
+    ) -> Result<String, RemoteSocketCheckFailure> {
+        guard let answer = markedAnswer(in: output, marker: socketFolderMarker) else {
+            return .failure(.unreachable(commandFailure(errorOutput: errorOutput, exitCode: exitCode)))
+        }
+        guard let uid = answer["uid"] as? Int, uid >= 0,
+              let folder = answer["folder"] as? String,
+              folder == remoteSocketFolder(forUID: String(uid), base: base) else {
+            return .failure(.unreachable("Unexpected answer from the host: \(String(output.suffix(200)))"))
+        }
+        if let problem = answer["problem"] as? String {
+            return .failure(.folderUnsafe(path: folder, detail: problem))
+        }
+        return .success(remoteSocketPath(forUID: String(uid), base: base))
+    }
+
+    /// What the socket check on the host (``verifyRemoteSocketScript(socketPath:agentsRunAsOtherUsers:)``)
+    /// found: nil once the socket at `socketPath` is vouched for.
+    static func socketProblem(
+        fromCheck output: String,
+        errorOutput: String,
+        exitCode: Int32,
+        socketPath: String
+    ) -> RemoteSocketCheckFailure? {
+        guard let answer = markedAnswer(in: output, marker: socketCheckMarker) else {
+            return .socketUnverified(path: socketPath, detail: commandFailure(errorOutput: errorOutput, exitCode: exitCode))
+        }
+        if answer["ok"] as? Bool == true { return nil }
+        return .socketUnverified(path: socketPath, detail: answer["problem"] as? String ?? "unknown")
+    }
+
+    private static let socketFolderMarker = "CODEISLAND-SOCKET-FOLDER "
+    private static let socketCheckMarker = "CODEISLAND-SOCKET-CHECK "
+
+    /// The JSON object on the last line of `output` that starts with
+    /// `marker`: whatever a login shell prints first is skipped.
+    private static func markedAnswer(in output: String, marker: String) -> [String: Any]? {
+        guard let line = output
+            .split(whereSeparator: \.isNewline)
+            .last(where: { $0.hasPrefix(marker) }) else { return nil }
+        let json = Data(line.dropFirst(marker.count).utf8)
+        return (try? JSONSerialization.jsonObject(with: json)) as? [String: Any]
+    }
+
+    private static func commandFailure(errorOutput: String, exitCode: Int32) -> String {
+        let trimmed = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "ssh exited (\(exitCode))" : String(trimmed.suffix(300))
+    }
+
+    /// A command any login shell (sh, bash, zsh, fish, csh) runs as the same
+    /// `python3` program: base64 carries the script, and has nothing a shell
+    /// reads.
+    static func pythonCommand(_ script: String) -> String {
+        let encoded = Data(script.utf8).base64EncodedString()
+        return "python3 -c \"import base64;exec(base64.b64decode('\(encoded)'))\""
+    }
+
+    /// Run on the host, as the SSH user, before the tunnel starts: makes the
+    /// folder for the island's socket beneath `base`, or finds it, and
+    /// prints on a line of its own, after ``socketFolderMarker``, the user's
+    /// uid, the folder, and why it cannot be used, if it cannot. The folder
+    /// must be the user's, not a symlink, with the mode the host needs —
+    /// narrowed (or widened to 0711) through the descriptor that was
+    /// checked — and `base` must not let another user move it away.
+    static func prepareRemoteSocketFolderScript(agentsRunAsOtherUsers: Bool, base: String = remoteSocketBase) -> String {
+        """
+        import errno, json, os, stat, sys
+
+        base = \(pythonStringLiteral(base))
+        shared = \(agentsRunAsOtherUsers ? "True" : "False")
+        uid = os.getuid()
+        folder = base + "/codeisland-%d" % uid
+        # The SSH user's alone; where agents run as other users, they may also
+        # pass through it to the socket, by name, and do nothing else there.
+        mode = 0o711 if shared else 0o700
+
+        def answer(problem=None):
+            print(\(pythonStringLiteral(socketFolderMarker)) + json.dumps({"uid": uid, "folder": folder, "problem": problem}))
+            sys.exit(0)
+
+        try:
+            parent = os.stat(base)
+        except OSError as e:
+            answer(base + ": " + e.strerror)
+        # Whoever may write to `base` may move a folder out of it, unless the
+        # sticky bit keeps each user's entries their own (as /tmp's does).
+        if parent.st_uid not in (0, uid) or (parent.st_mode & 0o022 and not parent.st_mode & stat.S_ISVTX):
+            answer(base + " lets other users move what is in it")
+        try:
+            os.mkdir(folder, 0o700)
+        except OSError as e:
+            if e.errno != errno.EEXIST:
+                answer(e.strerror)
+        try:
+            fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as e:
+            if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                answer("not a folder (a symlink or a file)")
+            answer(e.strerror)
+        info = os.fstat(fd)
+        if not stat.S_ISDIR(info.st_mode):
+            answer("not a folder")
+        if info.st_uid != uid:
+            answer("it belongs to uid %d" % info.st_uid)
+        if stat.S_IMODE(info.st_mode) != mode:
+            try:
+                os.fchmod(fd, mode)
+            except OSError as e:
+                answer("its mode cannot be set: " + e.strerror)
+        answer()
+        """
+    }
+
+    /// Run on the host, as the SSH user, once the tunnel is up: checks that
+    /// the socket at `socketPath` is the SSH user's, in the folder made
+    /// before the tunnel started and still that user's alone, and, where
+    /// agents run as other users, gives it the mode they need (0666) — never
+    /// through a symlink. Prints on a line of its own, after
+    /// ``socketCheckMarker``, whether it passed, and why not.
+    static func verifyRemoteSocketScript(socketPath: String, agentsRunAsOtherUsers: Bool) -> String {
+        """
+        import errno, json, os, stat, sys
+
+        path = \(pythonStringLiteral(socketPath))
+        shared = \(agentsRunAsOtherUsers ? "True" : "False")
+        uid = os.getuid()
+        folder, name = os.path.split(path)
+        folder_mode = 0o711 if shared else 0o700
+
+        def answer(problem=None):
+            print(\(pythonStringLiteral(socketCheckMarker)) + json.dumps({"ok": problem is None, "problem": problem}))
+            sys.exit(0)
+
+        def socket_info(fd):
+            try:
+                return os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except OSError as e:
+                answer("the socket: " + e.strerror)
+
+        def set_shared_mode(fd, checked):
+            # Never through a symlink. Where chmod cannot leave a symlink alone
+            # (Linux), a descriptor of the socket itself (O_PATH) is changed
+            # through /proc instead. The last resort follows a symlink only in
+            # a folder nobody but this user can write to.
+            try:
+                os.chmod(name, 0o666, dir_fd=fd, follow_symlinks=False)
+                return
+            except NotImplementedError:
+                pass
+            except OSError as e:
+                if e.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL):
+                    answer("the socket's mode cannot be set: " + e.strerror)
+            if hasattr(os, "O_PATH"):
+                try:
+                    handle = os.open(name, os.O_PATH | os.O_NOFOLLOW, dir_fd=fd)
+                except OSError as e:
+                    answer("the socket: " + e.strerror)
+                try:
+                    now = os.fstat(handle)
+                    if (now.st_dev, now.st_ino) != (checked.st_dev, checked.st_ino):
+                        answer("the socket changed while it was checked")
+                    os.chmod("/proc/self/fd/%d" % handle, 0o666)
+                    return
+                except OSError:
+                    pass
+                finally:
+                    os.close(handle)
+            now = socket_info(fd)
+            if (now.st_dev, now.st_ino) != (checked.st_dev, checked.st_ino) or not stat.S_ISSOCK(now.st_mode):
+                answer("the socket changed while it was checked")
+            try:
+                os.chmod(name, 0o666, dir_fd=fd)
+            except OSError as e:
+                answer("the socket's mode cannot be set: " + e.strerror)
+
+        try:
+            fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as e:
+            answer(folder + ": " + e.strerror)
+        info = os.fstat(fd)
+        if info.st_uid != uid:
+            answer(folder + " belongs to uid %d" % info.st_uid)
+        if stat.S_IMODE(info.st_mode) != folder_mode:
+            answer(folder + " has mode %o" % stat.S_IMODE(info.st_mode))
+        found = socket_info(fd)
+        if not stat.S_ISSOCK(found.st_mode):
+            answer("not a socket")
+        if found.st_uid != uid:
+            answer("the socket belongs to uid %d" % found.st_uid)
+        if shared and stat.S_IMODE(found.st_mode) != 0o666:
+            set_shared_mode(fd, found)
+        answer()
+        """
     }
 
     private static func isUID(_ value: String) -> Bool {
@@ -303,27 +559,6 @@ socket_owner_uid = str(os.getuid()) if agents_run_as_other_users else ""
 def command_for(source):
     owner = f"CODEISLAND_SOCKET_OWNER_UID={socket_owner_uid} " if socket_owner_uid else ""
     return f"CODEISLAND_SOCKET_PATH={socket_path} {owner}CODEISLAND_REMOTE_HOST_ID={json.dumps(host_id)} CODEISLAND_REMOTE_HOST_NAME={json.dumps(host_name)} CODEISLAND_SOURCE={source} python3 ~/.codeisland/codeisland-remote-hook.py"
-
-def set_socket_mode():
-    # sshd gives the forwarded socket the mode of its own StreamLocalBindMask
-    # (0600 unless sshd_config says otherwise): ssh's StreamLocalBindMask never
-    # reaches it. The tunnel came up before the uploads that ran ahead of this
-    # script, so the socket gets the mode the host asked for here: the SSH
-    # user's alone, or every user's when the agents run as other users. Only
-    # a socket this user owns, never through a symlink. None once done, else
-    # what stopped it.
-    import stat
-    try:
-        info = os.lstat(socket_path)
-    except OSError:
-        return "socket not found"
-    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
-        return "socket not this user's"
-    try:
-        os.chmod(socket_path, 0o666 if agents_run_as_other_users else 0o600)
-    except OSError:
-        return "socket mode not set"
-    return None
 
 def append_our_hooks(hooks, event, entries):
     # Preserve user-authored entries (#242): remove_our_hooks() already dropped our
@@ -1380,11 +1615,6 @@ def install_custom():
     return results
 
 parts = [install_claude(), install_qoder(), install_hermes(), install_codex(), install_codebuddy(), install_traecli(), install_opencode()] + install_custom()
-socket_problem = set_socket_mode()
-# Said only where it changes what the host can do: hooks run as other users
-# reach nothing until the socket is theirs to use too.
-if socket_problem and agents_run_as_other_users:
-    parts.append("Shared socket: " + socket_problem)
 print(" · ".join(parts))
 """
     }

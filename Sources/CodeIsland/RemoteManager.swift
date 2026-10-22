@@ -56,7 +56,7 @@ final class RemoteManager: ObservableObject {
 
     private let now: () -> Date
     private let makeTunnel: @MainActor () -> any RemoteTunnel
-    private let probeSocketPath: (RemoteHost) async -> String
+    private let probeSocketPath: (RemoteHost) async -> Result<String, RemoteSocketCheckFailure>
     private let installRemoteHooks: (RemoteHost, String) async -> RemoteInstallResult
 
     /// Everything after `reconnectPolicy` reaches ssh, the clock or the
@@ -67,7 +67,9 @@ final class RemoteManager: ObservableObject {
         hookSockets: (any RemoteHookSocketProviding)? = nil,
         now: @escaping () -> Date = Date.init,
         makeTunnel: @escaping @MainActor () -> any RemoteTunnel = { SSHForwarder() },
-        probeSocketPath: @escaping (RemoteHost) async -> String = { await RemoteInstaller.prepareRemoteSocketPath(host: $0) },
+        probeSocketPath: @escaping (RemoteHost) async -> Result<String, RemoteSocketCheckFailure> = {
+            await RemoteInstaller.prepareRemoteSocketPath(host: $0)
+        },
         installRemoteHooks: @escaping (RemoteHost, String) async -> RemoteInstallResult = {
             await RemoteInstaller.installAll(host: $0, remoteSocketPath: $1)
         }
@@ -205,7 +207,9 @@ final class RemoteManager: ObservableObject {
         lastMessage[id] = host.displayAddress
 
         Task {
-            let remoteSocketPath = await probeSocketPath(host)
+            // The folder the island's socket goes in on the host, made and
+            // checked before anything is forwarded there.
+            let prepared = await probeSocketPath(host)
             await MainActor.run {
                 // The probe takes seconds. A Disconnect meanwhile must not be
                 // followed by a tunnel nothing can stop any more, and of two
@@ -213,10 +217,29 @@ final class RemoteManager: ObservableObject {
                 // Still this connect's, so the socket it bound is still the
                 // host's: a Disconnect closes it, a newer connect binds anew.
                 guard self.connectTokens[id] == token, self.forwarders[id] === forwarder else { return }
-                self.remoteSocketPaths[host.id] = remoteSocketPath
-                forwarder.connect(host: host, localSocketPath: localSocketPath, remoteSocketPath: remoteSocketPath)
+                switch prepared {
+                case .success(let remoteSocketPath):
+                    self.remoteSocketPaths[host.id] = remoteSocketPath
+                    forwarder.connect(host: host, localSocketPath: localSocketPath, remoteSocketPath: remoteSocketPath)
+                case .failure(let failure):
+                    self.failRemoteSocket(host, failure)
+                }
             }
         }
+    }
+
+    /// The island's socket on the host is not one only the SSH user can
+    /// reach, or could not be checked: nothing is forwarded there, and a
+    /// tunnel already up is stopped. The host fails with the reason and is
+    /// retried as a tunnel that failed is.
+    private func failRemoteSocket(_ host: RemoteHost, _ failure: RemoteSocketCheckFailure) {
+        Self.log.error("remote \(host.id, privacy: .public) socket on the host: \(String(describing: failure), privacy: .public)")
+        connectTokens[host.id] = nil
+        forwarders[host.id]?.disconnect()
+        forwarders[host.id] = nil
+        hookSockets?.close(hostId: host.id)
+        remoteSocketPaths[host.id] = nil
+        handleStatusChange(.failed(failure.message(L10n.shared)), for: host)
     }
 
     /// The host could not have a socket of its own: it does not connect,
@@ -379,10 +402,19 @@ final class RemoteManager: ObservableObject {
     }
 
     private func installHooks(for host: RemoteHost) async {
+        // Only where this connect prepared the folder for the socket.
+        guard let remoteSocketPath = remoteSocketPaths[host.id] else { return }
+        let token = connectTokens[host.id]
         installRunning[host.id] = true
-        let remoteSocketPath = remoteSocketPaths[host.id] ?? host.remoteSocketPath
         let result = await installRemoteHooks(host, remoteSocketPath)
         installRunning[host.id] = false
+        if let problem = result.socketProblem {
+            // The tunnel leads to a socket nobody vouched for: it goes —
+            // unless a Disconnect or another connect has replaced it since.
+            guard token != nil, connectTokens[host.id] == token else { return }
+            failRemoteSocket(host, problem)
+            return
+        }
         lastMessage[host.id] = result.message
         if !result.ok {
             connectionStatus[host.id] = .failed(result.message)

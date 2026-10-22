@@ -63,20 +63,22 @@ final class RemoteManagerTests: XCTestCase {
         }
     }
 
-    /// The remote socket-path probe that runs before ssh starts. While
-    /// `holding`, each probe waits for `release()`.
+    /// The check of the folder for the island's socket on the host, which
+    /// runs before ssh starts: it finds `outcome`. While `holding`, each
+    /// probe waits for `release()`.
     @MainActor
     private final class ProbeGate {
         var holding = false
+        var outcome: Result<String, RemoteSocketCheckFailure> = .success("/tmp/codeisland-501/island.sock")
         private(set) var started = 0
         private var held: [CheckedContinuation<Void, Never>] = []
 
-        func probe() async -> String {
+        func probe() async -> Result<String, RemoteSocketCheckFailure> {
             started += 1
             if holding {
                 await withCheckedContinuation { held.append($0) }
             }
-            return "/tmp/codeisland-501.sock"
+            return outcome
         }
 
         func release() {
@@ -127,8 +129,37 @@ final class RemoteManagerTests: XCTestCase {
         }
     }
 
+    /// The install that follows each connect: it checks the socket on the
+    /// host first, and finds `socketProblem`. While `holding`, each install
+    /// waits for `release()`.
+    @MainActor
+    private final class Installs {
+        var socketProblem: RemoteSocketCheckFailure?
+        var holding = false
+        private(set) var paths: [String] = []
+        private var held: [CheckedContinuation<Void, Never>] = []
+
+        func install(_ host: RemoteHost, _ path: String) async -> RemoteInstallResult {
+            paths.append(path)
+            if holding {
+                await withCheckedContinuation { held.append($0) }
+            }
+            if let socketProblem {
+                return RemoteInstallResult(ok: false, message: "Socket not verified", socketProblem: socketProblem)
+            }
+            return RemoteInstallResult(ok: true, message: "installed")
+        }
+
+        func release() {
+            let waiting = held
+            held = []
+            waiting.forEach { $0.resume() }
+        }
+    }
+
     private func makeManager(
         sockets: FakeHookSockets? = nil,
+        installs: Installs? = nil,
         _ configure: (inout RemoteReconnectPolicy.Config) -> Void = { _ in }
     ) -> (RemoteManager, ProbeGate, Tunnels) {
         var config = RemoteReconnectPolicy.Config()
@@ -137,13 +168,14 @@ final class RemoteManagerTests: XCTestCase {
         configure(&config)
         let gate = ProbeGate()
         let tunnels = Tunnels()
+        let installs = installs ?? Installs()
         let manager = RemoteManager(
             defaults: defaults,
             reconnectPolicy: RemoteReconnectPolicy(config: config),
             hookSockets: sockets ?? FakeHookSockets(),
             makeTunnel: { tunnels.make() },
             probeSocketPath: { _ in await gate.probe() },
-            installRemoteHooks: { _, _ in RemoteInstallResult(ok: true, message: "installed") }
+            installRemoteHooks: { await installs.install($0, $1) }
         )
         return (manager, gate, tunnels)
     }
@@ -451,6 +483,98 @@ final class RemoteManagerTests: XCTestCase {
         host.agentsRunAsOtherUsers = true
         manager.updateHost(host)
         await waitUntil { tunnels.connects == 2 }
+    }
+
+    // MARK: - The island's socket on the host
+
+    /// The folder for the island's socket on the host is not the SSH
+    /// user's alone: nothing is forwarded there, and the host says why.
+    func testAHostWhoseSocketFolderIsUnsafeDoesNotConnect() async {
+        let sockets = FakeHookSockets()
+        let (manager, gate, tunnels) = makeManager(sockets: sockets)
+        defer { manager.shutdown() }
+        let failure = RemoteSocketCheckFailure.folderUnsafe(path: "/tmp/codeisland-1000", detail: "it belongs to uid 1001")
+        gate.outcome = .failure(failure)
+        let host = addHost(to: manager)
+        var dropped: [String] = []
+        manager.onDisconnect = { dropped.append($0) }
+
+        manager.connect(id: host.id)
+        await waitUntil { gate.started == 1 }
+        await settle()
+
+        let message = failure.message(L10n.shared)
+        XCTAssertTrue(message.contains("/tmp/codeisland-1000") && message.contains("uid 1001"), message)
+        XCTAssertEqual(tunnels.connects, 0, "a tunnel to an unsafe folder")
+        XCTAssertEqual(manager.connectionStatus[host.id], .failed(message))
+        XCTAssertNil(sockets.open[host.id], "the host's socket on this Mac stayed open")
+        XCTAssertEqual(dropped, [host.id])
+        XCTAssertTrue(manager.wantsConnection(id: host.id), "retried as a tunnel that failed is")
+        XCTAssertEqual(manager.reconnectPhase(id: host.id), .retryPending)
+
+        // Once the folder passes, the host connects.
+        gate.outcome = .success("/tmp/codeisland-1000/island.sock")
+        manager.connect(id: host.id)
+        await waitUntil { tunnels.connects == 1 }
+    }
+
+    /// The host could not be reached to check the folder: it fails with
+    /// ssh's own words, as a tunnel that cannot reach it does.
+    func testAHostThatCannotBeCheckedFailsWithSSHsWords() async {
+        let (manager, gate, tunnels) = makeManager()
+        defer { manager.shutdown() }
+        let words = "ssh: connect to host devbox.invalid port 22: Connection refused"
+        gate.outcome = .failure(.unreachable(words))
+        let host = addHost(to: manager, autoConnect: false)
+        manager.connect(id: host.id)
+        await waitUntil { manager.connectionStatus[host.id] == .failed(words) }
+        XCTAssertEqual(tunnels.connects, 0)
+    }
+
+    /// The socket the tunnel made cannot be vouched for: the tunnel goes,
+    /// with the host's socket on this Mac, and the host says why.
+    func testAnUnverifiedSocketClosesItsTunnel() async {
+        let sockets = FakeHookSockets()
+        let installs = Installs()
+        let problem = RemoteSocketCheckFailure.socketUnverified(
+            path: "/tmp/codeisland-501/island.sock",
+            detail: "the socket belongs to uid 0"
+        )
+        installs.socketProblem = problem
+        let (manager, _, tunnels) = makeManager(sockets: sockets, installs: installs)
+        defer { manager.shutdown() }
+        let host = addHost(to: manager)
+        await connect(host, on: manager, tunnels: tunnels)
+        tunnels.made[0].report(.connected)
+
+        let message = problem.message(L10n.shared)
+        await waitUntil { manager.connectionStatus[host.id] == .failed(message) }
+        XCTAssertEqual(installs.paths, ["/tmp/codeisland-501/island.sock"], "the install checks the socket the tunnel made")
+        XCTAssertEqual(tunnels.made[0].disconnects, 1, "the tunnel was left up")
+        XCTAssertNil(sockets.open[host.id], "the host's socket on this Mac was left open")
+        XCTAssertTrue(message.contains("uid 0"), message)
+    }
+
+    /// A check that ends after the host was reconnected is old news: the
+    /// newer tunnel stays.
+    func testALateSocketProblemLeavesANewerTunnelAlone() async {
+        let installs = Installs()
+        installs.socketProblem = .socketUnverified(path: "/tmp/codeisland-501/island.sock", detail: "late")
+        installs.holding = true
+        let (manager, _, tunnels) = makeManager(installs: installs)
+        defer { manager.shutdown() }
+        let host = addHost(to: manager)
+        await connect(host, on: manager, tunnels: tunnels)
+        tunnels.made[0].report(.connected)
+        await waitUntil { installs.paths.count == 1 }
+
+        manager.reconnect(id: host.id)
+        await waitUntil { tunnels.connects == 2 }
+        installs.release()
+        await settle()
+
+        XCTAssertEqual(tunnels.made.last?.disconnects, 0, "a late check closed the newer tunnel")
+        XCTAssertEqual(manager.connectionStatus[host.id], .connecting)
     }
 
     // MARK: - Stale reports

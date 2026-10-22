@@ -580,47 +580,17 @@ final class RemoteInstallerHookMergeTests: XCTestCase {
         XCTAssertTrue(ours.allSatisfy { $0.contains(socketOwner) }, yaml)
     }
 
-    private func mode(_ path: String) throws -> mode_t {
-        try XCTUnwrap(SocketPath.lstat(path)).st_mode & 0o777
-    }
-
-    /// sshd gives the forwarded socket the mode of its own mask, whatever ssh
-    /// asked for; the install that follows each connect sets the one the host
-    /// wants: the SSH user's alone, or every user's.
-    func testTheInstallGivesTheForwardedSocketTheModeTheHostAskedFor() throws {
+    /// The socket on the host is the check's, which runs before anything is
+    /// installed (RemoteSocketFolderTests): the install leaves it alone.
+    func testTheInstallLeavesTheSocketToTheCheck() throws {
         let socketPath = "/tmp/ci-rim-\(UUID().uuidString.prefix(8)).sock"
         try leaveSocket(at: socketPath)
         defer { unlink(socketPath) }
-        chmod(socketPath, 0o777)  // as an sshd with a permissive mask leaves it
+        chmod(socketPath, 0o640)
 
         try runConfigureScript(remoteSocketPath: socketPath)
-        XCTAssertEqual(try mode(socketPath), 0o600)
-
-        let status = try runConfigureScript(host: otherUsersHost, remoteSocketPath: socketPath)
-        XCTAssertEqual(try mode(socketPath), 0o666)
-        XCTAssertFalse(status.contains("Shared socket"), status)
-
-        try runConfigureScript(remoteSocketPath: socketPath)
-        XCTAssertEqual(try mode(socketPath), 0o600, "turned off again")
-    }
-
-    func testTheInstallChangesNoSocketButTheSSHUsersOwn() throws {
-        let target = "/tmp/ci-rim-\(UUID().uuidString.prefix(8)).sock"
-        try leaveSocket(at: target)
-        defer { unlink(target) }
-        chmod(target, 0o600)
-        let link = "/tmp/ci-rim-\(UUID().uuidString.prefix(8)).sock"
-        XCTAssertEqual(symlink(target, link), 0)
-        defer { unlink(link) }
-
-        let status = try runConfigureScript(host: otherUsersHost, remoteSocketPath: link)
-        XCTAssertEqual(try mode(target), 0o600, "never through a symlink")
-        XCTAssertTrue(status.contains("Shared socket: socket not this user's"), status)
-
-        let missing = try runConfigureScript(host: otherUsersHost, remoteSocketPath: "/tmp/ci-rim-missing.sock")
-        XCTAssertTrue(missing.contains("Shared socket: socket not found"), missing)
-        XCTAssertFalse(try runConfigureScript(remoteSocketPath: "/tmp/ci-rim-missing.sock").contains("Shared socket"),
-                       "nothing to say where only the SSH user's agents use it")
+        try runConfigureScript(host: otherUsersHost, remoteSocketPath: socketPath)
+        XCTAssertEqual(try XCTUnwrap(SocketPath.lstat(socketPath)).st_mode & 0o777, 0o640)
     }
 
     func testHermesHooksRunWithoutAShellAndReplaceTheShellForm() throws {

@@ -474,6 +474,8 @@ final class L10n: ObservableObject {
         "remote_other_users_hint": "For agents in containers or under sudo on this host. Lets every user there reach CodeIsland's socket: any of them can send events and requests under this host's name and see the answers to their own requests, but not answer anyone else's. Leave off unless your agents run as a user other than the SSH user.",
         "remote_socket_folder_unsafe": "%@ is not a folder only you can use, so this host's hooks have nowhere safe to arrive. Remove it, then connect again.",
         "remote_socket_unavailable": "CodeIsland can't listen at %@ for this host's hooks, so it doesn't connect.",
+        "remote_host_socket_folder_unsafe": "CodeIsland's folder on the host, %@, can't be made the SSH user's alone (%@), so nothing is forwarded there.",
+        "remote_host_socket_unverified": "CodeIsland's socket on the host, %@, couldn't be verified (%@), so its tunnel was closed.",
 
         // Buddy
         "buddy": "Buddy",
@@ -1064,6 +1066,8 @@ final class L10n: ObservableObject {
         "remote_other_users_hint": "Für Agents in Containern oder unter sudo auf diesem Host. Jeder Benutzer dort kann dann den Socket von CodeIsland erreichen: im Namen dieses Hosts Ereignisse und Anfragen senden und die Antworten auf seine eigenen Anfragen sehen, aber keine Anfrage eines anderen beantworten. Nur einschalten, wenn deine Agents nicht als SSH-Benutzer laufen.",
         "remote_socket_folder_unsafe": "%@ ist kein Ordner, den nur du nutzen kannst – die Hooks dieses Hosts hätten keinen sicheren Ort zum Ankommen. Entferne ihn und verbinde erneut.",
         "remote_socket_unavailable": "CodeIsland kann unter %@ nicht auf die Hooks dieses Hosts lauschen und verbindet ihn daher nicht.",
+        "remote_host_socket_folder_unsafe": "Der Ordner von CodeIsland auf dem Host, %@, kann nicht allein dem SSH-Benutzer gehören (%@) – daher wird nichts dorthin weitergeleitet.",
+        "remote_host_socket_unverified": "Der Socket von CodeIsland auf dem Host, %@, konnte nicht überprüft werden (%@) – daher wurde sein Tunnel geschlossen.",
 
         // Buddy
         "buddy": "Buddy",
@@ -1654,6 +1658,8 @@ final class L10n: ObservableObject {
         "remote_other_users_hint": "适用于在此主机的容器中或通过 sudo 运行的 Agent。开启后，此主机上的所有用户都能连接 CodeIsland 的套接字：能以此主机的名义发送事件和请求，并看到对自己请求的答复，但无法答复他人的请求。除非 Agent 不以 SSH 用户身份运行，否则请保持关闭。",
         "remote_socket_folder_unsafe": "%@ 不是只有你能使用的文件夹，此主机的 hooks 没有安全的接收位置。请删除它后重新连接。",
         "remote_socket_unavailable": "CodeIsland 无法在 %@ 监听此主机的 hooks，因此不会连接。",
+        "remote_host_socket_folder_unsafe": "主机上 CodeIsland 的文件夹 %@ 无法设为仅 SSH 用户可用（%@），因此不会向它转发任何内容。",
+        "remote_host_socket_unverified": "无法验证主机上 CodeIsland 的 socket %@（%@），因此已关闭它的隧道。",
 
         // Buddy
         "buddy": "Buddy",
@@ -2244,6 +2250,8 @@ final class L10n: ObservableObject {
         "remote_other_users_hint": "適用於在此主機的容器中或透過 sudo 執行的 Agent。開啟後，此主機上的所有使用者都能連線到 CodeIsland 的通訊端：能以此主機的名義傳送事件與請求，並看到對自己請求的回覆，但無法回覆他人的請求。除非 Agent 不以 SSH 使用者身分執行，否則請保持關閉。",
         "remote_socket_folder_unsafe": "%@ 不是只有你能使用的資料夾，此主機的 hooks 沒有安全的接收位置。請刪除它後重新連線。",
         "remote_socket_unavailable": "CodeIsland 無法在 %@ 監聽此主機的 hooks，因此不會連線。",
+        "remote_host_socket_folder_unsafe": "主機上 CodeIsland 的資料夾 %@ 無法設為僅 SSH 使用者可用（%@），因此不會轉送任何內容到那裡。",
+        "remote_host_socket_unverified": "無法驗證主機上 CodeIsland 的 socket %@（%@），因此已關閉它的通道。",
 
         // Buddy
         "buddy": "Buddy",
@@ -2834,6 +2842,8 @@ final class L10n: ObservableObject {
         "remote_other_users_hint": "このホストのコンテナ内や sudo で動くエージェント向けです。オンにすると、ホスト上のすべてのユーザーが CodeIsland のソケットに接続でき、このホストの名前でイベントやリクエストを送り、自分のリクエストへの応答を受け取れるようになります。ただし、他のユーザーのリクエストには応答できません。エージェントが SSH ユーザー以外で動く場合を除き、オフのままにしてください。",
         "remote_socket_folder_unsafe": "%@ はあなた専用のフォルダではないため、このホストのフックを安全に受け取れません。削除してから再接続してください。",
         "remote_socket_unavailable": "CodeIsland は %@ でこのホストのフックを待ち受けできないため、接続しません。",
+        "remote_host_socket_folder_unsafe": "ホスト上の CodeIsland のフォルダ %@ を SSH ユーザー専用にできないため（%@）、そこへは何も転送しません。",
+        "remote_host_socket_unverified": "ホスト上の CodeIsland のソケット %@ を確認できなかったため（%@）、トンネルを閉じました。",
 
         // Buddy
         "buddy": "Buddy",
@@ -3424,6 +3434,8 @@ final class L10n: ObservableObject {
         "remote_other_users_hint": "이 호스트의 컨테이너나 sudo로 실행되는 에이전트용입니다. 켜면 호스트의 모든 사용자가 CodeIsland 소켓에 연결해 이 호스트 이름으로 이벤트와 요청을 보내고 자신의 요청에 대한 응답을 볼 수 있습니다. 다른 사용자의 요청에는 응답할 수 없습니다. 에이전트가 SSH 사용자가 아닌 다른 사용자로 실행되는 경우가 아니면 끈 상태로 두세요.",
         "remote_socket_folder_unsafe": "%@은(는) 나만 쓸 수 있는 폴더가 아니어서 이 호스트의 훅을 안전하게 받을 곳이 없습니다. 삭제한 뒤 다시 연결하세요.",
         "remote_socket_unavailable": "CodeIsland가 %@에서 이 호스트의 훅을 수신할 수 없어 연결하지 않습니다.",
+        "remote_host_socket_folder_unsafe": "호스트의 CodeIsland 폴더 %@을(를) SSH 사용자 전용으로 만들 수 없어(%@) 그곳으로 아무것도 전달하지 않습니다.",
+        "remote_host_socket_unverified": "호스트의 CodeIsland 소켓 %@을(를) 확인할 수 없어(%@) 터널을 닫았습니다.",
 
         // Buddy
         "buddy": "Buddy",
@@ -4014,6 +4026,8 @@ final class L10n: ObservableObject {
         "remote_other_users_hint": "Bu sunucuda konteyner içinde veya sudo ile çalışan ajanlar için. Açıldığında sunucudaki her kullanıcı CodeIsland soketine bağlanabilir: bu sunucu adına olay ve istek gönderebilir ve kendi isteklerinin yanıtlarını görebilir, ancak başkasının isteğini yanıtlayamaz. Ajanlarınız SSH kullanıcısından farklı bir kullanıcıyla çalışmıyorsa kapalı bırakın.",
         "remote_socket_folder_unsafe": "%@ yalnızca sizin kullanabildiğiniz bir klasör değil; bu sunucunun kancaları için güvenli bir varış yeri yok. Klasörü kaldırıp yeniden bağlanın.",
         "remote_socket_unavailable": "CodeIsland, bu sunucunun kancalarını %@ üzerinde dinleyemiyor; bu yüzden bağlanmıyor.",
+        "remote_host_socket_folder_unsafe": "CodeIsland'in sunucudaki klasörü %@ yalnızca SSH kullanıcısına ait yapılamıyor (%@); bu yüzden oraya hiçbir şey iletilmiyor.",
+        "remote_host_socket_unverified": "CodeIsland'in sunucudaki soketi %@ doğrulanamadı (%@); bu yüzden tüneli kapatıldı.",
 
         // Buddy
         "buddy": "Buddy",

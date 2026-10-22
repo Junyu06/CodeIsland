@@ -18,11 +18,12 @@ struct RemoteHost: Identifiable, Codable, Equatable, Sendable {
     /// Empty = show every session from this host (previous behavior).
     var cwdFilter: String
     /// The host's agents run as users other than the SSH user — in a
-    /// container, under sudo. Off, the island's socket on the host is the SSH
-    /// user's alone (mode 0600), and its hooks use only a socket of their own
-    /// user's. On, every user there can connect to it (0666), and the hooks
-    /// are told the SSH user owns it (`CODEISLAND_SOCKET_OWNER_UID`), so a
-    /// hook run as another user uses that socket — and still no other.
+    /// container, under sudo. Off, the island's socket on the host is in a
+    /// folder only the SSH user can enter (0700), and its hooks use only a
+    /// socket of their own user's. On, every user there may pass through
+    /// that folder to the socket (0711) and connect to it (0666), and the
+    /// hooks are told the SSH user owns it (`CODEISLAND_SOCKET_OWNER_UID`),
+    /// so a hook run as another user uses that socket — and still no other.
     var agentsRunAsOtherUsers: Bool
 
     init(
@@ -73,9 +74,11 @@ struct RemoteHost: Identifiable, Codable, Equatable, Sendable {
         return "\(trimmedUser)@\(host.trimmingCharacters(in: .whitespacesAndNewlines))"
     }
 
-    /// Legacy shared fallback socket path. The live per-user path is resolved at
-    /// connect time via `RemoteInstaller.prepareRemoteSocketPath` (#193); this value
-    /// is only used when probing the remote UID fails.
+    /// The shared socket path hooks used before #193. Nothing is forwarded
+    /// there any more: the live path, in a folder of the SSH user's own, is
+    /// made and checked at connect time (`RemoteInstaller.prepareRemoteSocketPath`),
+    /// and a host whose folder fails that check does not connect. Only the
+    /// install scripts' default when no path is given.
     var remoteSocketPath: String { "/tmp/codeisland.sock" }
 
     var displayAddress: String {

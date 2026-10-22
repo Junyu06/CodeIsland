@@ -18,9 +18,9 @@ VERSION = "0.4.3"
 # The `_edge` facts version (HookEdgeFacts.version on the island).
 EDGE_FACTS_VERSION = 1
 # Per-user socket path (#193): CodeIsland injects CODEISLAND_SOCKET_PATH via the hook
-# command, but fall back to a uid-scoped path so multiple users on a shared host never
-# collide on a single /tmp/codeisland.sock.
-SOCKET_PATH = os.environ.get("CODEISLAND_SOCKET_PATH") or f"/tmp/codeisland-{os.getuid()}.sock"
+# command, but fall back to the uid-scoped path it forwards to, in the SSH user's own
+# folder, so multiple users on a shared host never collide on one socket.
+SOCKET_PATH = os.environ.get("CODEISLAND_SOCKET_PATH") or f"/tmp/codeisland-{os.getuid()}/island.sock"
 # Who owns the island's socket here: sshd makes it as the SSH user. A hook run
 # as that user, as hooks usually are, uses only a socket of its own user's. On
 # a host whose agents run as other users (containers, sudo), the installer

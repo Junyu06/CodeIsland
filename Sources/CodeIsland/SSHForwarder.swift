@@ -177,14 +177,17 @@ final class SSHForwarder {
     /// forwarded to `localSocketPath`, which must be the socket the island
     /// bound for this host (``RemoteHookSockets``) — never the main one.
     ///
-    /// The socket on the host is to be the SSH user's alone (0600): another
-    /// user there could otherwise send events, and hold requests, in this
-    /// host's name. A host whose agents run as other users
-    /// (``RemoteHost/agentsRunAsOtherUsers``) asks for one every user can
-    /// reach. sshd makes that socket with its own `StreamLocalBindMask` — the
-    /// forward request carries a path and no mode — so the mask here only
-    /// says what the host asked for; the install that follows each connect
-    /// sets the mode on the host (``RemoteInstaller``).
+    /// The socket on the host is to be the SSH user's alone: another user
+    /// there could otherwise send events, and hold requests, in this host's
+    /// name. `remoteSocketPath` is in a folder only that user can enter,
+    /// made and checked before the tunnel starts
+    /// (``RemoteInstaller/prepareRemoteSocketPath(host:)``), so the socket's
+    /// own mode does not matter — sshd makes it with its own
+    /// `StreamLocalBindMask` anyway: the forward request carries a path and no
+    /// mode, so the mask here only says what the host asked for. A host whose
+    /// agents run as other users (``RemoteHost/agentsRunAsOtherUsers``) asks
+    /// for one every user can reach: the check that follows each connect
+    /// gives it that mode on the host, or closes the tunnel.
     static func tunnelArguments(host: RemoteHost, localSocketPath: String, remoteSocketPath: String) -> [String] {
         var args: [String] = [
             "-N",

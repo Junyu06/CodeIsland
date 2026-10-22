@@ -15,7 +15,17 @@ quirk is then fixed once, in HookIntake, for every edge.
 
 - One Unix-domain stream connection per hook invocation, to
   `$CODEISLAND_SOCKET_PATH`, else `/tmp/codeisland-<uid>.sock` (on a remote
-  host, the path the installer forwarded).
+  host, the path the installer forwarded: `/tmp/codeisland-<uid>/island.sock`).
+- On a remote host that socket sits in a folder of the SSH user's own,
+  which the island makes on the host, as that user, before anything is
+  forwarded there: 0700 — 0711 where agents run as other users, who may then
+  reach the socket by name and nothing else — and checked to be that user's,
+  that mode and no symlink, beneath a `/tmp` that does not let other users
+  move it. sshd picks the forwarded socket's mode itself; in that folder it
+  does not matter. Once the tunnel is up, the socket is checked too (and,
+  where agents run as other users, made 0666 without following a symlink)
+  before anything is installed; a folder or a socket that fails closes the
+  tunnel, and the host says why.
 - Only to a socket owned by the edge's own user, never through a symlink
   (`lstat`): the path is a predictable name in `/tmp`, and a socket another
   user created there first would get every event and could answer it. On a
