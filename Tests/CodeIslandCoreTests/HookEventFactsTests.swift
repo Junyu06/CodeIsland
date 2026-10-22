@@ -162,6 +162,33 @@ final class HookEventFactsTests: XCTestCase {
         XCTAssertFalse(parent.subagentTurn)
     }
 
+    /// `reduceEvent` returns what the reducer always did, in the same order:
+    /// the completion where the turn ended, ahead of the monitor effect, and
+    /// the sound after it.
+    func testReduceEventKeepsTheOldEffectOrder() throws {
+        var sessions: [String: SessionSnapshot] = [:]
+        _ = reduceEvent(sessions: &sessions, event: try hookEvent(
+            ["hook_event_name": "UserPromptSubmit", "session_id": "s", "cwd": "/tmp/r", "prompt": "go"]
+        ), maxHistory: 20)
+        let effects = reduceEvent(sessions: &sessions, event: try hookEvent(
+            ["hook_event_name": "Stop", "session_id": "s", "cwd": "/tmp/r", "last_assistant_message": "x"]
+        ), maxHistory: 20)
+        XCTAssertEqual(effects, [
+            .enqueueCompletion(sessionId: "s"),
+            .tryMonitorSession(sessionId: "s"),
+            .playSound("Stop"),
+        ])
+
+        let prompt = reduceEvent(sessions: &sessions, event: try hookEvent(
+            ["hook_event_name": "UserPromptSubmit", "session_id": "s", "cwd": "/tmp/r", "prompt": "again"]
+        ), maxHistory: 20)
+        XCTAssertEqual(prompt, [
+            .tryMonitorSession(sessionId: "s"),
+            .playSound("UserPromptSubmit"),
+            .setActiveSession(sessionId: "s"),
+        ])
+    }
+
     /// `reduceEvent` is the reducer plus the policy's own reading of the
     /// event, as the reducer's tests have always seen it.
     func testReduceEventAddsThePolicysIntents() throws {

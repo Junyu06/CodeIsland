@@ -1082,6 +1082,17 @@ public enum SideEffect: Equatable {
 public struct HookEventReduction {
     public var effects: [SideEffect]
     public var facts: HookEventFacts
+    /// Where the reducer used to put `.enqueueCompletion` and `.playSound`,
+    /// for `reduceEvent` to put the policy's intents back.
+    fileprivate var slots = AttentionEffectSlots()
+}
+
+/// Indexes into a reduction's effects: where the turn ended (the completion
+/// went in) and where the event finished moving its session (the sound
+/// went in, ahead of the closing switch of the active session).
+fileprivate struct AttentionEffectSlots {
+    var completion: Int?
+    var sound: Int?
 }
 
 /// Pure reducer: mutates sessions and reports what happened. Whether that
@@ -1093,12 +1104,14 @@ public func reduceHookEvent(
     replyCompletePlaceholder: String = "Reply complete"
 ) -> HookEventReduction {
     var facts = HookEventFacts(event: event)
+    var slots = AttentionEffectSlots()
     let effects = applyHookEvent(
         sessions: &sessions,
         event: event,
         maxHistory: maxHistory,
         replyCompletePlaceholder: replyCompletePlaceholder,
-        facts: &facts
+        facts: &facts,
+        slots: &slots
     )
     if facts.endedTurn {
         let sessionId = event.sessionId ?? "default"
@@ -1109,7 +1122,7 @@ public func reduceHookEvent(
             session: sessions[sessionId]
         )
     }
-    return HookEventReduction(effects: effects, facts: facts)
+    return HookEventReduction(effects: effects, facts: facts, slots: slots)
 }
 
 /// The reducer followed by `AttentionPolicy`'s own reading of the event:
@@ -1117,7 +1130,7 @@ public func reduceHookEvent(
 /// user's settings and the room have their say. The app runs the two halves
 /// itself — ``reduceHookEvent`` now, the policy with the context it gathers
 /// once the event has settled — and this keeps an event's whole story
-/// checkable in one call.
+/// checkable in one call, in the order the reducer always returned it.
 public func reduceEvent(
     sessions: inout [String: SessionSnapshot],
     event: HookEvent,
@@ -1135,20 +1148,14 @@ public func reduceEvent(
         for: .hookEvent(reduction.facts),
         subject: AttentionSubject(sessions[sessionId])
     )
-    var attention: [SideEffect] = []
-    if intents.completion != nil {
-        attention.append(.enqueueCompletion(sessionId: sessionId))
-    }
-    if let sound = intents.sound {
-        attention.append(.playSound(sound))
-    }
-    // Ahead of the closing switch of the active session, where the reducer
-    // used to put them.
+    // Exactly where the reducer used to put them: the sound (later in the
+    // list) first, so the completion's slot still points where it should.
     var effects = reduction.effects
-    if case .setActiveSession? = effects.last {
-        effects.insert(contentsOf: attention, at: effects.count - 1)
-    } else {
-        effects.append(contentsOf: attention)
+    if let sound = intents.sound {
+        effects.insert(.playSound(sound), at: reduction.slots.sound ?? effects.count)
+    }
+    if intents.completion != nil {
+        effects.insert(.enqueueCompletion(sessionId: sessionId), at: reduction.slots.completion ?? effects.count)
     }
     return effects
 }
@@ -1158,7 +1165,8 @@ private func applyHookEvent(
     event: HookEvent,
     maxHistory: Int,
     replyCompletePlaceholder: String,
-    facts: inout HookEventFacts
+    facts: inout HookEventFacts,
+    slots: inout AttentionEffectSlots
 ) -> [SideEffect] {
     let sessionId = event.sessionId ?? "default"
     let eventName = EventNormalizer.normalize(event.eventName)
@@ -1373,6 +1381,7 @@ private func applyHookEvent(
                 sessions[sessionId]?.currentTool = nil
                 sessions[sessionId]?.toolDescription = nil
                 facts.endedTurn = true
+                slots.completion = effects.count
             }
         } else {
             sessions[sessionId]?.status = .processing
@@ -1433,6 +1442,7 @@ private func applyHookEvent(
             sessions[sessionId]?.taskRoundEnded = true
         }
         facts.endedTurn = true
+        slots.completion = effects.count
     case "Stop":
         // Hermes fires on_session_end at the end of every turn. A delegate_task
         // child or a scheduled job runs just one, so its turn ending is its
@@ -1516,6 +1526,7 @@ private func applyHookEvent(
             sessions[sessionId]?.currentTool = nil
             sessions[sessionId]?.toolDescription = nil
             facts.endedTurn = true
+            slots.completion = effects.count
         }
     case "SessionStart":
         effects.append(.stopMonitor(sessionId: sessionId))
@@ -1660,6 +1671,7 @@ private func applyHookEvent(
         sessions[sessionId]?.currentTool = nil
         sessions[sessionId]?.toolDescription = nil
         facts.endedTurn = true
+        slots.completion = effects.count
     default:
         break
     }
@@ -1695,6 +1707,7 @@ private func applyHookEvent(
     // completion card or pushes — a declared child's never do (#378), nor a
     // Hermes gateway chat's (#364) — is AttentionPolicy's call.
     facts.appliedToSession = true
+    slots.sound = effects.count
 
     // Switch display to the session that just had activity
     if eventName == "Stop" {
