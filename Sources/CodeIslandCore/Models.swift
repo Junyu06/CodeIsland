@@ -808,7 +808,11 @@ public struct SubagentState: Sendable {
     public let agentId: String
     public let agentType: String
     public var status: AgentStatus = .running
-    public var currentTool: String?
+    public var currentTool: String? {
+        didSet { if currentTool != oldValue { currentToolUseId = nil } }
+    }
+    /// As ``SessionSnapshot/currentToolUseId``, for this subagent's tool.
+    public var currentToolUseId: String?
     public var toolDescription: String?
     public var startTime: Date = Date()
     public var lastActivity: Date = Date()
@@ -824,6 +828,11 @@ public struct SubagentState: Sendable {
     public init(agentId: String, agentType: String) {
         self.agentId = agentId
         self.agentType = agentType
+    }
+
+    /// As ``SessionSnapshot/finishesAnotherToolUse(_:)``, for this subagent.
+    public func finishesAnotherToolUse(_ event: HookEvent) -> Bool {
+        SessionSnapshot.isStep(event, ofAnotherToolUseThan: currentToolUseId, showing: currentTool)
     }
 }
 

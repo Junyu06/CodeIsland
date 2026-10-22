@@ -1926,6 +1926,8 @@ final class AppState {
         markMergedSubagentWaiting(sessionId: sessionId, event: event, status: .waitingApproval)
         // Backfill tool name/description from cached PreToolUse when the payload is thin.
         enrichPermissionRequestFromCache(sessionId: sessionId, event: event)
+        // The tool now up is this request's: its own PostToolUse takes it down.
+        sessions[sessionId]?.currentToolUseId = event.toolUseId
 
         let request = PermissionRequest(event: event, continuation: continuation, hookConnectionId: hookConnectionId)
 

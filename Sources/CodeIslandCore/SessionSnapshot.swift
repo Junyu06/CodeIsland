@@ -93,7 +93,14 @@ public struct SessionSnapshot: Sendable {
     ]
 
     public var status: AgentStatus = .idle
-    public var currentTool: String?
+    public var currentTool: String? {
+        didSet { if currentTool != oldValue { currentToolUseId = nil } }
+    }
+    /// The tool use (its `tool_use_id`, or its source's spelling of it) that
+    /// put up ``currentTool``, when it named one; any other change of
+    /// ``currentTool`` forgets it. A tool step finishing another tool use
+    /// leaves the running tool up (``finishesAnotherToolUse(_:)``).
+    public var currentToolUseId: String?
     public var toolDescription: String?
     public var lastActivity: Date = Date()
     public var cwd: String?
@@ -494,6 +501,20 @@ public struct SessionSnapshot: Sendable {
         if toolHistory.count > maxHistory {
             toolHistory.removeFirst()
         }
+    }
+
+    /// Whether a PostToolUse / PostToolUseFailure finishes a tool use other
+    /// than the one running. Remote tool steps do not wait for the island,
+    /// so over SSH a large PostToolUse(A) can arrive after the PreToolUse(B)
+    /// that came next — with parallel tool calls in particular. Only when
+    /// both name their tool use: a source that names none goes as before.
+    public func finishesAnotherToolUse(_ event: HookEvent) -> Bool {
+        Self.isStep(event, ofAnotherToolUseThan: currentToolUseId, showing: currentTool)
+    }
+
+    static func isStep(_ event: HookEvent, ofAnotherToolUseThan running: String?, showing tool: String?) -> Bool {
+        guard tool != nil, let running, let finished = event.toolUseId else { return false }
+        return finished != running
     }
 
     /// Display name: project folder, or short session ID
@@ -1331,22 +1352,23 @@ private func applyHookEvent(
         if !isWaiting {
             sessions[sessionId]?.status = .running
             sessions[sessionId]?.currentTool = event.activityLabel
+            sessions[sessionId]?.currentToolUseId = event.toolUseId
             sessions[sessionId]?.toolDescription = event.toolDescription
         }
-    case "PostToolUse":
+    case "PostToolUse", "PostToolUseFailure":
+        let success = eventName == "PostToolUse"
+        if sessions[sessionId]?.finishesAnotherToolUse(event) == true {
+            // An earlier tool's step, overtaken by the next tool's start:
+            // it is recorded from its own payload, and the running tool
+            // stays up.
+            if let tool = event.activityLabel {
+                sessions[sessionId]?.recordTool(tool, description: event.toolDescription, success: success, agentType: nil, maxHistory: maxHistory)
+            }
+            break
+        }
         if let tool = sessions[sessionId]?.currentTool {
             let desc = sessions[sessionId]?.toolDescription
-            sessions[sessionId]?.recordTool(tool, description: desc, success: true, agentType: nil, maxHistory: maxHistory)
-        }
-        if !isWaiting {
-            sessions[sessionId]?.status = .processing
-            sessions[sessionId]?.currentTool = nil
-            sessions[sessionId]?.toolDescription = nil
-        }
-    case "PostToolUseFailure":
-        if let tool = sessions[sessionId]?.currentTool {
-            let desc = sessions[sessionId]?.toolDescription
-            sessions[sessionId]?.recordTool(tool, description: desc, success: false, agentType: nil, maxHistory: maxHistory)
+            sessions[sessionId]?.recordTool(tool, description: desc, success: success, agentType: nil, maxHistory: maxHistory)
         }
         if !isWaiting {
             sessions[sessionId]?.status = .processing
@@ -2380,6 +2402,7 @@ private func handleSubagentEvent(
         }
         sessions[sessionId]?.subagents[agentId]?.status = .running
         sessions[sessionId]?.subagents[agentId]?.currentTool = event.activityLabel
+        sessions[sessionId]?.subagents[agentId]?.currentToolUseId = event.toolUseId
         sessions[sessionId]?.subagents[agentId]?.toolDescription = event.toolDescription
         sessions[sessionId]?.subagents[agentId]?.lastActivity = Date()
         // Keep parent session showing as active while subagents work
@@ -2393,8 +2416,17 @@ private func handleSubagentEvent(
         guard ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event) else {
             return true
         }
+        let agentType = sessions[sessionId]?.subagents[agentId]?.agentType
+        if sessions[sessionId]?.subagents[agentId]?.finishesAnotherToolUse(event) == true {
+            // An earlier tool's step, overtaken by the next tool's start.
+            if let tool = event.activityLabel {
+                sessions[sessionId]?.recordTool(tool, description: event.toolDescription, success: true, agentType: agentType, maxHistory: maxHistory)
+            }
+            sessions[sessionId]?.subagents[agentId]?.lastActivity = Date()
+            sessions[sessionId]?.lastActivity = Date()
+            return true
+        }
         if let tool = sessions[sessionId]?.subagents[agentId]?.currentTool {
-            let agentType = sessions[sessionId]?.subagents[agentId]?.agentType
             let desc = sessions[sessionId]?.subagents[agentId]?.toolDescription
             sessions[sessionId]?.recordTool(tool, description: desc, success: true, agentType: agentType, maxHistory: maxHistory)
         }
@@ -2409,8 +2441,16 @@ private func handleSubagentEvent(
         guard ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event) else {
             return true
         }
+        let agentType = sessions[sessionId]?.subagents[agentId]?.agentType
+        if sessions[sessionId]?.subagents[agentId]?.finishesAnotherToolUse(event) == true {
+            // An earlier tool's step, overtaken by the next tool's start.
+            if let tool = event.activityLabel {
+                sessions[sessionId]?.recordTool(tool, description: event.toolDescription, success: false, agentType: agentType, maxHistory: maxHistory)
+            }
+            sessions[sessionId]?.lastActivity = Date()
+            return true
+        }
         if let tool = sessions[sessionId]?.subagents[agentId]?.currentTool {
-            let agentType = sessions[sessionId]?.subagents[agentId]?.agentType
             let desc = sessions[sessionId]?.subagents[agentId]?.toolDescription
             sessions[sessionId]?.recordTool(tool, description: desc, success: false, agentType: agentType, maxHistory: maxHistory)
         }
