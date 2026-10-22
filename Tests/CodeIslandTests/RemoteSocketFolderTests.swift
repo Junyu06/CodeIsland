@@ -67,8 +67,10 @@ final class RemoteSocketFolderTests: XCTestCase {
         return RemoteInstaller.preparedSocketPath(fromProbe: ran.output, errorOutput: ran.errorOutput, exitCode: ran.exitCode, base: base)
     }
 
-    private func verify(_ socketPath: String, shared: Bool = false, prelude: String = "") throws -> RemoteSocketCheckFailure? {
-        let script = RemoteInstaller.verifyRemoteSocketScript(socketPath: socketPath, agentsRunAsOtherUsers: shared)
+    /// The check of the socket at `socketPath`, waiting `wait` seconds for a
+    /// socket not there yet.
+    private func verify(_ socketPath: String, shared: Bool = false, prelude: String = "", wait: TimeInterval = 0.5) throws -> RemoteSocketCheckFailure? {
+        let script = RemoteInstaller.verifyRemoteSocketScript(socketPath: socketPath, agentsRunAsOtherUsers: shared, waitForSocket: wait)
         let ran = try run(script, prelude: prelude)
         return RemoteInstaller.socketProblem(fromCheck: ran.output, errorOutput: ran.errorOutput, exitCode: ran.exitCode, socketPath: socketPath)
     }
@@ -207,6 +209,18 @@ final class RemoteSocketFolderTests: XCTestCase {
     }
 
     // MARK: - Once the tunnel is up: the socket
+
+    /// The tunnel counts as up a moment after ssh starts, before sshd has
+    /// made its forward: a socket that appears while the check waits is
+    /// vouched for, not taken for missing.
+    func testASocketTheForwardMakesAMomentLaterIsWaitedFor() throws {
+        guard case .success(let path) = try prepare() else { return XCTFail("no folder") }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.7) {
+            try? leaveSocket(at: path)
+        }
+        XCTAssertNil(try verify(path, wait: 10))
+        XCTAssertNotNil(SocketPath.lstat(path))
+    }
 
     /// The socket sshd made in the folder is the SSH user's: vouched for,
     /// its mode left as it is.

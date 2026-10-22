@@ -422,13 +422,17 @@ final class RemoteManager: ObservableObject {
         // Only where this connect prepared the folder for the socket.
         guard let remoteSocketPath = remoteSocketPaths[host.id] else { return }
         let token = connectTokens[host.id]
+        let tunnel = forwarders[host.id]
         installRunning[host.id] = true
         let result = await installRemoteHooks(host, remoteSocketPath)
         installRunning[host.id] = false
         if let problem = result.socketProblem {
             // The tunnel leads to a socket nobody vouched for: it goes —
-            // unless a Disconnect or another connect has replaced it since.
-            guard token != nil, connectTokens[host.id] == token else { return }
+            // unless a Disconnect or another connect has replaced it since,
+            // or it has failed on its own meanwhile (and is being retried).
+            guard token != nil, connectTokens[host.id] == token,
+                  let tunnel, forwarders[host.id] === tunnel,
+                  connectionStatus[host.id] == .connected else { return }
             failRemoteSocket(host, problem)
             return
         }

@@ -595,6 +595,32 @@ final class RemoteManagerTests: XCTestCase {
         XCTAssertTrue(message.contains("uid 0"), message)
     }
 
+    /// A check that ends after its tunnel has failed on its own (and is
+    /// being retried) closes nothing more, and counts no second failure.
+    func testASocketProblemAfterItsTunnelFailedLeavesTheRetryAlone() async {
+        let installs = Installs()
+        installs.socketProblem = .socketUnverified(path: "/tmp/codeisland-501/island.sock", detail: "the socket: No such file or directory")
+        installs.holding = true
+        let sockets = FakeHookSockets()
+        let (manager, _, tunnels) = makeManager(sockets: sockets, installs: installs)
+        defer { manager.shutdown() }
+        let host = addHost(to: manager)
+        await connect(host, on: manager, tunnels: tunnels)
+        tunnels.made[0].report(.connected)
+        await waitUntil { installs.paths.count == 1 }
+
+        tunnels.made[0].report(.failed("ssh exited (255)"))
+        await waitUntil { manager.reconnectPhase(id: host.id) == .retryPending }
+        let message = manager.lastMessage[host.id]
+        installs.release()
+        await settle()
+
+        XCTAssertEqual(tunnels.made[0].disconnects, 0, "the failed tunnel was closed again")
+        XCTAssertEqual(manager.connectionStatus[host.id], .failed("ssh exited (255)"))
+        XCTAssertEqual(manager.lastMessage[host.id], message, "the retry's word was overwritten")
+        XCTAssertEqual(manager.reconnectPhase(id: host.id), .retryPending)
+    }
+
     /// A check that ends after the host was reconnected is old news: the
     /// newer tunnel stays.
     func testALateSocketProblemLeavesANewerTunnelAlone() async {

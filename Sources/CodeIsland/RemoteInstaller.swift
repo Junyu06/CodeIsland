@@ -50,15 +50,7 @@ enum RemoteInstaller {
     static func installAll(host: RemoteHost, remoteSocketPath: String) async -> RemoteInstallResult {
         // First the socket the tunnel has just made: until it is vouched
         // for, nothing else happens, and the tunnel goes.
-        let check = await runSSH(
-            host: host,
-            command: pythonCommand(verifyRemoteSocketScript(
-                socketPath: remoteSocketPath,
-                agentsRunAsOtherUsers: host.agentsRunAsOtherUsers
-            )),
-            timeout: 15
-        )
-        if let problem = socketProblem(fromCheck: check.stdout, errorOutput: check.stderr, exitCode: check.exitCode, socketPath: remoteSocketPath) {
+        if let problem = await verifyRemoteSocket(host: host, remoteSocketPath: remoteSocketPath) {
             return RemoteInstallResult(ok: false, message: "Socket not verified", socketProblem: problem)
         }
 
@@ -133,6 +125,28 @@ enum RemoteInstaller {
               path.count > prefix.count + suffix.count else { return nil }
         let uid = String(path.dropFirst(prefix.count).dropLast(suffix.count))
         return isUID(uid) ? uid : nil
+    }
+
+    /// Checks, once the tunnel is up, the socket it made on the host
+    /// (``verifyRemoteSocketScript(socketPath:agentsRunAsOtherUsers:waitForSocket:)``):
+    /// nil once it is vouched for. The tunnel counts as up before its
+    /// forward is, so the check waits a while for the socket to appear; and
+    /// a check ssh could not run at all (a dropped connection, sshd's
+    /// MaxStartups) is tried once more before the socket counts as not
+    /// vouched for.
+    static func verifyRemoteSocket(host: RemoteHost, remoteSocketPath: String) async -> RemoteSocketCheckFailure? {
+        let command = pythonCommand(verifyRemoteSocketScript(
+            socketPath: remoteSocketPath,
+            agentsRunAsOtherUsers: host.agentsRunAsOtherUsers
+        ))
+        for attempt in 1...2 {
+            let check = await runSSH(host: host, command: command, timeout: 45)
+            if attempt == 2 || markedAnswer(in: check.stdout, marker: socketCheckMarker) != nil {
+                return socketProblem(fromCheck: check.stdout, errorOutput: check.stderr, exitCode: check.exitCode, socketPath: remoteSocketPath)
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+        return nil
     }
 
     /// What the folder check on the host (``prepareRemoteSocketFolderScript(agentsRunAsOtherUsers:base:)``)
@@ -258,14 +272,21 @@ enum RemoteInstaller {
     /// the socket at `socketPath` is the SSH user's, in the folder made
     /// before the tunnel started and still that user's alone, and, where
     /// agents run as other users, gives it the mode they need (0666) — never
-    /// through a symlink. Prints on a line of its own, after
-    /// ``socketCheckMarker``, whether it passed, and why not.
-    static func verifyRemoteSocketScript(socketPath: String, agentsRunAsOtherUsers: Bool) -> String {
+    /// through a symlink. A socket not there yet is waited for, up to
+    /// `waitForSocket` seconds: the tunnel counts as up a moment after ssh
+    /// starts, before sshd has made its forward. Prints on a line of its
+    /// own, after ``socketCheckMarker``, whether it passed, and why not.
+    static func verifyRemoteSocketScript(
+        socketPath: String,
+        agentsRunAsOtherUsers: Bool,
+        waitForSocket: TimeInterval = 20
+    ) -> String {
         """
-        import errno, json, os, stat, sys
+        import errno, json, os, stat, sys, time
 
         path = \(pythonStringLiteral(socketPath))
         shared = \(agentsRunAsOtherUsers ? "True" : "False")
+        wait_for_socket = \(max(0, waitForSocket))
         uid = os.getuid()
         folder, name = os.path.split(path)
         folder_mode = 0o711 if shared else 0o700
@@ -274,11 +295,15 @@ enum RemoteInstaller {
             print(\(pythonStringLiteral(socketCheckMarker)) + json.dumps({"ok": problem is None, "problem": problem}))
             sys.exit(0)
 
-        def socket_info(fd):
-            try:
-                return os.stat(name, dir_fd=fd, follow_symlinks=False)
-            except OSError as e:
-                answer("the socket: " + e.strerror)
+        def socket_info(fd, wait=0):
+            deadline = time.time() + wait
+            while True:
+                try:
+                    return os.stat(name, dir_fd=fd, follow_symlinks=False)
+                except OSError as e:
+                    if e.errno != errno.ENOENT or time.time() >= deadline:
+                        answer("the socket: " + e.strerror)
+                time.sleep(0.2)
 
         def set_shared_mode(fd, checked):
             # Never through a symlink. Where chmod cannot leave a symlink alone
@@ -327,7 +352,7 @@ enum RemoteInstaller {
             answer(folder + " belongs to uid %d" % info.st_uid)
         if stat.S_IMODE(info.st_mode) != folder_mode:
             answer(folder + " has mode %o" % stat.S_IMODE(info.st_mode))
-        found = socket_info(fd)
+        found = socket_info(fd, wait_for_socket)
         if not stat.S_ISSOCK(found.st_mode):
             answer("not a socket")
         if found.st_uid != uid:
@@ -1666,8 +1691,10 @@ print(" · ".join(parts))
                 timeoutTask.cancel()
                 let outData = stdout.fileHandleForReading.readDataToEndOfFile()
                 let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-                let out = String(data: outData, encoding: .utf8) ?? ""
-                let err = String(data: errData, encoding: .utf8) ?? ""
+                // Lossy: one byte a login shell prints in another encoding must not
+                // hide the answer line after it.
+                let out = String(decoding: outData, as: UTF8.self)
+                let err = String(decoding: errData, as: UTF8.self)
                 continuation.resume(returning: RemoteCommandResult(stdout: out, stderr: err, exitCode: process.terminationStatus))
             }
         }
