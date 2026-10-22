@@ -369,14 +369,24 @@ final class GoogleAntigravitySupportTests: XCTestCase {
 /// reads the event to EOF, answers with `reply`, closes.
 final class OneShotUnixServer {
     let path: String
-    private let listener: Int32
     private let served = DispatchSemaphore(value: 0)
-    private(set) var received = Data()
+    private let request = ReceivedRequest()
+    /// What the client sent; read it after `waitUntilServed`.
+    var received: Data { request.data }
+
+    /// Filled by the accept thread, which must not hold the server: a client
+    /// that never connected kept it alive, and its socket file stayed in /tmp.
+    private final class ReceivedRequest: @unchecked Sendable {
+        var data = Data()
+    }
+
+    /// How long the accept thread waits for a client before giving up.
+    private static let acceptTimeoutMilliseconds: Int32 = 15_000
 
     init?(reply: Data) {
         // sun_path is 104 bytes; NSTemporaryDirectory() can be too long for it.
         path = "/tmp/ci-bridge-\(UUID().uuidString.prefix(8)).sock"
-        listener = socket(AF_UNIX, SOCK_STREAM, 0)
+        let listener = socket(AF_UNIX, SOCK_STREAM, 0)
         guard listener >= 0 else { return nil }
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -392,8 +402,14 @@ final class OneShotUnixServer {
             close(listener)
             return nil
         }
-        DispatchQueue.global().async { [self] in
-            let client = accept(listener, nil, nil)
+        // The thread owns the listener and closes it: closing it from deinit
+        // would not wake a blocked accept, and its number could be reused.
+        DispatchQueue.global().async { [request, served] in
+            defer { close(listener) }
+            var pending = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
+            let client = poll(&pending, 1, Self.acceptTimeoutMilliseconds) > 0
+                ? accept(listener, nil, nil)
+                : -1
             if client >= 0 {
                 var buffer = [UInt8](repeating: 0, count: 4096)
                 var data = Data()
@@ -402,7 +418,7 @@ final class OneShotUnixServer {
                     if n <= 0 { break }
                     data.append(contentsOf: buffer[..<n])
                 }
-                received = data
+                request.data = data
                 _ = reply.withUnsafeBytes { write(client, $0.baseAddress, reply.count) }
                 close(client)
             }
@@ -415,7 +431,6 @@ final class OneShotUnixServer {
     }
 
     deinit {
-        close(listener)
         unlink(path)
     }
 }
