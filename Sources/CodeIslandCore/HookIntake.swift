@@ -60,8 +60,10 @@ public struct HookIntake {
         public var sourceTag: String?
         /// `--event`: for agents whose stdin does not name the event.
         public var eventTag: String?
-        /// The source to stamp when nothing declares or infers one. The
-        /// bridge has none (the island then defaults to Claude); see
+        /// The source to stamp when nothing declares or infers one and the
+        /// payload has no `_source` of its own: the island defaults to Claude
+        /// when a payload names no source, and drops one whose source it does
+        /// not support. The bridge has none; see
         /// ``HookEdgeFacts/facts(from:)`` for an edge's.
         public var defaultSource: String?
         /// The hook's environment. Only ``HookIntake/environmentKeys`` are read.
@@ -401,7 +403,9 @@ public struct HookIntake {
             cursorPayload: isCursorPayload,
             ancestry: coreAncestry
         )
-        let effectiveSource = bridgeSource.source ?? facts.defaultSource
+        // A `_source` the payload names but the island does not support stays,
+        // as the bridge leaves it, and the island drops the event.
+        let effectiveSource = bridgeSource.source ?? (json["_source"] == nil ? facts.defaultSource : nil)
         if let source = effectiveSource {
             json["_source"] = source
         }

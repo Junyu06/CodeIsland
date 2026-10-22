@@ -112,6 +112,34 @@ final class HookEdgeFactsTests: XCTestCase {
         }
     }
 
+    /// Claude Code's hook with a `_source` the island does not support: the
+    /// bridge leaves it (and the island drops the event); so does the edge,
+    /// rather than stamp Claude over it. With no `_source`, both mean Claude.
+    func testEdgeAndBridgeAgreeOnAnUnsupportedPayloadSource() throws {
+        for payloadSource: Any in ["myagent", ""] {
+            let stdin: [String: Any] = [
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "s-2",
+                "cwd": "/work",
+                "_source": payloadSource,
+            ]
+            let bridge = try XCTUnwrap(HookIntake(stdin: stdin, facts: HookIntake.Facts(parentPID: 1234)))
+            var delivered = stdin
+            delivered["_edge"] = remoteEdge(source: "claude")
+            let edge = try interpret(delivered)
+            XCTAssertEqual(edge.payload["_source"] as? String, bridge.payload["_source"] as? String, "\(payloadSource)")
+            XCTAssertEqual(edge.payload["_source"] as? String, payloadSource as? String)
+            XCTAssertNil(edge.source)
+        }
+
+        let unnamed = try interpret([
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "s-3",
+            "_edge": remoteEdge(source: "claude"),
+        ])
+        XCTAssertEqual(unnamed.payload["_source"] as? String, "claude")
+    }
+
     /// The remote OpenCode plugin pipes its events through the remote hook,
     /// which reports the source and the host for it.
     func testRemoteOpenCodePluginEventIsReadFromTheHooksFacts() throws {
