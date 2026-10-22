@@ -159,12 +159,11 @@ final class FollowUpReminderController {
         reschedule(now: now)
     }
 
-    /// A turn finished and was announced. Interrupted turns (the user pressed
-    /// Esc) are not news to anyone and are not followed up. A turn that
-    /// ended on an error is followed up as one (the error sound).
+    /// A turn finished and was announced, and `AttentionPolicy` decided it is
+    /// worth a follow-up (an interrupted turn, the user's own Esc, never is).
+    /// A turn that ended on an error is followed up as one (the error sound).
     func trackCompletion(sessionId: String, turnFailed: Bool = false) {
         guard applyInterval() else { return }
-        if appState?.sessions[sessionId]?.interrupted == true { return }
         let now = clock()
         scheduler.track(kind: .completion, sessionId: sessionId, now: now, turnFailed: turnFailed)
         reschedule(now: now)

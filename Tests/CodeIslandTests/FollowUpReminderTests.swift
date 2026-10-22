@@ -500,6 +500,30 @@ final class FollowUpReminderTests: XCTestCase {
         XCTAssertTrue(followUps.scheduler.isEmpty)
     }
 
+    /// The user stopped an AiWork stream: its card still pops, but like an
+    /// Esc'd hook turn it is not chased — it used to be followed up as
+    /// "finished". A completed stream still is.
+    func testAbortedAiWorkStreamIsNotChased() throws {
+        // Hydrate falls back to daemon discovery: keep it off any real daemon.
+        appState.aiworkStateDirOverride = "/nonexistent/codeisland-tests/agentix"
+        func stream(_ name: String, _ daemonSessionId: String) throws {
+            let frame = try XCTUnwrap(AiWorkWatchClient.parseFrame(Data("""
+            {"kind":"event","category":"session","operation":"sessions.watch","event":{"name":"\(name)"},"data":{"session":{"session_id":"\(daemonSessionId)","cwd":"/tmp/proj"}},"meta":{"session_id":"\(daemonSessionId)"}}
+            """.utf8)))
+            appState.handleAiWorkStreamEvent(name: name, frame: frame, agentId: "coder")
+        }
+
+        try stream("stream.started", "acp:coder:stopped")
+        try stream("stream.aborted", "acp:coder:stopped")
+        XCTAssertEqual(appState.sessions["aiwork:acp:coder:stopped"]?.status, .idle)
+        XCTAssertTrue(appState.glanceCompletionActive, "its completion is still announced")
+        XCTAssertTrue(followUps.scheduler.isEmpty)
+
+        try stream("stream.started", "acp:coder:done")
+        try stream("stream.completed", "acp:coder:done")
+        XCTAssertEqual(followUps.scheduler.trackedKeys, [FollowUpReminderScheduler.Key(.completion, "aiwork:acp:coder:done")])
+    }
+
     /// Several items due in one tick: one card, one chime per kind.
     func testOneTickOneCardOneChimePerKind() async throws {
         try await requestApproval("burst-1")

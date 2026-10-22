@@ -125,17 +125,7 @@ extension AppState {
         }
     }
 
-    /// AiWork daemon turn boundary (its streams bypass the hook reducer).
-    func pushAiWorkTurnEnded(_ eventName: String, sessionId: String, data: [String: AnyCodableLike]? = nil) {
-        switch eventName {
-        case "stream.completed": pushTurnEnded(sessionId: sessionId, failed: false)
-        case "stream.failed":
-            pushTurnEnded(sessionId: sessionId, failed: true, errorDetail: Self.aiworkFailureText(data))
-        default: return  // stream.aborted: the user stopped it
-        }
-    }
-
-    /// What a `stream.failed` event itself says went wrong, if anything.
+    /// What an AiWork `stream.failed` event itself says went wrong, if anything.
     nonisolated static func aiworkFailureText(_ data: [String: AnyCodableLike]?) -> String? {
         guard let data else { return nil }
         let candidates = [

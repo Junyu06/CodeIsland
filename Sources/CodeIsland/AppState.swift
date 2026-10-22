@@ -1321,21 +1321,9 @@ final class AppState {
         return .expand
     }
 
-    /// `turnFailed`: the turn ended on an error (StopFailure, a failed AiWork
-    /// stream or Cowork turn) — its follow-up says so.
-    func enqueueCompletion(_ sessionId: String, turnFailed: Bool = false) {
-        let decision = AttentionPolicy.settle(
-            AttentionIntents(
-                completion: .init(turnFailed: turnFailed),
-                followUp: .trackCompletion(turnFailed: turnFailed)
-            ),
-            context: attentionContext(for: sessionId)
-        )
-        announceCompletion(decision, sessionId: sessionId)
-    }
-
     /// Announce a finished turn the way `AttentionPolicy` decided: the card's
-    /// ERROR mark, the follow-up, then the completion card or the glance dot.
+    /// ERROR mark (`turnFailed`: a StopFailure, a failed AiWork stream or
+    /// Cowork turn), the follow-up, then the completion card or the glance dot.
     func announceCompletion(_ decision: AttentionDecision, sessionId: String) {
         guard let completion = decision.completion else { return }
         // The session card reads ERROR until the next prompt.

@@ -398,26 +398,28 @@ extension AppState {
             announce: true
         )
 
-        if AiWorkStatusMapper.isTerminalEvent(name) {
-            enqueueCompletion(sessionId, turnFailed: name == "stream.failed")
-            pushAiWorkTurnEnded(name, sessionId: sessionId, data: frame.dataObject)
-        }
-
-        // Sound: reuse the event names the hook-driven sources emit so the existing
-        // per-event toggles in Sound settings apply unchanged. Deliberately narrow —
-        // one sound per turn boundary, never per streaming delta.
+        // One moment per turn boundary or request, never per streaming delta.
+        // The policy rings the cues hook-driven sources ring, so the per-event
+        // toggles in Sound settings apply unchanged.
         switch name {
         case "stream.started":
-            SoundManager.shared.handleEvent(isNew ? "SessionStart" : "UserPromptSubmit")
-        case "stream.approval_required", "stream.plan_confirmation_required":
-            SoundManager.shared.handleEvent("PermissionRequest")
-        case "stream.question_required":
-            SoundManager.shared.handleEvent("PermissionRequest")
+            attend(.turnStarted(newSession: isNew), sessionId: sessionId)
+        case "stream.approval_required", "stream.plan_confirmation_required", "stream.question_required":
+            attend(.requestRaisedElsewhere, sessionId: sessionId)
         case "stream.completed":
-            SoundManager.shared.handleEvent("Stop")
+            attend(.turnEnded(.completed, host: .aiwork), sessionId: sessionId)
         case "stream.failed":
-            // The whole reply failed — the turn-failure sound, not a tool error.
-            SoundManager.shared.handleEvent(EventSoundRouting.turnFailed, sessionId: sessionId)
+            // The whole reply failed — the turn-failure sound, not a tool error,
+            // and the push says what the failure itself said.
+            attend(
+                .turnEnded(.failed, host: .aiwork),
+                sessionId: sessionId,
+                errorDetail: Self.aiworkFailureText(frame.dataObject)
+            )
+        case "stream.aborted":
+            // The user stopped it: the card still pops, quietly, and nothing
+            // chases it afterwards.
+            attend(.turnEnded(.stopped, host: .aiwork), sessionId: sessionId)
         default:
             break
         }
