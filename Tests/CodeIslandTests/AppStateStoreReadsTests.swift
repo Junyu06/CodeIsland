@@ -59,6 +59,117 @@ final class AppStateStoreReadsTests: XCTestCase {
         XCTAssertFalse(probe.ranOnMainThread)
     }
 
+    /// Hooks arriving faster than the read takes keep queueing lookups: each
+    /// read's title still lands as it returns (it used to be dropped for the
+    /// queued lookup, so the title never landed while the hooks kept coming).
+    func testProviderTitleLandsWhileHooksKeepArriving() async throws {
+        let appState = appStateReadingNothing()
+        let probe = StoreReadProbe()
+        appState.storeReaders.title = { _ in
+            probe.record()
+            usleep(30_000)
+            return ResolvedSessionTitle(title: "Store title", source: .claudeAiTitle)
+        }
+
+        appState.handleEvent(try event("UserPromptSubmit", extra: ["prompt": "hi"]))
+        let start = Date()
+        var hook = 0
+        while Date().timeIntervalSince(start) < 0.4 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            hook += 1
+            appState.handleEvent(try event(hook % 2 == 0 ? "PreToolUse" : "PostToolUse",
+                                           extra: ["tool_name": "Bash", "tool_use_id": "t\(hook)"]))
+        }
+        XCTAssertEqual(appState.sessions["s"]?.sessionTitle, "Store title",
+                       "the title landed while the hooks were still arriving")
+        XCTAssertLessThan(probe.calls, hook, "lookups asked for during a read ran as one")
+    }
+
+    /// A store that has no title for the card says nothing: the title the
+    /// card got elsewhere (a hook's `session_title`, Codex's thread name, a
+    /// promoted child's nickname) stays.
+    func testAStoreWithNoTitleLeavesTheCardsTitle() async throws {
+        let appState = appStateReadingNothing()
+        let probe = StoreReadProbe()
+        appState.storeReaders.title = { _ in
+            probe.record()
+            return nil
+        }
+
+        appState.handleEvent(try event("UserPromptSubmit", extra: ["prompt": "hi"]))
+        appState.sessions["s"]?.sessionTitle = "Title from elsewhere"
+        appState.handleEvent(try event("PreToolUse", extra: ["tool_name": "Bash"]))
+        await waitUntil("the second lookup never ran") { probe.calls == 2 }
+        // Reads for a card run one at a time: the third starting means the
+        // second landed.
+        appState.handleEvent(try event("PostToolUse", extra: ["tool_name": "Bash"]))
+        await waitUntil("the third lookup never ran") { probe.calls == 3 }
+        XCTAssertEqual(appState.sessions["s"]?.sessionTitle, "Title from elsewhere")
+    }
+
+    /// Codex's `thread/started` names the thread while a store read for its
+    /// card is in flight: the read, started before the name existed, lands
+    /// dropped instead of putting the old name back.
+    func testCodexsThreadNameIsNotOverwrittenByAnOlderStoreRead() async throws {
+        let appState = appStateReadingNothing()
+        let probe = StoreReadProbe()
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        appState.storeReaders.title = { _ in
+            guard probe.record() == 1 else { return nil }
+            _ = release.wait(timeout: .now() + asyncTestTimeout)
+            return ResolvedSessionTitle(title: "Name before the thread started", source: .codexThreadName)
+        }
+        let rawId = "019a2b3c-thread"
+        let cardId = AppState.codexAppSessionPrefix + rawId
+        var card = SessionSnapshot()
+        card.source = "codex"
+        card.termBundleId = AppState.codexAppBundleId
+        card.providerSessionId = rawId
+        card.cwd = "/repo"
+        appState.sessions[cardId] = card
+        let discovered = DiscoveredSession(
+            sessionId: cardId, cwd: "/repo", tty: nil, model: nil, pid: nil, modifiedAt: Date(),
+            recentMessages: [], source: "codex", termBundleId: AppState.codexAppBundleId,
+            providerSessionId: rawId
+        )
+
+        appState.integrateDiscovered([discovered])
+        await waitUntil("the store read never started") { probe.calls == 1 }
+        let started = try XCTUnwrap(CodexAppServerClient.parseMessage(Data(
+            """
+            {"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":"\(rawId)","cwd":"/repo","name":"Fresh name","status":{"type":"active","activeFlags":[]}}}}
+            """.utf8
+        )))
+        appState.handleCodexAppServerMessage(started)
+        XCTAssertEqual(appState.sessions[cardId]?.sessionTitle, "Fresh name")
+
+        release.signal()
+        appState.integrateDiscovered([discovered])
+        await waitUntil("the next lookup never ran") { probe.calls == 2 }
+        XCTAssertEqual(appState.sessions[cardId]?.sessionTitle, "Fresh name")
+    }
+
+    /// A read in flight does not keep an AppState its owner let go of.
+    func testADetachedStoreReadDoesNotKeepAReleasedAppStateAlive() async throws {
+        let started = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        weak var released: AppState?
+        do {
+            let appState = appStateReadingNothing()
+            appState.storeReaders.model = { _, _ in
+                started.signal()
+                _ = release.wait(timeout: .now() + asyncTestTimeout)
+                return "late-model"
+            }
+            appState.handleEvent(try event("UserPromptSubmit", extra: ["prompt": "hi"]))
+            released = appState
+        }
+        XCTAssertEqual(started.wait(timeout: .now() + asyncTestTimeout), .success)
+        await waitUntil("the read held the released AppState") { released == nil }
+    }
+
     func testModelIsReadOffTheMainActorOneReadAtATime() async throws {
         let appState = appStateReadingNothing()
         let probe = StoreReadProbe()

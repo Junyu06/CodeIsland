@@ -438,6 +438,7 @@ extension AppState {
         }
         if let name = thread["name"]?.asString, !name.isEmpty {
             snapshot.sessionTitle = name
+            invalidateProviderTitleReads(for: sessionId)
         }
         if let path = thread["path"]?.asString, !path.isEmpty {
             snapshot.transcriptPath = path

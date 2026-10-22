@@ -703,7 +703,7 @@ final class AppState {
     func checkNativeAppTurnEnded(sessionId: String, session: SessionSnapshot, settleTime: TimeInterval) {
         guard nativeAppTurnReadsInFlight.insert(sessionId).inserted else { return }
         let read = storeReaders.nativeAppFinishedTurn
-        Task.detached(priority: .utility) {
+        Task.detached(priority: .utility) { [weak self] in
             let finishedAt = read(sessionId, session)
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -1414,34 +1414,57 @@ final class AppState {
 
     @ObservationIgnored
     private var providerTitleReads: [String: ProviderTitleRead] = [:]
+    /// Per card, bumped when a title arrives from elsewhere (Codex's
+    /// `thread/started`): a store read started before then is stale.
+    @ObservationIgnored
+    private var providerTitleGenerations: [String: Int] = [:]
 
     /// Look a card's title up in its provider's store, off the main actor:
     /// every Claude and Codex hook asks, and the lookup reads a file (Codex's
     /// whole thread index, the head and tail of a Claude transcript). One read
-    /// per card at a time; a lookup asked for meanwhile runs once it lands,
-    /// and only the newest lookup's title is applied.
+    /// per card at a time. What a read finds is applied when it lands (unless
+    /// a newer title came from elsewhere meanwhile), then the newest lookup
+    /// asked for during it runs.
     private func readProviderTitle(_ lookup: ProviderTitleLookup, for cardId: String) {
         if providerTitleReads[cardId] != nil {
-            providerTitleReads[cardId] = ProviderTitleRead(next: lookup)
+            providerTitleReads[cardId]?.next = lookup
             return
         }
         providerTitleReads[cardId] = ProviderTitleRead()
+        let generation = providerTitleGenerations[cardId, default: 0]
         let read = storeReaders.title
-        Task.detached(priority: .userInitiated) {
+        Task.detached(priority: .userInitiated) { [weak self] in
             let resolved = read(lookup)
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                if let next = self.providerTitleReads.removeValue(forKey: cardId)?.next {
-                    self.readProviderTitle(next, for: cardId)
-                    return
+                let next = self.providerTitleReads.removeValue(forKey: cardId)?.next
+                if self.providerTitleGenerations[cardId, default: 0] == generation {
+                    self.applyProviderTitle(resolved, to: cardId)
                 }
-                guard let session = self.sessions[cardId],
-                      session.sessionTitle != resolved?.title
-                        || session.sessionTitleSource != resolved?.source else { return }
-                self.sessions[cardId]?.sessionTitle = resolved?.title
-                self.sessions[cardId]?.sessionTitleSource = resolved?.source
+                if let next {
+                    self.readProviderTitle(next, for: cardId)
+                }
             }
         }
+    }
+
+    /// A title the store has replaces the card's. A store with none says
+    /// nothing: the card keeps a title a hook (`session_title`), Codex
+    /// (`thread/started`) or Agent Sub-Sessions (a child's nickname) gave it.
+    private func applyProviderTitle(_ resolved: ResolvedSessionTitle?, to cardId: String) {
+        guard let resolved, let session = sessions[cardId],
+              session.sessionTitle != resolved.title
+                || session.sessionTitleSource != resolved.source else { return }
+        sessions[cardId]?.sessionTitle = resolved.title
+        sessions[cardId]?.sessionTitleSource = resolved.source
+        scheduleSave()
+        refreshDerivedState()
+    }
+
+    /// The card just got a title from Codex itself, newer than anything a
+    /// store read in flight for it can find: those reads are dropped.
+    func invalidateProviderTitleReads(for cardId: String) {
+        providerTitleGenerations[cardId, default: 0] += 1
     }
 
     func handleEvent(_ event: HookEvent) {
@@ -1805,7 +1828,7 @@ final class AppState {
         guard modelReadsInFlight.insert(sessionId).inserted else { return }
 
         let read = storeReaders.model
-        Task.detached(priority: .utility) {
+        Task.detached(priority: .utility) { [weak self] in
             let model = read(sessionId, session)
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -1814,6 +1837,8 @@ final class AppState {
                 if let model {
                     if self.sessions[sessionId]?.model == nil {
                         self.sessions[sessionId]?.model = model
+                        self.scheduleSave()
+                        self.refreshDerivedState()
                     }
                     self.modelReadRetryAt.removeValue(forKey: sessionId)
                 } else {
@@ -1826,15 +1851,18 @@ final class AppState {
     /// Read Cursor's settings for the card's YOLO badge, off the main actor;
     /// once per card (nil = unchecked).
     private func readCursorYoloMode(for sessionId: String) {
-        guard cursorYoloReadsInFlight.insert(sessionId).inserted else { return }
+        guard let session = sessions[sessionId], session.isYoloMode == nil,
+              cursorYoloReadsInFlight.insert(sessionId).inserted else { return }
         let read = storeReaders.cursorYoloMode
-        Task.detached(priority: .utility) {
+        Task.detached(priority: .utility) { [weak self] in
             let yolo = read()
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.cursorYoloReadsInFlight.remove(sessionId)
                 guard self.sessions[sessionId] != nil, self.sessions[sessionId]?.isYoloMode == nil else { return }
                 self.sessions[sessionId]?.isYoloMode = yolo
+                self.scheduleSave()
+                self.refreshDerivedState()
             }
         }
     }
