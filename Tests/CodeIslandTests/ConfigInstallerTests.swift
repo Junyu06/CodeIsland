@@ -1578,7 +1578,7 @@ hooks:
         try fm.createDirectory(at: ompExtensionDir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: tempDir) }
 
-        for version in ["v2", "v3", "v4", "v5", "v6", "v7"] {
+        for version in ["v2", "v3", "v4", "v5", "v6", "v7", "v8"] {
             try """
             // CodeIsland pi extension
             // version: \(version)
@@ -1602,7 +1602,7 @@ hooks:
             )
 
             let rewritten = try String(contentsOf: ompExtensionPath)
-            XCTAssertTrue(rewritten.contains("// version: v8"))
+            XCTAssertTrue(rewritten.contains("// version: v9"))
             XCTAssertTrue(
                 ConfigInstaller.isOmpExtensionInstalled(
                     ompExtensionPath: ompExtensionPath.path,
@@ -1630,9 +1630,11 @@ hooks:
 
         let contents = try String(contentsOf: ompExtensionPath)
         XCTAssertTrue(contents.contains("CodeIsland pi extension"))
-        XCTAssertTrue(contents.contains("// version: v8"))
+        XCTAssertTrue(contents.contains("// version: v9"))
         XCTAssertTrue(contents.contains("@oh-my-pi/pi-coding-agent"))
         XCTAssertFalse(contents.contains("@earendil-works/pi-coding-agent"))
+        // OMP subagents name their parent's card (#378).
+        XCTAssertTrue(contents.contains(DeclaredSubsession.parentKey))
         XCTAssertTrue(ConfigInstaller.isOmpExtensionInstalled(ompExtensionPath: ompExtensionPath.path, fm: fm))
     }
 
