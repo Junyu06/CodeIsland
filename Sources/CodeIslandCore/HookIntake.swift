@@ -71,8 +71,8 @@ public struct HookIntake {
         public var parentPID: Int32?
         /// Up to six processes above the hook, nearest first.
         public var ancestry: [Ancestor]
-        /// The directory the hook runs in.
-        public var workingDirectory: String?
+        /// The directory the hook runs in. Read only when the payload names none.
+        public var workingDirectory: () -> String?
         /// The hook's controlling terminal.
         public var tty: () -> String?
         /// This Mac's home directory, for `~` in GROK_HOME. Nil for an edge on
@@ -85,6 +85,11 @@ public struct HookIntake {
         /// SHA-256 of the hook's stdin exactly as the agent wrote it
         /// (``CursorHookPayload/deliveryDigest(of:)``).
         public var stdinDigest: () -> String?
+        /// Whether the edge waits for the island's answer, when it decided that
+        /// on its own (the remote hook does, from the event name, so no other
+        /// hook pays a round trip). Nil: it waits whenever ``HookIntake``
+        /// says so, as the bridge does. A hook nobody waits on is never held.
+        public var edgeWaits: Bool?
         /// The tty of the tmux client showing `pane` (`tmux display-message`).
         public var tmuxClientTTY: (_ pane: String) -> String?
         /// Whether a file exists on this Mac.
@@ -97,12 +102,13 @@ public struct HookIntake {
             environment: [String: String] = [:],
             parentPID: Int32? = nil,
             ancestry: [Ancestor] = [],
-            workingDirectory: String? = nil,
+            workingDirectory: @escaping () -> String? = { nil },
             tty: @escaping () -> String? = { nil },
             homeDirectory: @escaping () -> String? = { nil },
             expandingTildeInPath: @escaping (String) -> String = { ($0 as NSString).expandingTildeInPath },
             remoteHost: EdgeHost? = nil,
             stdinDigest: @escaping () -> String? = { nil },
+            edgeWaits: Bool? = nil,
             tmuxClientTTY: @escaping (_ pane: String) -> String? = { _ in nil },
             fileExists: @escaping (String) -> Bool = { _ in false }
         ) {
@@ -118,6 +124,7 @@ public struct HookIntake {
             self.expandingTildeInPath = expandingTildeInPath
             self.remoteHost = remoteHost
             self.stdinDigest = stdinDigest
+            self.edgeWaits = edgeWaits
             self.tmuxClientTTY = tmuxClientTTY
             self.fileExists = fileExists
         }
@@ -470,7 +477,8 @@ public struct HookIntake {
         // against its own schema for the step: an answer in the island's format is not
         // one it acts on, and on a permission step (`preToolUse` among them) an answer
         // it cannot use blocks the tool. Printing nothing leaves the call to Cursor.
-        let waitsForAnswer = (isPermission || isQuestion) && !isCursorPayload
+        // Nor does a hook whose edge does not wait (``Facts/edgeWaits``).
+        let waitsForAnswer = (isPermission || isQuestion) && !isCursorPayload && facts.edgeWaits != false
 
         self.payload = json
         self.facts = facts
@@ -634,7 +642,7 @@ public struct HookIntake {
         // Inject cwd if not already present. Gemini CLI / Google Antigravity hooks do not
         // include a `cwd` field, so CodeIsland cannot resolve the project name and falls back
         // to "Session". Populating it here lets the approval card show the actual folder name.
-        if json["cwd"] == nil, let workingDirectory = facts.workingDirectory {
+        if json["cwd"] == nil, let workingDirectory = facts.workingDirectory() {
             json["cwd"] = workingDirectory
         }
 

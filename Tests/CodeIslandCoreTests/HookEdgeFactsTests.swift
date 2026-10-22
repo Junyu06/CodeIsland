@@ -157,6 +157,45 @@ final class HookEdgeFactsTests: XCTestCase {
         XCTAssertEqual(intake.payload["_remote_host_id"] as? String, "devbox")
     }
 
+    /// The remote hook decides on its own whether to wait (no round trip for
+    /// the rest) and says so; a hook nobody waits on is never held, whatever
+    /// its event name — `hookEventName`, say, which the remote hook does not read.
+    func testAHookItsEdgeDoesNotWaitOnIsNeverHeld() throws {
+        let intake = try interpret([
+            "hookEventName": "PermissionRequest",
+            "sessionId": "z1",
+            "_edge": remoteEdge(source: "my-cli", extra: ["waits": false]),
+        ])
+        XCTAssertTrue(intake.isPermission)
+        XCTAssertFalse(intake.waitsForAnswer)
+        XCTAssertNil(intake.stdout(forAnswer: Data(#"{"hookSpecificOutput":{"decision":{"behavior":"allow"}}}"#.utf8)))
+
+        let waiting = try interpret([
+            "hook_event_name": "PermissionRequest",
+            "session_id": "z2",
+            "_edge": remoteEdge(source: "my-cli", extra: ["waits": true]),
+        ])
+        XCTAssertTrue(waiting.waitsForAnswer)
+    }
+
+    /// The bridge observes its own facts: an `_edge` piped into its stdin is
+    /// neither read nor forwarded, so nothing interprets a hook twice.
+    func testFactsPipedIntoTheBridgeAreDropped() throws {
+        var intake = try XCTUnwrap(HookIntake(
+            stdin: [
+                "hook_event_name": "Stop",
+                "session_id": "s",
+                "_edge": ["v": 1, "source": "claude", "host": ["id": "elsewhere", "name": "x"]] as [String: Any],
+            ],
+            facts: HookIntake.Facts(sourceTag: "codex", parentPID: 4242)
+        ))
+        intake.addTerminalContext()
+        XCTAssertNil(intake.payload[HookEdgeFacts.key])
+        XCTAssertEqual(intake.payload["_source"] as? String, "codex")
+        XCTAssertEqual(intake.payload["_ppid"] as? Int32, 4242)
+        XCTAssertNil(intake.payload["_remote_host_id"])
+    }
+
     func testRemoteHookWithoutSessionIsDropped() throws {
         let delivery = HookEdgeFacts.delivery(
             in: ["hook_event_name": "Stop", "_edge": remoteEdge(source: "codex")],

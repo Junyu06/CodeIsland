@@ -80,6 +80,7 @@ public enum HookEdgeFacts {
         let environment = (edge["env"] as? [String: Any] ?? [:])
             .compactMapValues { $0 as? String }
             .filter { HookIntake.environmentKeys.contains($0.key) }
+        let workingDirectory = string(edge["cwd"])
         let tty = string(edge["tty"])
         let digest = string(edge["stdin_sha256"])
         let tmuxClientTTY = string(edge["tmux_client_tty"])
@@ -89,9 +90,10 @@ public enum HookEdgeFacts {
             eventTag: string(edge["event"]),
             defaultSource: isClaudesOwnHook ? "claude" : nil,
             environment: environment,
-            workingDirectory: string(edge["cwd"]),
+            workingDirectory: { workingDirectory },
             tty: { tty },
             stdinDigest: { digest },
+            edgeWaits: edge["waits"] as? Bool,
             tmuxClientTTY: { _ in tmuxClientTTY }
         )
         if let host = edge["host"] as? [String: Any] {

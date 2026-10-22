@@ -82,8 +82,12 @@ export default {
       if (sessionId && cwd) sessionCwd.set(sessionKey(sessionId), cwd);
     }
 
+    // Never "": the island keeps a cwd it is given, and the directory this
+    // OpenCode runs in is what the remote hook used to put in place of one.
     function cwdFor(sessionId) {
-      return sessionCwd.get(sessionKey(sessionId)) || process.env.PWD || "";
+      let processCwd = "";
+      try { processCwd = process.cwd(); } catch {}
+      return sessionCwd.get(sessionKey(sessionId)) || process.env.PWD || processCwd;
     }
 
     function rememberTool(sessionId, callId, name) {
@@ -137,9 +141,9 @@ export default {
       const t = ev.type;
       const p = ev.properties || {};
       if (t === "session.created" && p.info) {
-        const cwd = p.info.directory || p.info.location?.directory || "";
-        setCwd(p.info.id, cwd);
-        return base(islandSessionId(p.info.id), { hook_event_name: "SessionStart", cwd });
+        const directory = p.info.directory || p.info.location?.directory || "";
+        setCwd(p.info.id, directory);
+        return base(islandSessionId(p.info.id), { hook_event_name: "SessionStart", cwd: directory || cwdFor(p.info.id) });
       }
       if (t === "session.deleted" && p.info) {
         sessions.delete(p.info.id);
@@ -161,9 +165,9 @@ export default {
         return null;
       }
       if (t === "session.next.moved" && p.sessionID) {
-        const cwd = p.location?.directory || "";
-        setCwd(p.sessionID, cwd);
-        return base(islandSessionId(p.sessionID), { hook_event_name: "SessionStart", cwd });
+        const directory = p.location?.directory || "";
+        setCwd(p.sessionID, directory);
+        return base(islandSessionId(p.sessionID), { hook_event_name: "SessionStart", cwd: directory || cwdFor(p.sessionID) });
       }
       if (t === "session.next.prompted" || t === "session.next.prompt.admitted") {
         if (!p.sessionID) return null;

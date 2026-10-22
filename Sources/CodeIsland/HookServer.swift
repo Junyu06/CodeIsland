@@ -443,14 +443,19 @@ class HookServer {
               let delivery = HookEdgeFacts.delivery(in: payload) else {
             return .route(data, edge: nil)
         }
+        // Slashes unescaped, as the remote hook used to send them: the byte
+        // probes below (`/.cursor/`) read paths as they are written.
         guard case .interpreted(let intake) = delivery,
-              let interpreted = try? JSONSerialization.data(withJSONObject: intake.payload) else {
+              let interpreted = try? JSONSerialization.data(
+                  withJSONObject: intake.payload,
+                  options: [.withoutEscapingSlashes]
+              ) else {
             return .answerNothing
         }
-        // Whether the hook waits is HookIntake's call, not the edge's: one it
-        // does not hold (a hook Cursor runs, #377) is answered at once with
-        // nothing, as the bridge prints nothing for it, and gets no card to
-        // wait on — its agent takes no answer from the island.
+        // A hook nobody waits on is never held: one HookIntake does not hold
+        // (a hook Cursor runs, #377) or one its edge does not wait on is
+        // answered at once with nothing, as the bridge prints nothing for it,
+        // and gets no card — its agent takes no answer from the island.
         if !intake.waitsForAnswer,
            let event = HookEvent(json: intake.payload),
            routeKind(for: event) != .event {

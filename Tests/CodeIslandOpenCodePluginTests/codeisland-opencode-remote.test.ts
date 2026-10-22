@@ -51,4 +51,28 @@ describe("remote OpenCode plugin", () => {
     expect(titledStop.session_title).toBe("Fix the login form");
     expect(titledStop.codex_title).toBeUndefined();
   });
+
+  // The remote hook sends facts and the island keeps a cwd it is given, so
+  // an unknown one is never "": it is the directory OpenCode runs in, which
+  // the remote hook used to put in its place.
+  test("a session with no known cwd reports the directory OpenCode runs in", async () => {
+    const savedPwd = process.env.PWD;
+    delete process.env.PWD;
+    try {
+      const hooks = await plugin.server({ client: undefined, serverUrl: undefined });
+      await hooks.event({ event: { type: "session.created", properties: { info: { id: "s2" } } } });
+      await hooks.event({ event: { type: "session.next.compaction.started", properties: { sessionID: "s2" } } });
+      const events = await forwarded(4);
+      const [start, compact] = events.slice(-2);
+      expect(start.hook_event_name).toBe("SessionStart");
+      expect(start.cwd).toBe(process.cwd());
+      expect(compact.hook_event_name).toBe("PreCompact");
+      expect(compact.session_id).toBe("opencode-s2");
+      expect(compact.cwd).toBe(process.cwd());
+      expect(compact._source).toBeUndefined();
+      expect(compact._remote_host_id).toBeUndefined();
+    } finally {
+      process.env.PWD = savedPwd;
+    }
+  });
 });

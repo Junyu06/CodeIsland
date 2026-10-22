@@ -31,10 +31,11 @@ TRANSCRIPT_TAIL_BYTES = 262144
 
 
 # Whether the hook waits for the island's answer: a permission request, or a
-# question. Decided here so that no other hook waits on a round trip; the
-# island has the last word and answers a hook it does not hold (one Cursor
-# runs) at once, with nothing. The event names are those EventNormalizer maps
-# to PermissionRequest and Notification.
+# question. Decided here so that no other hook waits on a round trip, and sent
+# with the facts (`waits`): the island never holds a hook nobody waits on, and
+# answers a hook it does not hold (one Cursor runs) at once, with nothing. The
+# event names are those EventNormalizer maps to PermissionRequest and
+# Notification.
 _PERMISSION_EVENTS = {"PermissionRequest", "permission_request", "BeforeTool"}
 _NOTIFICATION_EVENTS = {"Notification", "notification", "afterAgentThought", "errorOccurred"}
 
@@ -410,7 +411,13 @@ def _send_event(payload, expects_response):
         sock.sendall(json.dumps(payload).encode("utf-8"))
         sock.shutdown(socket.SHUT_WR)
         if expects_response:
-            response = sock.recv(65536)
+            chunks = []
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            response = b"".join(chunks)
             return response.decode("utf-8") if response else None
         return None
     except (OSError, socket.error):
@@ -457,13 +464,14 @@ def _getcwd():
         return None
 
 
-def _edge_facts(raw, data):
+def _edge_facts(raw, data, waits):
     """What this hook observed, for the island to interpret (HookEdgeFacts)."""
     edge = {
         "v": EDGE_FACTS_VERSION,
         "source": SOURCE,
         "host": {"id": REMOTE_HOST_ID, "name": REMOTE_HOST_NAME},
         "stdin_sha256": hashlib.sha256(raw).hexdigest(),
+        "waits": waits,
     }
     cwd = _getcwd()
     if cwd:
@@ -527,8 +535,9 @@ def main():
         if store:
             payload["_hermes_store"] = store
 
-    payload["_edge"] = _edge_facts(raw, data)
-    response = _send_event(payload, _waits_for_answer(data))
+    waits = _waits_for_answer(data)
+    payload["_edge"] = _edge_facts(raw, data, waits)
+    response = _send_event(payload, waits)
     # The island sends the answer as the agent reads it (Gemini's decision
     # included), or nothing when there is none to give.
     if response:

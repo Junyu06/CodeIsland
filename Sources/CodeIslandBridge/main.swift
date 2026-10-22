@@ -291,7 +291,7 @@ let facts = HookIntake.Facts(
             bundleIdentifier: { ancestor.executablePath.flatMap(bundleIdentifier(forExecutable:)) }
         )
     },
-    workingDirectory: FileManager.default.currentDirectoryPath,
+    workingDirectory: { FileManager.default.currentDirectoryPath },
     tty: { detectTTY() },
     homeDirectory: { FileManager.default.homeDirectoryForCurrentUser.path },
     stdinDigest: { CursorHookPayload.deliveryDigest(of: input) },

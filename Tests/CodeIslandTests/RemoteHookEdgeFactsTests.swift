@@ -125,6 +125,7 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
         XCTAssertEqual(edge["tty"] as? String, "/dev/pts/7")
         XCTAssertEqual((edge["host"] as? [String: Any])?["id"] as? String, "host-1")
         XCTAssertEqual(edge["stdin_sha256"] as? String, CursorHookPayload.deliveryDigest(of: Data(stdin.utf8)))
+        XCTAssertEqual(edge["waits"] as? Bool, false)
         XCTAssertNil(edge["env"], "a remote hook sends no environment")
         XCTAssertNil(edge["ppid"], "nor a process id")
         for key in ["_source", "_remote_host_id", "_tty"] {
@@ -193,11 +194,28 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
         }
     }
 
+    /// HookServer's byte probes read paths as written (`/.cursor/` sends a
+    /// Cursor Task's hook to Agent Sub-Sessions): the interpreted payload keeps
+    /// its slashes unescaped, as the remote hook used to send them.
+    func testInterpretedPayloadKeepsPathsAsWritten() throws {
+        let payload: [String: Any] = [
+            "hook_event_name": "PreToolUse",
+            "session_id": "task-1",
+            "transcript_path": "/home/u/.cursor/projects/p/agent-transcripts/chat-1/subagents/task-1.jsonl",
+            "_edge": ["v": 1, "source": "claude", "waits": false, "host": ["id": "h", "name": "h"]] as [String: Any],
+        ]
+        guard case .route(let routed, _?) = HookServer.intake(try JSONSerialization.data(withJSONObject: payload)) else {
+            return XCTFail("the island did not read the hook's facts")
+        }
+        XCTAssertTrue(HookServer.mayNeedCursorSubsessionRouting(data: routed))
+    }
+
     // MARK: - Agreement and compatibility
 
     /// The remote hook decides on its own whether to wait for an answer (no
-    /// round trip for the rest); it must wait exactly when HookIntake holds
-    /// the hook, or a held card would answer nobody.
+    /// round trip for the rest). On the names it reads it must wait exactly
+    /// when HookIntake would hold the hook; on a spelling it does not read,
+    /// the island, told nobody waits, must not hold the hook either.
     func testRemoteHookWaitsExactlyWhenTheIslandHoldsTheHook() throws {
         // Every name EventNormalizer maps, and a few it passes through.
         let names = [
@@ -222,6 +240,13 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
             payloads.append(["hook_event_name": name, "session_id": "s", "question": ["not": "a string"]])
         }
         payloads.append(["event": "PermissionRequest", "session_id": "s"])
+        // Spellings the remote hook does not read.
+        let unread: [[String: Any]] = [
+            ["hookEventName": "PermissionRequest", "sessionId": "s"],
+            ["eventName": "PermissionRequest", "session_id": "s"],
+            ["hookEventName": "Notification", "session_id": "s", "question": "Which one?"],
+        ]
+        payloads += unread
 
         let json = String(decoding: try JSONSerialization.data(withJSONObject: payloads), as: UTF8.self)
         let driver = """
@@ -242,14 +267,26 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
         let waits = try XCTUnwrap(JSONSerialization.jsonObject(with: stdout.fileHandleForReading.readDataToEndOfFile()) as? [Bool])
         XCTAssertEqual(waits.count, payloads.count)
 
-        for (payload, edgeWaits) in zip(payloads, waits) {
+        for (index, (payload, edgeWaits)) in zip(payloads, waits).enumerated() {
+            // What HookIntake decides on its own.
             var delivered = payload
             delivered["_edge"] = ["v": 1, "source": "claude", "host": ["id": "h", "name": "h"]] as [String: Any]
             guard case .interpreted(let intake)? = HookEdgeFacts.delivery(in: delivered) else {
                 XCTFail("\(payload): dropped")
                 continue
             }
-            XCTAssertEqual(edgeWaits, intake.waitsForAnswer, "\(payload)")
+            if index < payloads.count - unread.count {
+                XCTAssertEqual(edgeWaits, intake.waitsForAnswer, "\(payload)")
+                continue
+            }
+            XCTAssertFalse(edgeWaits, "\(payload)")
+            XCTAssertTrue(intake.waitsForAnswer, "\(payload)")
+            // What the island does once the edge says it does not wait.
+            delivered["_edge"] = ["v": 1, "source": "claude", "waits": edgeWaits, "host": ["id": "h", "name": "h"]] as [String: Any]
+            guard case .answerNothing = HookServer.intake(try JSONSerialization.data(withJSONObject: delivered)) else {
+                XCTFail("\(payload): held although nobody waits on it")
+                continue
+            }
         }
     }
 

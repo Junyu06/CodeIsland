@@ -37,7 +37,8 @@ The agent's stdin object, unchanged, at the top level — plus `_edge`:
     "cwd": "/home/dev/project",
     "tty": "/dev/pts/3",
     "host": { "id": "devbox", "name": "Dev Box" },
-    "stdin_sha256": "9f2c…"
+    "stdin_sha256": "9f2c…",
+    "waits": true
   }
 }
 ```
@@ -57,8 +58,9 @@ and `_hermes_store`). It does not add `_source`, `_ppid`, `_tty`, `_term_*`,
 | `cwd` | string | The hook process's working directory. Used when the payload has no `cwd`. |
 | `tty` | string | The controlling terminal, if any. |
 | `stdin_sha256` | hex string | SHA-256 of the stdin bytes exactly as the agent wrote them. Cursor runs two hooks per step with one stdin; the digest lets the island keep one (#377). |
+| `waits` | bool | Whether this edge waits for the answer (see below). The island never holds a hook nobody waits on. |
 | `host` | `{id, name}` | Present when the edge runs on another machine. Its processes, files and home are not the Mac's: no pid is tracked, nothing is looked up locally. |
-| `env` | object | Only the variables in `HookIntake.environmentKeys` (terminal and multiplexer ids, `GROK_*`, `HERMES_HOME`, `CODEISLAND_SKIP`). Never anything else. A remote edge sends none. |
+| `env` | object | Only the variables in `HookIntake.environmentKeys` (terminal and multiplexer ids, `GROK_*`, `HERMES_HOME`, `CODEISLAND_SKIP`). Never anything else. Terminal ids of another machine are no use on the Mac: the remote hook sends none. |
 | `ppid` | int | The hook's parent process id. Local edges only. |
 | `tmux_client_tty` | string | `tmux display-message -p -t $TMUX_PANE '#{client_tty}'`, if the edge ran it. |
 
@@ -66,17 +68,18 @@ Never send the argv of ancestor processes or more environment than listed.
 
 ## Waiting for the answer
 
-Decide locally, from the stdin, so that no other hook pays a round trip.
-Wait if the event name (`hook_event_name`, else `event`) is one of
-`PermissionRequest`, `permission_request`, `BeforeTool`; or one of
-`Notification`, `notification`, `afterAgentThought`, `errorOccurred` **and**
-`question` is a string. Otherwise send and close.
+Decide locally, from the stdin, so that no other hook pays a round trip, and
+send the decision as `waits`. Wait if the event name (`hook_event_name`, else
+`event`) is one of `PermissionRequest`, `permission_request`, `BeforeTool`; or
+one of `Notification`, `notification`, `afterAgentThought`, `errorOccurred`
+**and** `question` is a string. Otherwise send and close.
 
 The island has the last word: a hook HookIntake does not hold — one Cursor
 runs, whose stdout Cursor reads against its own schema — is answered at once
-with nothing, and its edge prints nothing. The answer it does send is already
-in the form the agent reads (Gemini CLI and Google Antigravity get
-`{"decision":"allow"|"deny"}`), so print it verbatim.
+with nothing, and its edge prints nothing; a hook its edge does not wait on
+(`waits: false`, whatever its event is spelled) gets no card. The answer it
+does send is already in the form the agent reads (Gemini CLI and Google
+Antigravity get `{"decision":"allow"|"deny"}`), so print it verbatim.
 
 One answer cannot wait for the island: Google Antigravity refuses a tool call
 whose `PreToolUse` hook prints nothing, so an edge serving it prints
@@ -98,7 +101,8 @@ From the facts and the stdin, in this order (HookIntake is normative):
    Copilot and Cline payload shapes are mapped by source.
 4. Source: the declared one, else a supported `_source` in the payload, else
    Cursor's payload, else (bridge only) the process ancestry, else the
-   default. A hook attributed by ancestry alone is marked `_via_plugin`.
+   default. A hook the ancestry attributes to an agent other than Claude
+   Code is another agent firing Claude Code's hook, marked `_via_plugin`.
 5. On the Mac only: `_ppid` (the long-lived agent process), and a
    `<source>-ppid-<pid>` session id when the agent sends none. A hook still
    without a session id is dropped.

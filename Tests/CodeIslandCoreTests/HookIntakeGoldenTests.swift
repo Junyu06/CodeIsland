@@ -92,7 +92,7 @@ final class HookIntakeGoldenTests: XCTestCase {
             environment: environment,
             parentPID: pids[0],
             ancestry: ancestry,
-            workingDirectory: root + "/work",
+            workingDirectory: { self.root + "/work" },
             homeDirectory: { self.home },
             expandingTildeInPath: { path in
                 path == "~" ? self.home : path.hasPrefix("~/") ? self.home + path.dropFirst() : path
