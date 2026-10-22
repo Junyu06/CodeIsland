@@ -88,10 +88,14 @@ class SoundManager {
     // MARK: - Settings, for the policy
 
     /// The standing sound choices: the master switch, and every cue whose
-    /// own switch is on.
+    /// own switch is on. Read for every hook event, so with the master switch
+    /// off (the default) the per-event switches are not read at all.
     var preferences: SoundPreferences {
-        SoundPreferences(
-            enabled: defaults.bool(forKey: SettingsKey.soundEnabled),
+        guard defaults.bool(forKey: SettingsKey.soundEnabled) else {
+            return SoundPreferences(enabled: false, audibleCues: [])
+        }
+        return SoundPreferences(
+            enabled: true,
             audibleCues: Set(Self.eventSounds.filter { defaults.bool(forKey: $0.key) }.map(\.event))
         )
     }
