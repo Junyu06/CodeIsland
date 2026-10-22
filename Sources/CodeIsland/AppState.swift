@@ -1304,9 +1304,7 @@ final class AppState {
         }
     }
 
-    enum CompletionStyle: String {
-        case expand, glance, off
-    }
+    typealias CompletionStyle = CodeIslandCore.CompletionStyle
 
     /// Three-way completion notification style. Migration: the pre-glance
     /// boolean `autoExpandOnCompletion` (#146) maps false → .off; anything
