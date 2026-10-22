@@ -215,11 +215,14 @@ public enum AttentionPolicy {
             intents.followUp = followUp(turnFailed: turnFailed, subject: subject)
         }
         // A turn that stopped on an error pushes the error instead of a
-        // completion: one push for one failed turn. The error is read off the
-        // event alone, so it goes out even when the reducer filed the event
-        // under a subagent.
+        // completion: one push for one failed turn. Only the session's own
+        // turn, though: a subagent's failure filed under the session (or a
+        // stale one) is not its error, and pushed under its name it would
+        // shadow the session's own completion push a moment later.
         if facts.turnError != nil {
-            intents.push = .init(kind: .error)
+            if facts.appliedToSession {
+                intents.push = .init(kind: .error)
+            }
         } else if facts.endedTurn {
             intents.push = .init(kind: .completion(isSubagent: facts.subagentTurn, interrupted: subject.interrupted))
         }

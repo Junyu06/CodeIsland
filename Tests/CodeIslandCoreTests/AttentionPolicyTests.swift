@@ -144,9 +144,9 @@ final class AttentionPolicyTests: XCTestCase {
             expected: AttentionIntents()
         ),
         IntentRow(
-            rule: "an error is read off the event alone: one filed under a subagent still pushes it",
+            rule: "a subagent's failure filed under the session is not the session's error: nothing is pushed",
             moment: hook("StopFailure", applied: false, error: rateLimit),
-            expected: AttentionIntents(push: .init(kind: .error))
+            expected: AttentionIntents()
         ),
         IntentRow(
             rule: "Copilot's errorOccurred pushes the error (its Notification cue has no sound)",
