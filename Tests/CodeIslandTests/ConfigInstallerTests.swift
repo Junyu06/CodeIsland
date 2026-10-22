@@ -1119,6 +1119,31 @@ hooks:
         XCTAssertTrue(script.contains(#"socket_path = "/tmp/codeisland.sock""#))
     }
 
+    /// The SSH user's uid, as the per-user socket path names it: who owns
+    /// the island's socket on a host whose agents run as other users.
+    func testTheSSHUsersUIDIsReadFromThePerUserSocketPath() {
+        XCTAssertEqual(RemoteInstaller.loginUID(inRemoteSocketPath: RemoteInstaller.remoteSocketPath(forUID: "1000")), "1000")
+        for path in ["/tmp/codeisland.sock", "/tmp/codeisland-.sock", "/tmp/codeisland-10a0.sock", "/var/codeisland-1000.sock"] {
+            XCTAssertNil(RemoteInstaller.loginUID(inRemoteSocketPath: path), path)
+        }
+    }
+
+    func testRemoteOpencodePluginIsToldTheSocketOwnerWhereAgentsRunAsOtherUsers() throws {
+        let shipped = try XCTUnwrap(RemoteInstaller.remoteOpencodePluginSource())
+        let shared = RemoteHost(id: "host-1", name: "devbox", host: "example.com", agentsRunAsOtherUsers: true)
+        let installed = RemoteInstaller.remoteOpencodePluginForInstall(source: shipped, host: shared, remoteSocketPath: "/tmp/codeisland-1000.sock")
+        XCTAssertTrue(installed.contains(#"const SOCKET_OWNER_UID = "1000";"#))
+        XCTAssertFalse(installed.contains("process.env.CODEISLAND_SOCKET_OWNER_UID"), "never the agent's environment's")
+
+        // Not where agents run as the SSH user, nor when the probe could not
+        // name that user: the plugin then uses only its own user's socket.
+        let own = RemoteHost(id: "host-1", name: "devbox", host: "example.com")
+        XCTAssertTrue(RemoteInstaller.remoteOpencodePluginForInstall(source: shipped, host: own, remoteSocketPath: "/tmp/codeisland-1000.sock")
+            .contains(#"const SOCKET_OWNER_UID = "";"#))
+        XCTAssertTrue(RemoteInstaller.remoteOpencodePluginForInstall(source: shipped, host: shared, remoteSocketPath: "/tmp/codeisland.sock")
+            .contains(#"const SOCKET_OWNER_UID = "";"#))
+    }
+
     func testRemoteOpencodePluginInjectsPerUserSocketPath() {
         // #193
         let host = RemoteHost(id: "host-1", name: "devbox", host: "example.com")

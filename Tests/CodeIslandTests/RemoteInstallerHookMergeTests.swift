@@ -1,5 +1,6 @@
 import XCTest
 @testable import CodeIsland
+import CodeIslandCore
 
 /// #242 — the remote install script must MERGE our hooks into existing config
 /// files, never replace whole event keys. Every SSH connect re-runs the script,
@@ -29,11 +30,12 @@ final class RemoteInstallerHookMergeTests: XCTestCase {
     /// its status line (the text Settings → Remote shows for the host).
     @discardableResult
     private func runConfigureScript(
+        host: RemoteHost = RemoteHost(name: "test-host", host: "example.invalid"),
+        remoteSocketPath: String = "/tmp/ci-test.sock",
         customCLIs: [CLIConfig] = [],
         environment overrides: [String: String] = [:]
     ) throws -> String {
-        let host = RemoteHost(name: "test-host", host: "example.invalid")
-        let script = RemoteInstaller.configureRemoteHooksScript(host: host, remoteSocketPath: "/tmp/ci-test.sock", customCLIs: customCLIs)
+        let script = RemoteInstaller.configureRemoteHooksScript(host: host, remoteSocketPath: remoteSocketPath, customCLIs: customCLIs)
 
         let process = Process()
         // Absolute interpreter so PATH can be pinned to the sandbox bin dir.
@@ -510,6 +512,117 @@ final class RemoteInstallerHookMergeTests: XCTestCase {
     /// was taken for a program named `CODEISLAND_SOCKET_PATH=…`, so remote
     /// Hermes hooks never ran. A reconnect replaces those entries, keeps the
     /// user's own, and registers every turn hook (#364).
+    // MARK: - Agents that run as other users
+
+    private let otherUsersHost = RemoteHost(name: "test-host", host: "example.invalid", agentsRunAsOtherUsers: true)
+    private var socketOwner: String { "CODEISLAND_SOCKET_OWNER_UID=\(getuid())" }
+
+    /// Our commands in Claude Code's settings.
+    private func claudeCommands() throws -> [String] {
+        let hooks = try XCTUnwrap(readJSON(".claude/settings.json")["hooks"] as? [String: Any])
+        return hooks.values
+            .compactMap { $0 as? [[String: Any]] }
+            .flatMap { commands(in: $0) }
+            .filter { $0.contains("codeisland-remote-hook.py") }
+    }
+
+    /// The socket's owner, by default, is each hook's own user: no command
+    /// names one. On a host whose agents run as other users, every command
+    /// names the SSH user — who runs this script, and whose socket sshd's is —
+    /// and the ones written before are replaced, not kept beside them.
+    func testHookCommandsNameTheSocketOwnerOnlyWhereAgentsRunAsOtherUsers() throws {
+        try installFakeBinary("claude")
+        try runConfigureScript()
+        let before = try claudeCommands()
+        XCTAssertFalse(before.isEmpty)
+        XCTAssertFalse(before.contains { $0.contains("CODEISLAND_SOCKET_OWNER_UID") }, "\(before)")
+
+        try runConfigureScript(host: otherUsersHost)
+        let after = try claudeCommands()
+        XCTAssertEqual(after.count, before.count, "replaced, not added: \(after)")
+        XCTAssertTrue(after.allSatisfy { $0.contains(socketOwner) }, "\(after)")
+
+        try runConfigureScript()
+        XCTAssertFalse(try claudeCommands().contains { $0.contains("CODEISLAND_SOCKET_OWNER_UID") })
+    }
+
+    func testHermesHooksNameTheSocketOwnerWhereAgentsRunAsOtherUsers() throws {
+        let configURL = sandboxHome.appendingPathComponent(".hermes/config.yaml")
+        try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let config = """
+            model: hermes-4
+            hooks:
+              pre_tool_call:
+                - command: ~/.hermes/agent-hooks/audit.sh
+                  timeout: 10
+            """
+        try Data(config.utf8).write(to: configURL)
+
+        let status = try runConfigureScript(host: otherUsersHost)
+        XCTAssertTrue(status.contains("Hermes ok"), status)
+        try assertHermesHooksRunnable(configURL: configURL)
+        let ours = try String(contentsOf: configURL, encoding: .utf8)
+            .split(separator: "\n")
+            .filter { $0.contains("codeisland-remote-hook.py") }
+        XCTAssertFalse(ours.isEmpty)
+        XCTAssertTrue(ours.allSatisfy { $0.contains(socketOwner) }, "\(ours)")
+    }
+
+    /// Traecli's YAML hook is found by its command, which changes with the
+    /// setting: the old one goes, so the host keeps a single hook.
+    func testTurningTheSettingOnLeavesOneTraecliHook() throws {
+        try installFakeBinary("traecli")
+        try runConfigureScript()
+        try runConfigureScript(host: otherUsersHost)
+        let yaml = try String(contentsOf: sandboxHome.appendingPathComponent(".trae/traecli.yaml"), encoding: .utf8)
+        let ours = yaml.split(separator: "\n").filter { $0.contains("codeisland-remote-hook.py") }
+        XCTAssertEqual(ours.count, 1, yaml)
+        XCTAssertTrue(ours.allSatisfy { $0.contains(socketOwner) }, yaml)
+    }
+
+    private func mode(_ path: String) throws -> mode_t {
+        try XCTUnwrap(SocketPath.lstat(path)).st_mode & 0o777
+    }
+
+    /// sshd gives the forwarded socket the mode of its own mask, whatever ssh
+    /// asked for; the install that follows each connect sets the one the host
+    /// wants: the SSH user's alone, or every user's.
+    func testTheInstallGivesTheForwardedSocketTheModeTheHostAskedFor() throws {
+        let socketPath = "/tmp/ci-rim-\(UUID().uuidString.prefix(8)).sock"
+        try leaveSocket(at: socketPath)
+        defer { unlink(socketPath) }
+        chmod(socketPath, 0o777)  // as an sshd with a permissive mask leaves it
+
+        try runConfigureScript(remoteSocketPath: socketPath)
+        XCTAssertEqual(try mode(socketPath), 0o600)
+
+        let status = try runConfigureScript(host: otherUsersHost, remoteSocketPath: socketPath)
+        XCTAssertEqual(try mode(socketPath), 0o666)
+        XCTAssertFalse(status.contains("Shared socket"), status)
+
+        try runConfigureScript(remoteSocketPath: socketPath)
+        XCTAssertEqual(try mode(socketPath), 0o600, "turned off again")
+    }
+
+    func testTheInstallChangesNoSocketButTheSSHUsersOwn() throws {
+        let target = "/tmp/ci-rim-\(UUID().uuidString.prefix(8)).sock"
+        try leaveSocket(at: target)
+        defer { unlink(target) }
+        chmod(target, 0o600)
+        let link = "/tmp/ci-rim-\(UUID().uuidString.prefix(8)).sock"
+        XCTAssertEqual(symlink(target, link), 0)
+        defer { unlink(link) }
+
+        let status = try runConfigureScript(host: otherUsersHost, remoteSocketPath: link)
+        XCTAssertEqual(try mode(target), 0o600, "never through a symlink")
+        XCTAssertTrue(status.contains("Shared socket: socket not this user's"), status)
+
+        let missing = try runConfigureScript(host: otherUsersHost, remoteSocketPath: "/tmp/ci-rim-missing.sock")
+        XCTAssertTrue(missing.contains("Shared socket: socket not found"), missing)
+        XCTAssertFalse(try runConfigureScript(remoteSocketPath: "/tmp/ci-rim-missing.sock").contains("Shared socket"),
+                       "nothing to say where only the SSH user's agents use it")
+    }
+
     func testHermesHooksRunWithoutAShellAndReplaceTheShellForm() throws {
         let staleCommand = "CODEISLAND_SOCKET_PATH=/tmp/ci-test.sock CODEISLAND_REMOTE_HOST_ID=\"old\" "
             + "CODEISLAND_REMOTE_HOST_NAME=\"old\" CODEISLAND_SOURCE=hermes python3 ~/.codeisland/codeisland-remote-hook.py"

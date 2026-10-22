@@ -68,7 +68,7 @@ final class SSHForwarder {
     private func startTunnel(host: RemoteHost, localSocketPath: String, remoteSocketPath: String, generation currentGeneration: UInt64) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        process.arguments = buildArguments(host: host, localSocketPath: localSocketPath, remoteSocketPath: remoteSocketPath)
+        process.arguments = Self.tunnelArguments(host: host, localSocketPath: localSocketPath, remoteSocketPath: remoteSocketPath)
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.environment = buildEnvironment(host: host)
@@ -173,7 +173,19 @@ final class SSHForwarder {
         return args
     }
 
-    private func buildArguments(host: RemoteHost, localSocketPath: String, remoteSocketPath: String) -> [String] {
+    /// The long-lived tunnel's arguments: the host's `remoteSocketPath`
+    /// forwarded to `localSocketPath`, which must be the socket the island
+    /// bound for this host (``RemoteHookSockets``) — never the main one.
+    ///
+    /// The socket on the host is to be the SSH user's alone (0600): another
+    /// user there could otherwise send events, and hold requests, in this
+    /// host's name. A host whose agents run as other users
+    /// (``RemoteHost/agentsRunAsOtherUsers``) asks for one every user can
+    /// reach. sshd makes that socket with its own `StreamLocalBindMask` — the
+    /// forward request carries a path and no mode — so the mask here only
+    /// says what the host asked for; the install that follows each connect
+    /// sets the mode on the host (``RemoteInstaller``).
+    static func tunnelArguments(host: RemoteHost, localSocketPath: String, remoteSocketPath: String) -> [String] {
         var args: [String] = [
             "-N",
             "-T",
@@ -182,7 +194,7 @@ final class SSHForwarder {
             "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=2",
             "-o", "StreamLocalBindUnlink=yes",
-            "-o", "StreamLocalBindMask=0000",
+            "-o", "StreamLocalBindMask=\(host.agentsRunAsOtherUsers ? "0000" : "0177")",
             // Never reuse or spawn a multiplexing master connection (#190): a shared
             // ControlMaster makes `ssh -N` hand the forward to the master and exit 0
             // immediately, which we'd misread as a failed tunnel. Force a dedicated

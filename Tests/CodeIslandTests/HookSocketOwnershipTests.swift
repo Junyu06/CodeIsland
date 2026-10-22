@@ -178,7 +178,10 @@ final class HookSocketOwnershipTests: XCTestCase {
     /// path of the driver's; `mode` is how the hook finds it: "direct", through
     /// a "link", or "foreign" (its lstat reporting another owner). Returns what
     /// the island received, nil for nothing.
-    private func runRemoteHook(_ mode: String) throws -> String? {
+    private func runRemoteHook(_ mode: String, socketOwnerUID: String? = nil) throws -> String? {
+        // The stand-in island of an earlier run in this test left its socket.
+        unlink(scratch + "/island.sock")
+        unlink(scratch + "/link.sock")
         let hookURL = URL(fileURLWithPath: scratch + "/codeisland-remote-hook.py")
         try Data(XCTUnwrap(RemoteInstaller.remoteHookSource()).utf8).write(to: hookURL)
         let driver = """
@@ -240,6 +243,7 @@ final class HookSocketOwnershipTests: XCTestCase {
         environment["CODEISLAND_SOURCE"] = "claude"
         environment["CODEISLAND_REMOTE_HOST_ID"] = "host-1"
         environment["CODEISLAND_REMOTE_HOST_NAME"] = "Build Box"
+        environment["CODEISLAND_SOCKET_OWNER_UID"] = socketOwnerUID
         process.environment = environment
         let stdout = Pipe()
         let stderr = Pipe()
@@ -264,5 +268,25 @@ final class HookSocketOwnershipTests: XCTestCase {
 
     func testRemoteHookSendsNothingToAnotherUsersSocket() throws {
         XCTAssertNil(try runRemoteHook("foreign"))
+    }
+
+    /// A host whose agents run as other users: each hook is told the SSH user
+    /// owns the island's socket (sshd made it as that user), and a hook run as
+    /// another user sends to it. "foreign" is a socket uid + 1 owns.
+    func testRemoteHookSendsToTheSocketOwnerItIsTold() throws {
+        let sshUser = String(getuid() + 1)
+        XCTAssertTrue(try XCTUnwrap(runRemoteHook("foreign", socketOwnerUID: sshUser)).contains("sown-3"))
+    }
+
+    /// And to no other socket: not its own user's, not through a symlink.
+    func testRemoteHookSendsNothingToASocketTheNamedOwnerDoesNotOwn() throws {
+        XCTAssertNil(try runRemoteHook("direct", socketOwnerUID: String(getuid() + 1)))
+        XCTAssertNil(try runRemoteHook("link", socketOwnerUID: String(getuid())))
+    }
+
+    /// A malformed owner names nobody: the hook's own user it is.
+    func testRemoteHookTakesAMalformedOwnerForItsOwnUser() throws {
+        XCTAssertTrue(try XCTUnwrap(runRemoteHook("direct", socketOwnerUID: "1x")).contains("sown-3"))
+        XCTAssertNil(try runRemoteHook("foreign", socketOwnerUID: "1x"))
     }
 }

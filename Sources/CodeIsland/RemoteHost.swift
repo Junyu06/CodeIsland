@@ -17,6 +17,13 @@ struct RemoteHost: Identifiable, Codable, Equatable, Sendable {
     /// a shared remote account scope the panel to their own project folders (#240).
     /// Empty = show every session from this host (previous behavior).
     var cwdFilter: String
+    /// The host's agents run as users other than the SSH user — in a
+    /// container, under sudo. Off, the island's socket on the host is the SSH
+    /// user's alone (mode 0600), and its hooks use only a socket of their own
+    /// user's. On, every user there can connect to it (0666), and the hooks
+    /// are told the SSH user owns it (`CODEISLAND_SOCKET_OWNER_UID`), so a
+    /// hook run as another user uses that socket — and still no other.
+    var agentsRunAsOtherUsers: Bool
 
     init(
         id: String = UUID().uuidString,
@@ -27,7 +34,8 @@ struct RemoteHost: Identifiable, Codable, Equatable, Sendable {
         identityFile: String = "",
         autoConnect: Bool = false,
         authSocket: String = "",
-        cwdFilter: String = ""
+        cwdFilter: String = "",
+        agentsRunAsOtherUsers: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -38,9 +46,11 @@ struct RemoteHost: Identifiable, Codable, Equatable, Sendable {
         self.autoConnect = autoConnect
         self.authSocket = authSocket
         self.cwdFilter = cwdFilter
+        self.agentsRunAsOtherUsers = agentsRunAsOtherUsers
     }
 
-    // Backward compatibility: hosts persisted before authSocket/cwdFilter existed decode with ""
+    // Backward compatibility: hosts persisted before authSocket/cwdFilter existed decode
+    // with "", and before agentsRunAsOtherUsers with false (the owner-only socket).
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try c.decode(String.self, forKey: .id)
@@ -52,6 +62,7 @@ struct RemoteHost: Identifiable, Codable, Equatable, Sendable {
         self.autoConnect = try c.decode(Bool.self, forKey: .autoConnect)
         self.authSocket = try c.decodeIfPresent(String.self, forKey: .authSocket) ?? ""
         self.cwdFilter = try c.decodeIfPresent(String.self, forKey: .cwdFilter) ?? ""
+        self.agentsRunAsOtherUsers = try c.decodeIfPresent(Bool.self, forKey: .agentsRunAsOtherUsers) ?? false
     }
 
     var sshTarget: String {

@@ -14,8 +14,8 @@ private struct RemoteCommandResult: Sendable {
 }
 
 enum RemoteInstaller {
-    private static let remoteHookVersion = "0.4.2"
-    private static let remoteOpencodePluginVersion = "v7"
+    private static let remoteHookVersion = "0.4.3"
+    private static let remoteOpencodePluginVersion = "v8"
 
     static func installAll(host: RemoteHost, remoteSocketPath: String) async -> RemoteInstallResult {
         guard let source = remoteHookSource() else {
@@ -53,14 +53,46 @@ enum RemoteInstaller {
         // would break under non-POSIX login shells like fish and silently fall back.
         let probe = await runSSH(host: host, command: "id -u", timeout: 8)
         let uid = probe.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        if probe.ok, !uid.isEmpty, uid.allSatisfy({ $0.isNumber }) {
-            return "/tmp/codeisland-\(uid).sock"
+        if probe.ok, isUID(uid) {
+            return remoteSocketPath(forUID: uid)
         }
         // Probe failed (old / restricted host) — fall back to the legacy shared path.
         // StreamLocalBindUnlink=yes on the forward already clears any stale socket, so
         // we avoid a second SSH round-trip here (it would just add latency on a host
         // that's likely failing to connect anyway).
         return host.remoteSocketPath
+    }
+
+    /// The per-user socket path on the remote host for the SSH user `uid`
+    /// (#193).
+    static func remoteSocketPath(forUID uid: String) -> String {
+        "/tmp/codeisland-\(uid).sock"
+    }
+
+    /// The SSH user's uid, as the per-user socket path names it
+    /// (``remoteSocketPath(forUID:)``); nil for the legacy shared path a
+    /// failed probe falls back to.
+    static func loginUID(inRemoteSocketPath path: String) -> String? {
+        let prefix = "/tmp/codeisland-", suffix = ".sock"
+        guard path.hasPrefix(prefix), path.hasSuffix(suffix),
+              path.count > prefix.count + suffix.count else { return nil }
+        let uid = String(path.dropFirst(prefix.count).dropLast(suffix.count))
+        return isUID(uid) ? uid : nil
+    }
+
+    private static func isUID(_ value: String) -> Bool {
+        !value.isEmpty && value.allSatisfy { ("0"..."9").contains($0) }
+    }
+
+    /// The uid the remote OpenCode plugin is told owns the island's socket:
+    /// the SSH user's, for a host whose agents run as other users, so a
+    /// plugin run as another user uses that user's socket. Empty otherwise,
+    /// and when the probe could not name the SSH user: the plugin then uses
+    /// only a socket of its own user's. (The hook commands get the uid from
+    /// the install script, which runs as the SSH user.)
+    static func socketOwnerUID(for host: RemoteHost, remoteSocketPath: String) -> String {
+        guard host.agentsRunAsOtherUsers else { return "" }
+        return loginUID(inRemoteSocketPath: remoteSocketPath) ?? ""
     }
 
     static func remoteHookSource() -> String? {
@@ -75,7 +107,7 @@ enum RemoteInstaller {
         return nil
     }
 
-    private static func remoteOpencodePluginSource() -> String? {
+    static func remoteOpencodePluginSource() -> String? {
         if let url = Bundle.appModule.url(forResource: "codeisland-opencode-remote", withExtension: "js", subdirectory: "Resources"),
            let src = try? String(contentsOf: url) {
             return src
@@ -138,6 +170,7 @@ print(target)
         let version = pythonStringLiteral(remoteHookVersion)
         let opencodePluginVersion = pythonStringLiteral(remoteOpencodePluginVersion)
         let socketPath = pythonStringLiteral(remoteSocketPath ?? host.remoteSocketPath)
+        let agentsRunAsOtherUsers = host.agentsRunAsOtherUsers ? "True" : "False"
         let customCLIsLiteral = remoteCustomCLIsLiteral(customCLIs)
         let unsupportedCustomCLIsLiteral = "[" + customCLIs
             .filter { !isRemoteSupportedCustomFormat($0.format) }
@@ -158,6 +191,7 @@ host_name = \(hostName)
 version = \(version)
 opencode_plugin_version = \(opencodePluginVersion)
 socket_path = \(socketPath)
+agents_run_as_other_users = \(agentsRunAsOtherUsers)
 custom_clis = \(customCLIsLiteral)
 unsupported_custom_clis = \(unsupportedCustomCLIsLiteral)
 
@@ -260,8 +294,36 @@ def write_text_atomic(path, text):
 def write_opencode_config(path, data):
     write_json(path, data)
 
+# sshd makes the island's socket here as the SSH user, which is who runs this
+# script. A hook uses only a socket its own user owns; on a host whose agents
+# run as other users (containers, sudo), the hooks are told the SSH user owns
+# it, so one run as another user uses that socket, and still nobody else's.
+socket_owner_uid = str(os.getuid()) if agents_run_as_other_users else ""
+
 def command_for(source):
-    return f"CODEISLAND_SOCKET_PATH={socket_path} CODEISLAND_REMOTE_HOST_ID={json.dumps(host_id)} CODEISLAND_REMOTE_HOST_NAME={json.dumps(host_name)} CODEISLAND_SOURCE={source} python3 ~/.codeisland/codeisland-remote-hook.py"
+    owner = f"CODEISLAND_SOCKET_OWNER_UID={socket_owner_uid} " if socket_owner_uid else ""
+    return f"CODEISLAND_SOCKET_PATH={socket_path} {owner}CODEISLAND_REMOTE_HOST_ID={json.dumps(host_id)} CODEISLAND_REMOTE_HOST_NAME={json.dumps(host_name)} CODEISLAND_SOURCE={source} python3 ~/.codeisland/codeisland-remote-hook.py"
+
+def set_socket_mode():
+    # sshd gives the forwarded socket the mode of its own StreamLocalBindMask
+    # (0600 unless sshd_config says otherwise): ssh's StreamLocalBindMask never
+    # reaches it. The tunnel came up before the uploads that ran ahead of this
+    # script, so the socket gets the mode the host asked for here: the SSH
+    # user's alone, or every user's when the agents run as other users. Only
+    # a socket this user owns, never through a symlink. None once done, else
+    # what stopped it.
+    import stat
+    try:
+        info = os.lstat(socket_path)
+    except OSError:
+        return "socket not found"
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+        return "socket not this user's"
+    try:
+        os.chmod(socket_path, 0o666 if agents_run_as_other_users else 0o600)
+    except OSError:
+        return "socket mode not set"
+    return None
 
 def append_our_hooks(hooks, event, entries):
     # Preserve user-authored entries (#242): remove_our_hooks() already dropped our
@@ -488,7 +550,13 @@ def _remove_managed_traecli_hooks(contents):
                     cmd_value = _parse_scalar(nxt_stripped.split(":", 1)[1])
                 j += 1
 
-            if cmd_value and _normalize_cmd(cmd_value) == _normalize_cmd(command_for("traecli")):
+            # Ours in any form: the command changes with the host's name and
+            # with who may use its socket (CODEISLAND_SOCKET_OWNER_UID).
+            ours = cmd_value and (
+                _normalize_cmd(cmd_value) == _normalize_cmd(command_for("traecli"))
+                or ("codeisland-remote-hook.py" in cmd_value and "CODEISLAND_SOURCE=traecli" in cmd_value)
+            )
+            if ours:
                 # Remove adjacent same-indent comment lines already appended.
                 while result:
                     prev = result[-1]
@@ -640,6 +708,7 @@ def hermes_command():
     args = [
         "env",
         "CODEISLAND_SOCKET_PATH=" + socket_path,
+    ] + (["CODEISLAND_SOCKET_OWNER_UID=" + socket_owner_uid] if socket_owner_uid else []) + [
         "CODEISLAND_REMOTE_HOST_ID=" + host_id,
         "CODEISLAND_REMOTE_HOST_NAME=" + host_name,
         "CODEISLAND_SOURCE=hermes",
@@ -1311,6 +1380,11 @@ def install_custom():
     return results
 
 parts = [install_claude(), install_qoder(), install_hermes(), install_codex(), install_codebuddy(), install_traecli(), install_opencode()] + install_custom()
+socket_problem = set_socket_mode()
+# Said only where it changes what the host can do: hooks run as other users
+# reach nothing until the socket is theirs to use too.
+if socket_problem and agents_run_as_other_users:
+    parts.append("Shared socket: " + socket_problem)
 print(" · ".join(parts))
 """
     }
@@ -1447,6 +1521,10 @@ print(" · ".join(parts))
             .replacingOccurrences(
                 of: #"const REMOTE_HOST_NAME = process.env.CODEISLAND_REMOTE_HOST_NAME || "";"#,
                 with: #"const REMOTE_HOST_NAME = \#(jsonStringLiteral(host.name));"#
+            )
+            .replacingOccurrences(
+                of: #"const SOCKET_OWNER_UID = process.env.CODEISLAND_SOCKET_OWNER_UID || "";"#,
+                with: #"const SOCKET_OWNER_UID = \#(jsonStringLiteral(socketOwnerUID(for: host, remoteSocketPath: socketPath)));"#
             )
     }
 

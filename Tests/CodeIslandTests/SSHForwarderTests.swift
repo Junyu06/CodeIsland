@@ -107,4 +107,40 @@ final class SSHForwarderTests: XCTestCase {
         XCTAssertTrue(args.contains("BatchMode=yes"))
         XCTAssertTrue(args.contains("ConnectTimeout=5"))
     }
+
+    // MARK: - tunnelArguments
+
+    /// The host's hooks are forwarded to the socket the island bound for that
+    /// host, whatever path it is given — never to a fixed one.
+    func testTheTunnelForwardsTheRemoteSocketToTheGivenLocalOne() {
+        let host = RemoteHost(name: "test", host: "10.0.0.1", user: "alice")
+        let local = "/tmp/codeisland-501-hosts/h-0123456789abcdef.sock"
+        let args = SSHForwarder.tunnelArguments(host: host, localSocketPath: local, remoteSocketPath: "/tmp/codeisland-1000.sock")
+
+        let forward = args.firstIndex(of: "-R").map { args[$0 + 1] }
+        XCTAssertEqual(forward, "/tmp/codeisland-1000.sock:\(local)")
+        XCTAssertFalse(args.contains { $0.contains(HookServer.socketPath) })
+        XCTAssertEqual(args.last, "alice@10.0.0.1")
+    }
+
+    /// Owner-only by default: only the SSH user may use the socket there.
+    func testTheTunnelAsksForAnOwnerOnlySocketByDefault() {
+        let args = SSHForwarder.tunnelArguments(
+            host: RemoteHost(name: "test", host: "10.0.0.1"),
+            localSocketPath: "/tmp/l.sock",
+            remoteSocketPath: "/tmp/r.sock"
+        )
+        XCTAssertTrue(args.contains("StreamLocalBindMask=0177"))
+        XCTAssertFalse(args.contains("StreamLocalBindMask=0000"))
+    }
+
+    func testAHostWhoseAgentsRunAsOtherUsersAsksForASocketEveryoneCanUse() {
+        let args = SSHForwarder.tunnelArguments(
+            host: RemoteHost(name: "test", host: "10.0.0.1", agentsRunAsOtherUsers: true),
+            localSocketPath: "/tmp/l.sock",
+            remoteSocketPath: "/tmp/r.sock"
+        )
+        XCTAssertTrue(args.contains("StreamLocalBindMask=0000"))
+        XCTAssertFalse(args.contains("StreamLocalBindMask=0177"))
+    }
 }

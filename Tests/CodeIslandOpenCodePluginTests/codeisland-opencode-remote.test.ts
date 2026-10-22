@@ -29,7 +29,11 @@ function standInHome(dir: string, out: string) {
 }
 standInHome(home, received);
 
-const saved = { HOME: process.env.HOME, CODEISLAND_SOCKET_PATH: process.env.CODEISLAND_SOCKET_PATH };
+const saved = {
+  HOME: process.env.HOME,
+  CODEISLAND_SOCKET_PATH: process.env.CODEISLAND_SOCKET_PATH,
+  CODEISLAND_SOCKET_OWNER_UID: process.env.CODEISLAND_SOCKET_OWNER_UID,
+};
 const restore = () => {
   for (const [key, value] of Object.entries(saved)) {
     if (value === undefined) delete process.env[key];
@@ -121,6 +125,51 @@ describe("remote OpenCode plugin", () => {
       await hooks.event({ event: { type: "session.status", properties: { sessionID: `s-${name}`, status: { type: "idle" } } } });
       await new Promise((resolve) => setTimeout(resolve, 300));
       expect(existsSync(handedOn)).toBe(false);
+    }
+  });
+
+  // On a host whose agents run as other users the installer names the SSH
+  // user, who owns the island's socket (sshd made it): the plugin, run as
+  // another user, uses that user's socket — and no one else's, its own user's
+  // included — and tells the hook the same.
+  test("the socket must be the named owner's when one is named", async () => {
+    const uid = process.getuid!();
+    for (const [name, owner, reaches] of [
+      ["owner-is-named", String(uid), true],
+      ["owner-is-another", String(uid + 1), false],
+    ] as const) {
+      const otherHome = join(home, name);
+      mkdirSync(otherHome);
+      mkdirSync(join(otherHome, ".codeisland"));
+      const handedOn = join(otherHome, "received.jsonl");
+      const hook = join(otherHome, ".codeisland", "codeisland-remote-hook.py");
+      writeFileSync(hook, [
+        "import json, os, sys",
+        "sys.stdin.read()",
+        `with open(${JSON.stringify(handedOn)}, "a") as out:`,
+        "    out.write(json.dumps({'owner': os.environ.get('CODEISLAND_SOCKET_OWNER_UID')}) + \"\\n\")",
+        "",
+      ].join("\n"));
+      chmodSync(hook, 0o755);
+      process.env.HOME = otherHome;
+      process.env.CODEISLAND_SOCKET_PATH = socketPath;
+      process.env.CODEISLAND_SOCKET_OWNER_UID = owner;
+      const { default: other } = await import(`../../Sources/CodeIsland/Resources/codeisland-opencode-remote.js?${name}`);
+      restore();
+
+      const hooks = await other.server({ client: undefined, serverUrl: undefined });
+      await hooks.event({ event: { type: "session.created", properties: { info: { id: `s-${name}` } } } });
+      await hooks.event({ event: { type: "session.status", properties: { sessionID: `s-${name}`, status: { type: "idle" } } } });
+      if (!reaches) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(existsSync(handedOn)).toBe(false);
+        continue;
+      }
+      for (let i = 0; i < 200 && !existsSync(handedOn); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const first = JSON.parse(readFileSync(handedOn, "utf8").trim().split("\n")[0]);
+      expect(first.owner).toBe(owner);
     }
   });
 });

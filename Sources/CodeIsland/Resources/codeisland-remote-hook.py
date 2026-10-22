@@ -14,13 +14,20 @@ import stat
 import subprocess
 import sys
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 # The `_edge` facts version (HookEdgeFacts.version on the island).
 EDGE_FACTS_VERSION = 1
 # Per-user socket path (#193): CodeIsland injects CODEISLAND_SOCKET_PATH via the hook
 # command, but fall back to a uid-scoped path so multiple users on a shared host never
 # collide on a single /tmp/codeisland.sock.
 SOCKET_PATH = os.environ.get("CODEISLAND_SOCKET_PATH") or f"/tmp/codeisland-{os.getuid()}.sock"
+# Who owns the island's socket here: sshd makes it as the SSH user. A hook run
+# as that user, as hooks usually are, uses only a socket of its own user's. On
+# a host whose agents run as other users (containers, sudo), the installer
+# names the SSH user's uid in CODEISLAND_SOCKET_OWNER_UID: a hook run as
+# another user then uses that user's socket, and still nobody else's.
+_SOCKET_OWNER = os.environ.get("CODEISLAND_SOCKET_OWNER_UID", "").strip()
+SOCKET_OWNER_UID = int(_SOCKET_OWNER) if _SOCKET_OWNER and all(c in "0123456789" for c in _SOCKET_OWNER) else os.getuid()
 REMOTE_HOST_ID = os.environ.get("CODEISLAND_REMOTE_HOST_ID", "")
 REMOTE_HOST_NAME = os.environ.get("CODEISLAND_REMOTE_HOST_NAME", "")
 SOURCE = os.environ.get("CODEISLAND_SOURCE", "")
@@ -433,17 +440,18 @@ def _parse_object(raw):
 
 
 def _socket_is_ours(path):
-    """Whether `path` is a socket this user owns. The path is a predictable
-    name in /tmp, where any user on this host can create a socket first: theirs
-    would get the event and could answer it. lstat, not stat: a symlink, even
-    to our own socket, stays its owner's to repoint, while a socket of ours in
-    sticky /tmp is ours alone to remove. sshd creates the island's forwarded
-    socket as the login user, so the island's is always ours."""
+    """Whether `path` is a socket the island's user here owns: the SSH user
+    CODEISLAND_SOCKET_OWNER_UID names, else this user (SOCKET_OWNER_UID). The
+    path is a predictable name in /tmp, where any user on this host can create
+    a socket first: theirs would get the event and could answer it. lstat, not
+    stat: a symlink, even to the island's socket, stays its owner's to repoint,
+    while a socket in sticky /tmp is its owner's alone to remove. sshd creates
+    the island's forwarded socket as the SSH user."""
     try:
         info = os.lstat(path)
     except OSError:
         return False
-    return stat.S_ISSOCK(info.st_mode) and info.st_uid == os.getuid()
+    return stat.S_ISSOCK(info.st_mode) and info.st_uid == SOCKET_OWNER_UID
 
 
 def _send_event(payload, expects_response, stays_for_reply=True):
@@ -452,8 +460,8 @@ def _send_event(payload, expects_response, stays_for_reply=True):
     short while, unless it is a tool step (`stays_for_reply`, see
     _TOOL_STEP_EVENTS): an older island, which accepted connections on its main
     thread, lost the event of a hook that had closed before it got there.
-    Nothing is sent to a socket this user does not own: as if the island
-    were not there."""
+    Nothing is sent to a socket the island's user does not own: as if the
+    island were not there."""
     if not _socket_is_ours(SOCKET_PATH):
         return None
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

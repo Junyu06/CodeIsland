@@ -438,6 +438,21 @@ final class RemoteManagerTests: XCTestCase {
         XCTAssertEqual(tunnels.connects, 1, "a new name keeps the tunnel")
     }
 
+    /// Who may use the socket on the host is the tunnel's and the installed
+    /// hooks' to set: a connected host reconnects to apply it.
+    func testLettingOtherUsersInReconnectsTheHost() async {
+        let (manager, _, tunnels) = makeManager()
+        defer { manager.shutdown() }
+        var host = addHost(to: manager)
+        await connect(host, on: manager, tunnels: tunnels)
+        tunnels.made[0].report(.connected)
+        await waitUntil { manager.connectionStatus[host.id] == .connected }
+
+        host.agentsRunAsOtherUsers = true
+        manager.updateHost(host)
+        await waitUntil { tunnels.connects == 2 }
+    }
+
     // MARK: - Stale reports
 
     /// Reinstall swaps the tunnel; a late failure from the old one must not
