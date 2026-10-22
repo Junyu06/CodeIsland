@@ -25,6 +25,9 @@ final class HermesBridgeTests: XCTestCase {
             "PATH": "/usr/bin:/bin",
             "CODEISLAND_SOCKET_PATH": server.path,
             "CODEISLAND_BRIDGE_LOG": log,
+            // Payloads are logged only under debug; the conversation is left
+            // out even then.
+            "CODEISLAND_DEBUG": "1",
             "HERMES_HOME": "/Users/dev/.hermes/profiles/work",
         ]
         let stdin = Pipe()
@@ -59,6 +62,7 @@ final class HermesBridgeTests: XCTestCase {
         XCTAssertEqual(forwarded["_hermes_home"] as? String, "/Users/dev/.hermes/profiles/work")
         XCTAssertEqual(forwarded["_source"] as? String, "hermes")
         let logged = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
+        XCTAssertTrue(logged.contains("Fix the login bug"), "the debug log holds the rest of the payload: \(logged)")
         XCTAssertFalse(logged.contains(history), "the conversation must not land in the bridge log either")
     }
 }

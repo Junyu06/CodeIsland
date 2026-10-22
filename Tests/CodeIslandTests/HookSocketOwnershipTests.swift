@@ -75,6 +75,8 @@ final class HookSocketOwnershipTests: XCTestCase {
             "PATH": "/usr/bin:/bin",
             "CODEISLAND_SOCKET_PATH": socketPath,
             "CODEISLAND_BRIDGE_LOG": log,
+            // So a bridge that read the event would log its prompt.
+            "CODEISLAND_DEBUG": "1",
         ]
         let stdin = Pipe()
         let stdout = Pipe()

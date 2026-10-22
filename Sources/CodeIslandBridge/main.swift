@@ -7,7 +7,11 @@
 // • Native POSIX socket communication
 // • session_id validation (drop events without it)
 // • CODEISLAND_SKIP env var support
-// • Debug logging (CODEISLAND_DEBUG)
+// • A log, /tmp/codeisland-bridge.log (BridgeLog): a line per hook with
+//   what it was — event, source, session id, tool, the names of its fields,
+//   whether it waits for an answer — never what it said. Whole payloads
+//   (prompts, commands, tool output) only with CODEISLAND_DEBUG=1. Kept
+//   under ~5 MB, with one older `.1`.
 //
 // What a hook means is HookIntake's call (CodeIslandCore), the one
 // interpretation every edge shares: the bridge gathers the facts it reads —
@@ -116,28 +120,6 @@ func bundleIdentifier(forExecutable path: String) -> String? {
     return Bundle(path: appPath)?.bundleIdentifier
 }
 
-func debugLog(_ message: String) {
-    let ts = ISO8601DateFormatter().string(from: Date())
-    let line = "[\(ts)] \(message)\n"
-    // CODEISLAND_BRIDGE_LOG moves the log: the tests that run this binary point
-    // it at a temp file, so their payloads stay out of the log real hooks append to.
-    let path = ProcessInfo.processInfo.environment["CODEISLAND_BRIDGE_LOG"] ?? "/tmp/codeisland-bridge.log"
-    // It holds every hook's payload, under a predictable name in /tmp that
-    // another user can take first: with a file of theirs, a link to a file of
-    // ours, or a FIFO that would hang the hook. So it is written only as a
-    // regular file of this user's that nothing else links to, never through a
-    // symlink, and readable by nobody else.
-    let fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
-    guard fd >= 0 else { return }
-    defer { close(fd) }
-    var info = stat()
-    guard fstat(fd, &info) == 0, info.st_uid == getuid(),
-          (info.st_mode & S_IFMT) == S_IFREG, info.st_nlink == 1 else { return }
-    if info.st_mode & 0o077 != 0 { fchmod(fd, 0o600) }
-    let bytes = Array(line.utf8)
-    _ = bytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
-}
-
 func connectSocket(_ path: String, timeoutMs: Int32 = 3000) -> Int32? {
     let sock = socket(AF_UNIX, SOCK_STREAM, 0)
     guard sock >= 0 else { return nil }
@@ -231,6 +213,7 @@ func recvAll(_ sock: Int32) -> Data {
 let socketPath = SocketPath.path
 let env = ProcessInfo.processInfo.environment
 let args = CommandLine.arguments
+let bridgeLog = BridgeLog(environment: env)
 
 // Parse --source flag (e.g. --source codex)
 var sourceTag: String? = nil
@@ -270,18 +253,21 @@ alarm(5)
 let input = FileHandle.standardInput.readDataToEndOfFile()
 alarm(0)  // stdin done, cancel preliminary alarm
 let stdinObject = HookIntake.stdinObject(input, sourceTag: sourceTag)
-// What HookIntake leaves out of the event (Hermes's copy of the conversation)
-// stays out of the log too.
-if HookIntake.dropsPartsOfStdin(sourceTag: sourceTag),
-   let stdinObject,
-   let data = try? JSONSerialization.data(withJSONObject: stdinObject),
-   let inputStr = String(data: data, encoding: .utf8) {
-    debugLog("raw input: \(inputStr)")
-} else if let inputStr = String(data: input, encoding: .utf8) {
-    debugLog("raw input: \(inputStr)")
+// The whole payload only under CODEISLAND_DEBUG=1. What HookIntake leaves out
+// of the event (Hermes's copy of the conversation) stays out of it even then.
+if bridgeLog.logsPayloads {
+    if HookIntake.dropsPartsOfStdin(sourceTag: sourceTag),
+       let stdinObject,
+       let data = try? JSONSerialization.data(withJSONObject: stdinObject),
+       let inputStr = String(data: data, encoding: .utf8) {
+        bridgeLog.payload("raw input: \(inputStr)")
+    } else if let inputStr = String(data: input, encoding: .utf8) {
+        bridgeLog.payload("raw input: \(inputStr)")
+    }
 }
 
 guard !input.isEmpty, let stdinObject else {
+    bridgeLog.note("stdin is not a JSON object (\(input.count) bytes, source=\(BridgeLog.field(sourceTag ?? "-"))), dropping")
     exit(0)
 }
 
@@ -317,18 +303,26 @@ let facts = HookIntake.Facts(
 )
 
 guard var intake = HookIntake(stdin: stdinObject, facts: facts) else {
-    debugLog("no session_id, dropping")
+    bridgeLog.note("no session_id, dropping: source=\(BridgeLog.field(sourceTag ?? "-")) keys=\(BridgeLog.keyList(Array(stdinObject.keys)))")
     exit(0)
 }
 if intake.sessionIdIsFallback {
-    debugLog("session_id missing, generated fallback id: \(intake.sessionId)")
+    bridgeLog.note("session_id missing, generated fallback id: \(BridgeLog.field(intake.sessionId))")
 }
 
 // agy wired through Gemini-style hooks names the event on stdin, not in --event.
 writeImmediateStdout(intake.immediateStdout)
 
 let isBlocking = intake.waitsForAnswer
-debugLog("event=\(intake.eventName) normalized=\(intake.normalizedEventName) session=\(intake.sessionId) permission=\(intake.isPermission) question=\(intake.isQuestion)")
+bridgeLog.note(BridgeLog.hookLine(
+    eventName: intake.eventName,
+    normalizedEventName: intake.normalizedEventName,
+    source: intake.source,
+    sessionId: intake.sessionId,
+    toolName: HookEvent(json: intake.payload)?.toolName,
+    payloadKeys: Array(stdinObject.keys),
+    blocking: isBlocking
+))
 
 // Arm deadline for env collection + connect + send (protects all events).
 // For blocking events, this is disarmed right before the long recvAll wait.
@@ -348,13 +342,13 @@ if intake.deliveryDelay > 0 {
 }
 let connectTimeoutMs: Int32 = isBlocking ? 3000 : 1000
 guard let sock = connectSocket(socketPath, timeoutMs: connectTimeoutMs) else {
-    debugLog("socket connect failed")
+    bridgeLog.note("socket connect failed")
     exit(0)
 }
 // The listener must be this user's too: outside sticky /tmp, the file checked
 // above may have been replaced since.
 guard SocketPath.peerIsUser(sock) else {
-    debugLog("socket listener is another user's, not sending")
+    bridgeLog.note("socket listener is another user's, not sending")
     close(sock)
     exit(0)
 }
