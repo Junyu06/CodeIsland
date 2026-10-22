@@ -178,6 +178,32 @@ final class ApprovalTrustBoundaryTests: XCTestCase {
         XCTAssertEqual(try behavior(answer), "allow")
     }
 
+    // MARK: - What "no decision" reaches each agent as
+
+    /// Gemini reads `{"decision": …}`, and the bridge's translation turns
+    /// every behavior but allow into deny. The island's answer that decides
+    /// nothing must reach it as `{}` — no decision, its own policy decides —
+    /// and a Claude-format agent (Claude Code, Codex, Qoder, …) prints it as
+    /// it is. Remote edges get it through the same interpretation.
+    func testAnAnswerThatDecidesNothingReachesTheAgentUndecided() throws {
+        for (source, eventName) in [("gemini", "BeforeTool"), ("claude", "PermissionRequest"), ("codex", "PermissionRequest")] {
+            let payload: [String: Any] = [
+                "hook_event_name": eventName,
+                "session_id": "s-\(source)",
+                "_edge": [
+                    "v": 1, "source": source, "host": ["id": "devbox", "name": "Dev Box"],
+                    "cwd": "/home/dev/project", "stdin_sha256": "abc123",
+                ] as [String: Any],
+            ]
+            guard case .interpreted(let intake) = try XCTUnwrap(HookEdgeFacts.delivery(in: payload), source) else {
+                return XCTFail("\(source) was dropped")
+            }
+            XCTAssertTrue(intake.waitsForAnswer, source)
+            let printed = try XCTUnwrap(intake.stdout(forAnswer: AppState.noDecisionAnswer), source)
+            XCTAssertEqual(String(decoding: printed, as: UTF8.self), "{}", source)
+        }
+    }
+
     // MARK: - A session ending decides none of its requests
 
     /// SessionEnd takes the session's cards down, and answers what was waiting
