@@ -1879,11 +1879,7 @@ final class AppState {
         // Now that the event has settled: does the user hear about it, and
         // how. One decision, carried out in the order the outlets always ran
         // in — the push, the completion, then the sound.
-        let attention = AttentionPolicy.decide(
-            .hookEvent(reduction.facts),
-            subject: attentionSubject,
-            context: attentionContext(for: sessionId)
-        )
+        let attention = decideAttention(.hookEvent(reduction.facts), sessionId: sessionId, subject: attentionSubject)
         pushHookEvent(attention.push, facts: reduction.facts, sessionId: sessionId)
         announceCompletion(attention, sessionId: sessionId)
         for effect in reduction.effects {
