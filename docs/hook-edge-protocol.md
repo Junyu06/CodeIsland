@@ -16,6 +16,23 @@ quirk is then fixed once, in HookIntake, for every edge.
 - One Unix-domain stream connection per hook invocation, to
   `$CODEISLAND_SOCKET_PATH`, else `/tmp/codeisland-<uid>.sock` (on a remote
   host, the path the installer forwarded).
+- Only to a socket owned by the edge's own user, never through a symlink
+  (`lstat`): the path is a predictable name in `/tmp`, and a socket another
+  user created there first would get every event and could answer it. On a
+  remote host the island's socket is sshd's, made as the SSH user; a host
+  whose agents run as other users (containers, sudo) has the installer set
+  `CODEISLAND_SOCKET_OWNER_UID` to the SSH user's uid in each hook command,
+  and an edge then uses a socket that user owns instead.
+- **The socket names the host, not the payload.** On the Mac, each remote
+  host's forward ends at a socket the island bound for that host alone
+  (`<main socket without .sock>-hosts/h-<digest>.sock`, in a folder only the
+  Mac's user can enter), never at the main socket. Every request arriving
+  there is filed under that host: its `_remote_host_id`, `_remote_host_name`
+  and `_edge.host` are replaced with the host's own before anything reads
+  them, so an edge that names another host, or none, changes nothing. The
+  main socket, which no remote edge reaches, answers a request that claims a
+  remote host (a non-blank `_remote_host_id` or `_remote_host_name`, or an
+  `_edge` with `host`) with nothing.
 - Write one JSON object, then half-close the write side (`shutdown(SHUT_WR)`).
 - A hook that waits for an answer (below) reads it to EOF, as long as it
   takes, prints it to stdout exactly as received (an empty answer means print
@@ -66,8 +83,9 @@ An edge changes the stdin object only to:
   remote hook adds transcript fields such as `last_assistant_message`, and
   `_hermes_store`);
 - name, for islands that predate `_edge` (see *Older islands*), the host
-  (`_remote_host_id`, `_remote_host_name`) and the agent the hook was
-  installed for (`_source`) — except under Claude Code's own hook, which
+  (`_remote_host_id`, `_remote_host_name`; an island that binds a socket
+  per host takes the host from the socket instead) and the agent the hook
+  was installed for (`_source`) — except under Claude Code's own hook, which
   Cursor runs too, where the island decides the source — unless the stdin
   names them already;
 - drop a `_ppid` / `_hook_ppid` it is given: a pid of its machine is no
@@ -84,7 +102,7 @@ What the island does with an `_` field in a remote edge's payload:
 
 | Field | |
 |---|---|
-| `_remote_host_id`, `_remote_host_name` | Honoured: the session is filed under that host. `host` fills in what is missing. |
+| `_remote_host_id`, `_remote_host_name` | Replaced with the host whose socket the request arrived on: the session is filed under that host, whatever these say. On the Mac's main socket a request that sets either is refused. |
 | `_source` | Under Claude Code's hook (`source: claude`), a supported one names the agent; one the island does not support is left, and the island drops the event, as it does the bridge's. Under any other `source`, the declared source wins. |
 | `_tty` | Honoured as the session's terminal; the edge then sends no `tty`. |
 | `_env` | Kept: the island reads terminal and multiplexer ids from it, as from a local plugin's. |
@@ -104,7 +122,7 @@ What the island does with an `_` field in a remote edge's payload:
 | `tty` | string | The controlling terminal, if any. |
 | `stdin_sha256` | hex string | SHA-256 of the stdin bytes exactly as the agent wrote them. Cursor runs two hooks per step with one stdin; the digest lets the island keep one (#377). |
 | `waits` | bool | Whether this edge waits for the answer (see below). The island never holds a hook nobody waits on. |
-| `host` | `{id, name}` | The machine the edge runs on: the id and name the island gave it (`CODEISLAND_REMOTE_HOST_ID` / `_NAME`). Every edge that sends facts runs on another machine — on the Mac, the bridge reads its own facts and the plugins send their own interpretation — so whatever `host` says, or if it is missing or malformed, HookIntake tracks no pid for the hook and reads no home or file of the Mac to interpret it. A host the edge does not name is left unnamed. |
+| `host` | `{id, name}` | The machine the edge runs on: the id and name the island gave it (`CODEISLAND_REMOTE_HOST_ID` / `_NAME`). The island replaces it with the host whose socket the request arrived on before HookIntake reads it, and refuses a request with `host` on the main socket. Every edge that sends facts runs on another machine — on the Mac, the bridge reads its own facts and the plugins send their own interpretation — so whatever `host` says, or if it is missing or malformed, HookIntake tracks no pid for the hook and reads no home or file of the Mac to interpret it. |
 | `env` | object | Only the variables in `HookIntake.environmentKeys` (terminal and multiplexer ids, `GROK_*`, `HERMES_HOME`, `CODEISLAND_SKIP`). Never anything else. Terminal ids of another machine are no use on the Mac: the remote hook sends no `env`. |
 | `tmux_client_tty` | string | `tmux display-message -p -t $TMUX_PANE '#{client_tty}'`, if the edge ran it. |
 
@@ -162,13 +180,17 @@ From the facts and the stdin, in this order (HookIntake is normative):
    id is dropped.
 6. Terminal context from `env`, `tty`, `cwd` (for an edge, a blank `cwd` is
    none: Grok's workspace root, else `_edge.cwd`, stands in);
-   `_remote_host_id` / `_remote_host_name` from `host` unless the payload
-   names its host.
+   `_remote_host_id` / `_remote_host_name`: the host whose socket the
+   request arrived on, stamped on the payload and on `host` before
+   HookIntake runs.
 
 ## Compatibility
 
 - A payload without `_edge` is its edge's own interpretation and is taken as
   it is: hooks installed before this protocol keep working unchanged.
+- Only the Mac's end of a host's forward moved to the host's own socket; the
+  remote end is where it was. A remote hook of any version keeps sending to
+  the same path, and what it names as its host is replaced by the socket's.
 - An island reads another `v` for the fields it knows.
 - Do not pipe facts through `codeisland-bridge`: it observes its own and
   drops an `_edge` it finds in its stdin.
@@ -184,6 +206,9 @@ as the edge's own interpretation, as it took the 0.3.1 remote hook's:
   them, every remote session was a local Claude card. Under Claude Code's
   hook the remote hook names no source, so an older island shows Claude —
   also for a hook Cursor runs (the 0.3.1 hook named Cursor there).
+- It takes that host from the payload, not from the socket: its forward ends
+  at its main socket, so whatever reaches the forwarded socket can name any
+  host, or none, and pass for a session of the Mac.
 - It never sees a pid of the remote host: the remote hook drops one, and the
   remote OpenCode plugin sends none since v6. (A v5 plugin's `_ppid` reached
   an older island as a local process to monitor — and to SIGTERM as an
