@@ -406,6 +406,23 @@ final class AppState {
     @ObservationIgnored
     nonisolated(unsafe) private var codexDesktopDiscoveryScanTask: Task<Void, Never>?
     private var lastCodexDesktopDiscoveryPollAt: Date?
+    /// Cursor Agent Task transcripts on disk, for rebranding default-Claude
+    /// Task cards. Built off the main actor; see `rebrandMisattributedCursorTaskCards`.
+    @ObservationIgnored
+    private var cursorSubagentIndex: CursorSubagentTranscriptIndex?
+    @ObservationIgnored
+    nonisolated(unsafe) private var cursorSubagentIndexTask: Task<Void, Never>?
+    @ObservationIgnored
+    nonisolated(unsafe) private var cursorSubagentIndexRecheck: Task<Void, Never>?
+    /// When `cursorSubagentIndexRecheck` fires.
+    @ObservationIgnored
+    private var cursorSubagentIndexRecheckAt: Date?
+    /// The lookup schedule of each card the index does not resolve.
+    @ObservationIgnored
+    private var cursorSubagentLookups: [String: CursorSubagentLookupSchedule] = [:]
+    /// When such a card is looked up after it first goes unresolved. Tests shorten it.
+    @ObservationIgnored
+    var cursorSubagentLookupDelays = CursorSubagentLookupSchedule.defaultDelays
     private var isShowingCompletion: Bool {
         if case .completionCard = surface { return true }
         return false
@@ -3657,6 +3674,14 @@ final class AppState {
         RuntimeEnvironment.isRunningTests ? [] : findDiscoveredSessions()
     }
 
+    /// What builds the Cursor Agent Task index: a walk of `~/.cursor/projects`.
+    /// A test process indexes nothing unless a test installs a scanner.
+    nonisolated(unsafe) static var cursorSubagentIndexScanner: @Sendable () -> CursorSubagentTranscriptIndex = {
+        RuntimeEnvironment.isRunningTests
+            ? CursorSubagentTranscriptIndex(pathsBySessionId: [:], builtAt: Date())
+            : CursorSubagentTranscriptIndex.scan(home: FileManager.default.homeDirectoryForCurrentUser.path)
+    }
+
     private func requestDiscoveryScan() {
         if discoveryScanTask != nil {
             pendingDiscoveryRescan = true
@@ -4493,6 +4518,13 @@ final class AppState {
 
     /// Rebrand default-Claude cards that are actually Cursor Agent Tasks
     /// (`~/.cursor/.../agent-transcripts/.../subagents/<id>.jsonl`).
+    ///
+    /// Runs on every hook event and discovery scan, so it never touches the
+    /// disk: cards without a Cursor transcript path are looked up in
+    /// `cursorSubagentIndex`, and a card the index does not resolve is looked
+    /// up again by fresh walks off the main actor, on a bounded schedule
+    /// (`scheduleCursorSubagentLookups`). When a walk finds it, the card is
+    /// rebranded then (`installCursorSubagentIndex`).
     @discardableResult
     func rebrandMisattributedCursorTaskCards() -> Bool {
         var didMutate = false
@@ -4506,10 +4538,12 @@ final class AppState {
                 didMutate = true
                 continue
             }
+            // A remote card's transcripts live on its own host, never in the local index.
+            guard !snap.isRemote else { continue }
 
-            guard let found = Self.findCursorSubagentTranscriptPath(
+            guard let found = cursorSubagentIndex?.transcriptPath(
                 sessionId: sessionId,
-                cwd: snap.cwd
+                preferredBase: Self.cursorProjectTranscriptBase(cwd: snap.cwd)
             ) else {
                 continue
             }
@@ -4519,61 +4553,120 @@ final class AppState {
             }
             didMutate = true
         }
+        scheduleCursorSubagentLookups()
         return didMutate
     }
 
-    /// Locate `…/agent-transcripts/<parent>/subagents/<sessionId>.jsonl` under
-    /// `~/.cursor/projects`. Prefers the cwd-encoded project when available.
-    nonisolated static func findCursorSubagentTranscriptPath(
-        sessionId: String,
-        cwd: String?,
-        home: String = FileManager.default.homeDirectoryForCurrentUser.path,
-        fm: FileManager = .default
-    ) -> String? {
-        let trimmed = sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        let projectsRoot = "\(home)/.cursor/projects"
-
-        var searchRoots: [String] = []
-        if let cwd, !cwd.isEmpty {
-            searchRoots.append("\(projectsRoot)/\(cwd.appProjectDirEncoded())/agent-transcripts")
+    /// Give each card the index does not resolve a lookup schedule (kept
+    /// across calls, dropped once the card is gone or rebranded), then start
+    /// the walk its earliest due lookup needs, or arm the re-check timer for
+    /// it. At most one walk and one timer are ever pending.
+    private func scheduleCursorSubagentLookups(now: Date = Date()) {
+        // `separate` folds nothing, so nothing is looked up; leaving it starts
+        // every card's schedule afresh (`applyCurrentPluginSessionMode`).
+        let mode = Self.currentPluginSessionMode()
+        guard mode == "merge" || mode == "hide" else {
+            resetCursorSubagentLookups()
+            return
         }
-        // Prefer cwd project; fall back to scanning other Cursor projects.
-        var found: String?
-        for base in searchRoots {
-            if let path = Self.firstSubagentTranscript(in: base, sessionId: trimmed, fm: fm) {
-                found = path
-                break
-            }
+        var lookups: [String: CursorSubagentLookupSchedule] = [:]
+        for sessionId in cursorRebrandCandidateIds()
+        where cursorSubagentIndex?.contains(sessionId: sessionId) != true {
+            lookups[sessionId] = cursorSubagentLookups[sessionId]
+                ?? CursorSubagentLookupSchedule(since: now, delays: cursorSubagentLookupDelays)
         }
-        if found == nil {
-            if let projects = try? fm.contentsOfDirectory(atPath: projectsRoot) {
-                for project in projects {
-                    let base = "\(projectsRoot)/\(project)/agent-transcripts"
-                    if searchRoots.contains(base) { continue }
-                    if let path = Self.firstSubagentTranscript(in: base, sessionId: trimmed, fm: fm) {
-                        found = path
-                        break
-                    }
-                }
-            }
+        cursorSubagentLookups = lookups
+        guard cursorSubagentIndexTask == nil else { return }  // its completion reschedules
+        guard let due = lookups.values.compactMap(\.nextLookup).min() else {
+            cancelCursorSubagentIndexRecheck()
+            return
         }
-        return found
+        if due <= now {
+            startCursorSubagentIndexRebuild()
+        } else {
+            armCursorSubagentIndexRecheck(at: due)
+        }
     }
 
-    private nonisolated static func firstSubagentTranscript(
-        in transcriptBase: String,
-        sessionId: String,
-        fm: FileManager
-    ) -> String? {
-        let suffix = "/subagents/\(sessionId).jsonl"
-        guard let enumerator = fm.enumerator(atPath: transcriptBase) else { return nil }
-        while let rel = enumerator.nextObject() as? String {
-            if rel.hasSuffix(suffix) || rel == String(suffix.dropFirst()) {
-                return "\(transcriptBase)/\(rel)"
+    /// The timer, not hook traffic, drives a card's later lookups.
+    private func armCursorSubagentIndexRecheck(at due: Date) {
+        if cursorSubagentIndexRecheck != nil, let armed = cursorSubagentIndexRecheckAt, armed <= due { return }
+        cursorSubagentIndexRecheck?.cancel()
+        cursorSubagentIndexRecheckAt = due
+        let delay = max(0, due.timeIntervalSinceNow)
+        cursorSubagentIndexRecheck = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64((delay * 1_000_000_000).rounded(.up)))
+            guard let self, !Task.isCancelled else { return }
+            self.cursorSubagentIndexRecheck = nil
+            self.cursorSubagentIndexRecheckAt = nil
+            self.scheduleCursorSubagentLookups()
+        }
+    }
+
+    private func cancelCursorSubagentIndexRecheck() {
+        cursorSubagentIndexRecheck?.cancel()
+        cursorSubagentIndexRecheck = nil
+        cursorSubagentIndexRecheckAt = nil
+    }
+
+    /// Drop every card's lookup schedule and the timer driving them.
+    private func resetCursorSubagentLookups() {
+        cursorSubagentLookups = [:]
+        cancelCursorSubagentIndexRecheck()
+    }
+
+    private func startCursorSubagentIndexRebuild() {
+        guard cursorSubagentIndexTask == nil else { return }
+        cancelCursorSubagentIndexRecheck()
+        cursorSubagentIndexTask = Task.detached(priority: .utility) { [weak self] in
+            guard !Task.isCancelled else { return }
+            let index = Self.cursorSubagentIndexScanner()
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                // Cancelled by teardown, which already dropped the handle.
+                guard let self, !Task.isCancelled else { return }
+                self.cursorSubagentIndexTask = nil
+                self.installCursorSubagentIndex(index)
             }
         }
-        return nil
+    }
+
+    /// Adopt a freshly walked index: count it against the schedule of every
+    /// card it does not resolve, and rebrand (and fold) the cards it does.
+    private func installCursorSubagentIndex(_ index: CursorSubagentTranscriptIndex) {
+        cursorSubagentIndex = index
+        for sessionId in Array(cursorSubagentLookups.keys) where !index.contains(sessionId: sessionId) {
+            cursorSubagentLookups[sessionId]?.recordMiss(walkStartedAt: index.builtAt)
+        }
+
+        let resolvedAny = cursorRebrandCandidateIds().contains { index.contains(sessionId: $0) }
+        if resolvedAny, applyCursorSubsessionModeToKnownSessions() {
+            scheduleSave()
+            startRotationIfNeeded()
+            refreshDerivedState()
+        } else {
+            scheduleCursorSubagentLookups()
+        }
+    }
+
+    /// Local default-Claude cards whose transcript path does not already say Cursor.
+    private func cursorRebrandCandidateIds() -> [String] {
+        sessions.compactMap { sessionId, snap in
+            let normalized = SessionSnapshot.normalizedSupportedSource(snap.source)
+            guard normalized == nil || normalized == "claude", !snap.isRemote,
+                  !CursorSessionFolding.isCursorAgentTranscriptPath(snap.transcriptPath) else { return nil }
+            return sessionId
+        }
+    }
+
+    /// `~/.cursor/projects/<cwd-encoded>/agent-transcripts` — where a Task run
+    /// from `cwd` keeps its transcripts.
+    nonisolated static func cursorProjectTranscriptBase(
+        cwd: String?,
+        home: String = FileManager.default.homeDirectoryForCurrentUser.path
+    ) -> String? {
+        guard let cwd, !cwd.isEmpty else { return nil }
+        return "\(home)/.cursor/projects/\(cwd.appProjectDirEncoded())/agent-transcripts"
     }
 
     func applyCurrentPluginSessionMode(persist: Bool = true) {
@@ -4582,6 +4675,8 @@ final class AppState {
 
         switch mode {
         case "separate":
+            // Back in merge or hide, every default-Claude card is looked up afresh.
+            resetCursorSubagentLookups()
             didMutate = separateMergedCodexSubagents()
             didMutate = separateMergedCursorSubagents() || didMutate
         case "merge":
@@ -4890,6 +4985,9 @@ final class AppState {
         codexDesktopDiscoveryScanTask?.cancel()
         codexDesktopDiscoveryScanTask = nil
         lastCodexDesktopDiscoveryPollAt = nil
+        cursorSubagentIndexTask?.cancel()
+        cursorSubagentIndexTask = nil
+        cancelCursorSubagentIndexRecheck()
         for key in Array(processMonitors.keys) { stopMonitor(key) }
     }
 
@@ -4931,6 +5029,8 @@ final class AppState {
         tearDownMainThreadResources()
         discoveryScanTask?.cancel()
         codexDesktopDiscoveryScanTask?.cancel()
+        cursorSubagentIndexTask?.cancel()
+        cursorSubagentIndexRecheck?.cancel()
         codexAppServerReconnectTask?.cancel()
         for (_, monitor) in processMonitors {
             monitor.source.cancel()
@@ -5002,6 +5102,15 @@ final class AppState {
         // CLAUDE_CONFIG_DIR); ConfigRootDiscovery places the ones whose
         // environment cannot be read and skips paused dirs.
         let scan = configRootScan(for: .claude)
+        // Processes in the same cwd share a project dir (a dozen terminals in ~
+        // is common): list each dir once per scan, not once per process.
+        var listings: [String: [ClaudeTranscriptFile]] = [:]
+        func transcripts(in projectPath: String) -> [ClaudeTranscriptFile]? {
+            if let cached = listings[projectPath] { return cached }
+            guard let files = claudeTranscriptFiles(in: projectPath, fm: fm) else { return nil }
+            listings[projectPath] = files
+            return files
+        }
         return ConfigRootDiscovery.run(
             processes: processes,
             lookup: { scan.lookup(pid: $0.pid) },
@@ -5009,7 +5118,9 @@ final class AppState {
             discover: { root, group, claimed in
                 var taken = claimed
                 return group.compactMap { process in
-                    guard let session = claudeSession(for: process, root: root, excluding: taken, fm: fm) else {
+                    guard let session = claudeSession(
+                        for: process, root: root, excluding: taken, transcripts: transcripts(in:)
+                    ) else {
                         return nil
                     }
                     taken.insert(session.sessionId)
@@ -5027,31 +5138,52 @@ final class AppState {
         let startTime: Date?
     }
 
+    struct ClaudeTranscriptFile {
+        let name: String
+        let modified: Date
+    }
+
+    /// The `.jsonl` transcripts in one Claude project dir with their mtimes,
+    /// read in one bulk directory listing instead of a stat per file.
+    ///
+    /// Unlike `contentsOfDirectory(atPath:)`, the URL listing fails on a
+    /// project dir that is itself a symlink, so resolve the dir first. Entries
+    /// are not resolved: a symlinked transcript still reports its own mtime,
+    /// as the per-file stat did.
+    nonisolated static func claudeTranscriptFiles(in projectPath: String, fm: FileManager) -> [ClaudeTranscriptFile]? {
+        guard let urls = try? fm.contentsOfDirectory(
+            at: URL(fileURLWithPath: projectPath, isDirectory: true).resolvingSymlinksInPath(),
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else { return nil }
+        return urls.compactMap { url in
+            let name = url.lastPathComponent
+            guard name.hasSuffix(".jsonl"),
+                  let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            else { return nil }
+            return ClaudeTranscriptFile(name: name, modified: modified)
+        }
+    }
+
     /// One claude process → its CWD → the single most recent .jsonl under `root`.
     private nonisolated static func claudeSession(
         for process: ClaudeDiscoveryProcess,
         root: String,
         excluding claimed: Set<String>,
-        fm: FileManager
+        transcripts: (_ projectPath: String) -> [ClaudeTranscriptFile]?
     ) -> DiscoveredSession? {
         let projectPath = "\(root)/projects/\(process.cwd.claudeProjectDirEncoded())"
-        guard let files = try? fm.contentsOfDirectory(atPath: projectPath) else { return nil }
+        guard let files = transcripts(projectPath) else { return nil }
 
         // Find the most recently modified .jsonl that was written AFTER this process started
         var bestFile: String?
         var bestDate = Date.distantPast
-        for file in files where file.hasSuffix(".jsonl") {
-            let fullPath = "\(projectPath)/\(file)"
-            if let attrs = try? fm.attributesOfItem(atPath: fullPath),
-               let modified = attrs[.modificationDate] as? Date,
-               modified > bestDate {
-                // Skip files from old sessions: must be modified after process started
-                if let start = process.startTime, modified < start.addingTimeInterval(-10) {
-                    continue
-                }
-                bestDate = modified
-                bestFile = file
+        for file in files where file.modified > bestDate {
+            // Skip files from old sessions: must be modified after process started
+            if let start = process.startTime, file.modified < start.addingTimeInterval(-10) {
+                continue
             }
+            bestDate = file.modified
+            bestFile = file.name
         }
 
         guard let file = bestFile else { return nil }
