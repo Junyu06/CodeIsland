@@ -4,6 +4,8 @@
 # host, a digest of the stdin), and the island reads both with HookIntake, the
 # interpretation codeisland-bridge runs on the Mac (docs/hook-edge-protocol.md).
 # What only this host can see — transcripts, the Hermes store — is read here.
+# For islands that predate `_edge`, the host and the source are named at the
+# top level too.
 import hashlib
 import json
 import os
@@ -11,7 +13,7 @@ import socket
 import subprocess
 import sys
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 # The `_edge` facts version (HookEdgeFacts.version on the island).
 EDGE_FACTS_VERSION = 1
 # Per-user socket path (#193): CodeIsland injects CODEISLAND_SOCKET_PATH via the hook
@@ -485,6 +487,24 @@ def _edge_facts(raw, data, waits):
     return edge
 
 
+def _for_islands_without_facts(payload):
+    """An island that predates `_edge` reads the top level only: name this host
+    there (a host the payload names stands, here and on the island), and the
+    agent the hook was installed for — except Claude Code's own hook, which
+    Cursor runs too (#377), so the island decides that one from the payload.
+    A process id of this host is never sent: no island can track it, and one
+    that took it for a local pid (an older island filing a session without a
+    host) would monitor, and could signal, an unrelated process of its own."""
+    for key in ("_ppid", "_hook_ppid"):
+        payload.pop(key, None)
+    if REMOTE_HOST_ID and not payload.get("_remote_host_id"):
+        payload["_remote_host_id"] = REMOTE_HOST_ID
+    if REMOTE_HOST_NAME and not payload.get("_remote_host_name"):
+        payload["_remote_host_name"] = REMOTE_HOST_NAME
+    if SOURCE and SOURCE != "claude" and not payload.get("_source"):
+        payload["_source"] = SOURCE
+
+
 def _merge_extras(payload, extras, event_name):
     for key, value in extras.items():
         if value and not payload.get(key):
@@ -535,6 +555,7 @@ def main():
         if store:
             payload["_hermes_store"] = store
 
+    _for_islands_without_facts(payload)
     waits = _waits_for_answer(data)
     payload["_edge"] = _edge_facts(raw, data, waits)
     response = _send_event(payload, waits)

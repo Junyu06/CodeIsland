@@ -71,6 +71,8 @@ describe("remote OpenCode plugin", () => {
       expect(compact.cwd).toBe(process.cwd());
       expect(compact._source).toBeUndefined();
       expect(compact._remote_host_id).toBeUndefined();
+      // A pid of the remote host is not one the island can track.
+      expect(compact._ppid).toBeUndefined();
     } finally {
       process.env.PWD = savedPwd;
     }

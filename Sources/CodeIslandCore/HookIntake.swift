@@ -436,6 +436,11 @@ public struct HookIntake {
                 json["_ppid"] = 0
                 json.removeValue(forKey: "_hook_ppid")
             }
+        } else if facts.remoteHost != nil {
+            // Nor is a pid an edge there forwards (the remote OpenCode plugin's
+            // before v6) one of this Mac's processes.
+            json.removeValue(forKey: "_ppid")
+            json.removeValue(forKey: "_hook_ppid")
         }
 
         // Validate: must have non-empty session_id

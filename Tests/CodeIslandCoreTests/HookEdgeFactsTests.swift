@@ -135,7 +135,7 @@ final class HookEdgeFactsTests: XCTestCase {
         XCTAssertEqual(intake.payload["_remote_host_id"] as? String, "devbox")
         XCTAssertEqual(intake.payload["_remote_host_name"] as? String, "Dev Box")
         XCTAssertEqual(intake.payload["_tty"] as? String, "/dev/pts/9")
-        XCTAssertEqual(intake.payload["_ppid"] as? Int, 31337, "left as the plugin sent it, as before")
+        XCTAssertNil(intake.payload["_ppid"], "a pid of the remote host is not one of this Mac's")
     }
 
     /// The plugin before v5 stamped its own `_source` and host: they stand.
@@ -145,6 +145,7 @@ final class HookEdgeFactsTests: XCTestCase {
             "session_id": "opencode-ses_1",
             "_source": "opencode",
             "_ppid": 31337,
+            "_hook_ppid": 31336,
             "_tty": "/dev/pts/9",
             "_remote_host_id": "devbox",
             "_remote_host_name": "Dev Box",
@@ -152,7 +153,8 @@ final class HookEdgeFactsTests: XCTestCase {
             "_edge": remoteEdge(source: "opencode"),
         ])
         XCTAssertEqual(intake.payload["_source"] as? String, "opencode")
-        XCTAssertEqual(intake.payload["_ppid"] as? Int, 31337, "left as the plugin sent it, as before")
+        XCTAssertNil(intake.payload["_ppid"], "a pid of the remote host is not one of this Mac's")
+        XCTAssertNil(intake.payload["_hook_ppid"])
         XCTAssertEqual(intake.payload["_tty"] as? String, "/dev/pts/9")
         XCTAssertEqual(intake.payload["_remote_host_id"] as? String, "devbox")
     }

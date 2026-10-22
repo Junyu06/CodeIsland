@@ -128,9 +128,12 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
         XCTAssertEqual(edge["waits"] as? Bool, false)
         XCTAssertNil(edge["env"], "a remote hook sends no environment")
         XCTAssertNil(edge["ppid"], "nor a process id")
-        for key in ["_source", "_remote_host_id", "_tty"] {
+        for key in ["_source", "_tty"] {
             XCTAssertNil(raw[key], "\(key) is the island's to derive")
         }
+        // Named for islands that predate `_edge` too.
+        XCTAssertEqual(raw["_remote_host_id"] as? String, "host-1")
+        XCTAssertEqual(raw["_remote_host_name"] as? String, "Build Box")
 
         let (event, intake) = try intake(sent)
         XCTAssertEqual(event["_source"] as? String, "claude")
@@ -288,6 +291,42 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
                 continue
             }
         }
+    }
+
+    /// A Mac on an island that predates `_edge` reads the top level only. The
+    /// hook names its host there, so such an island files the session under
+    /// it (not as a local one), and the agent it was installed for; and it
+    /// never sends a pid of its host — the remote OpenCode plugin before v6
+    /// put its own in `_ppid`, which an island without the host would have
+    /// monitored, and could have signalled, as a local process.
+    func testRemoteHookStillNamesItsHostForIslandsThatPredateEdgeFacts() throws {
+        let stdin = #"{"session_id":"opencode-ses_1","hook_event_name":"UserPromptSubmit","cwd":"/work/proj","prompt":"hi","_ppid":4242,"_hook_ppid":4241,"_tty":"/dev/pts/3"}"#
+        let (sent, _) = try runHook(source: "opencode", stdin: stdin)
+        let raw = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(sent)) as? [String: Any])
+        XCTAssertEqual(raw["_remote_host_id"] as? String, "host-1")
+        XCTAssertEqual(raw["_remote_host_name"] as? String, "Build Box")
+        XCTAssertEqual(raw["_source"] as? String, "opencode")
+        XCTAssertNil(raw["_ppid"])
+        XCTAssertNil(raw["_hook_ppid"])
+        XCTAssertEqual(raw["_tty"] as? String, "/dev/pts/3", "the plugin's own terminal stays")
+
+        let (event, _) = try intake(sent)
+        XCTAssertEqual(event["_remote_host_id"] as? String, "host-1")
+        XCTAssertEqual(event["_source"] as? String, "opencode")
+        XCTAssertNil(event["_ppid"])
+
+        // Claude Code's hook, which Cursor runs too: the island decides the
+        // source from the payload, so the hook names none.
+        let (claudeSent, _) = try runHook(source: "claude", stdin: #"{"session_id":"s","hook_event_name":"Stop"}"#)
+        let claude = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(claudeSent)) as? [String: Any])
+        XCTAssertNil(claude["_source"])
+        XCTAssertEqual(claude["_remote_host_id"] as? String, "host-1")
+
+        // A host the payload names stands.
+        let (namedSent, _) = try runHook(source: "codex", stdin: #"{"session_id":"s","hook_event_name":"Stop","_remote_host_id":"other","_source":"codex"}"#)
+        let named = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(namedSent)) as? [String: Any])
+        XCTAssertEqual(named["_remote_host_id"] as? String, "other")
+        XCTAssertEqual(named["_source"] as? String, "codex")
     }
 
     /// Remote hooks installed before facts existed (0.3.1) keep interpreting

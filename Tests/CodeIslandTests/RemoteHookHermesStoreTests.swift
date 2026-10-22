@@ -149,8 +149,9 @@ final class RemoteHookHermesStoreTests: XCTestCase {
         XCTAssertEqual(extra["user_message"] as? String, "Next step?")
         let store = try XCTUnwrap(sent["_hermes_store"] as? [String: Any])
         XCTAssertEqual(store["title"] as? String, "Fix the login bug")
-        // The source is the island's reading of the hook's facts.
-        XCTAssertNil(sent["_source"])
+        // The source is the island's reading of the hook's facts; it is named
+        // at the top level too, for islands that predate them.
+        XCTAssertEqual(sent["_source"] as? String, "hermes")
         let edge = try XCTUnwrap(sent["_edge"] as? [String: Any])
         XCTAssertEqual(edge["source"] as? String, "hermes")
         guard case .interpreted(let intake)? = HookEdgeFacts.delivery(in: sent) else {
