@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased]
+
+### English
+- **An interrupted turn no longer rings "done".** Stopping a turn yourself (Esc in Claude Code, a stopped Hermes turn, a cancelled Cline task) played the task-complete chime as if it had finished. It now ends quietly; each agent's card behaves as before
+- **A subagent's failure no longer hides its parent's completion push.** A subagent that ended on an error pushed that error under its parent's card, and the push dedupe then dropped the parent's own "done" moments later, so the phone heard "error" for a turn that finished fine. Only a session's own failure pushes now
+- **Smart Suppress covers queued completion cards too.** A completion card that waited behind another one appeared even when its session's terminal tab was the one in front. The tab check now runs whenever a card actually appears, right away or out of the queue
+- **Follow-up reminders from several sessions all ring.** Reminders shared the failed-turn sound's debounce, so a second session's reminder right after another's stayed silent
+- **A Cursor Task folded into its chat stays quiet.** With Agent Sub-Sessions on Merge into main or Hide, a Task whose own Stop folds its card away no longer rings, pushes or opens a completion card for a card that no longer exists
+- **An aborted AiWork stream isn't chased as finished.** It no longer gets a "still waiting · finished" reminder and push
+- **A turn that ends without a card hands the island on.** A Hermes gateway chat, or a Stop with On completion set to Glance dot or Do nothing, kept the island's active spot instead of passing it to another working session
+- **Silent tool steps no longer ask the window server whether the screen is locked.** With sounds on, every tool hook read the lock state on the main thread before checking whether that event plays a sound at all
+
+### 中文
+- **自己打断的回合不再响「完成」。** 自己停止一个回合（Claude Code 里按 Esc、停止 Hermes 回合、取消 Cline 任务）时，以前会响「任务完成」提示音，好像它真的做完了。现在会安静结束，各 agent 的卡片表现不变
+- **子代理出错不再吞掉父会话的完成推送。** 子代理以错误结束时，错误推送记在父卡片名下，几秒后父会话自己的「完成」推送被去重规则丢掉，手机上只收到「出错」，实际这个回合是正常完成的。现在只有会话自己的失败才会推送
+- **智能抑制也覆盖排队中的完成卡片。** 排在另一张卡片后面的完成卡片，即使它的终端标签页就在前台，也照样弹出。现在每次卡片真正出现时（立即或从队列中出来）都会检查标签页
+- **多个会话的跟进提醒都会响。** 提醒和「回合失败」提示音共用同一个防抖，另一个会话刚提醒过时，紧接着的提醒就不响了
+- **折叠进对话的 Cursor Task 保持安静。** 「Agent 子会话」设为合并到主会话或隐藏时，因自身 Stop 而被折叠掉的 Task 卡片，不再响铃、推送，也不会为已经不存在的卡片弹出完成卡片
+- **被中止的 AiWork 流不再被当成已完成去跟进。** 不再收到「仍在等待 · 已完成」的提醒和推送
+- **不弹卡片就结束的回合会让出刘海位置。** Hermes 网关对话，或「任务完成时」设为「仅亮起指示点」或「无动作」时的 Stop，以前会一直占着刘海的活跃位置，不让给其他正在工作的会话
+- **静默的工具步骤不再向窗口服务器查询锁屏状态。** 声音开启时，每个工具 hook 都会先在主线程读取锁屏状态，然后才检查这个事件是否需要响铃
+
 ## [v1.0.39] - 2026-10-22
 
 ### English
