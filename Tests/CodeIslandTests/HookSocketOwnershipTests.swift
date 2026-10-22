@@ -304,6 +304,94 @@ final class HookSocketOwnershipTests: XCTestCase {
         XCTAssertEqual(try runRemoteHook("impostor") ?? "", "", "the payload reached a listener of another user's")
     }
 
+    /// An agent started before its host's hooks were reinstalled still runs
+    /// the command an older install wrote, naming /tmp/codeisland-<uid>.sock.
+    /// Where no socket is there any more, its events reach the island's
+    /// socket in that user's folder; where an older island still forwards to
+    /// that path, they go there as before.
+    func testAHookAnOlderInstallWroteFindsTheSocketInItsFolder() throws {
+        let hookURL = URL(fileURLWithPath: scratch + "/codeisland-remote-hook.py")
+        try Data(XCTUnwrap(RemoteInstaller.remoteHookSource()).utf8).write(to: hookURL)
+        // A uid's number no account has: only the path's digits matter.
+        let number = String(Int.random(in: 3_000_000_000..<3_100_000_000))
+        let driver = """
+        import importlib.util, io, json, os, socket, sys, threading
+        hook_path, number, both = sys.argv[1], sys.argv[2], sys.argv[3] == "both"
+        legacy = "/tmp/codeisland-%s.sock" % number
+        folder = "/tmp/codeisland-%s" % number
+        os.mkdir(folder, 0o700)
+        listeners = {}
+        def listen(key, path):
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(path)
+            server.listen(1)
+            server.settimeout(1.5)
+            listeners[key] = (server, path)
+        listen("folder", os.path.join(folder, "island.sock"))
+        if both:
+            listen("legacy", legacy)
+        received = {}
+        def serve(key):
+            try:
+                conn, _ = listeners[key][0].accept()
+            except OSError:
+                return
+            data = b""
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            received[key] = b"sown-legacy" in data
+            conn.close()
+        threads = [threading.Thread(target=serve, args=(key,)) for key in listeners]
+        for thread in threads:
+            thread.start()
+        try:
+            os.environ["CODEISLAND_SOCKET_PATH"] = legacy
+            spec = importlib.util.spec_from_file_location("hook", hook_path)
+            hook = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(hook)
+            hook._get_tty = lambda: "/dev/pts/7"
+            sys.stdin = io.TextIOWrapper(io.BytesIO(b'{"hook_event_name":"Stop","session_id":"sown-legacy"}'), encoding="utf-8")
+            printed = io.StringIO()
+            real_stdout, sys.stdout = sys.stdout, printed
+            try:
+                hook.main()
+            finally:
+                sys.stdout = real_stdout
+            for thread in threads:
+                thread.join(3)
+        finally:
+            for server, path in listeners.values():
+                server.close()
+                os.unlink(path)
+            os.rmdir(folder)
+        print(json.dumps(received))
+        """
+        for both in [false, true] {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            process.arguments = ["-c", driver, hookURL.path, number, both ? "both" : "folder"]
+            var environment = ProcessInfo.processInfo.environment
+            environment["HOME"] = scratch
+            environment["CODEISLAND_SOURCE"] = "claude"
+            environment.removeValue(forKey: "CODEISLAND_SOCKET_OWNER_UID")
+            process.environment = environment
+            let stdout = Pipe()
+            let stderr = Pipe()
+            process.standardOutput = stdout
+            process.standardError = stderr
+            try process.run()
+            let out = stdout.fileHandleForReading.readDataToEndOfFile()
+            let err = String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            process.waitUntilExit()
+            XCTAssertEqual(process.terminationStatus, 0, "hook driver failed: \(err)")
+            let received = try XCTUnwrap(JSONSerialization.jsonObject(with: out) as? [String: Bool])
+            XCTAssertEqual(received, both ? ["legacy": true] : ["folder": true], both ? "with an older island's socket there" : "with none there")
+        }
+    }
+
     /// The hook asks the kernel who listens (LOCAL_PEERCRED here, as on
     /// macOS hosts; SO_PEERCRED on Linux): the island's stand-in, this user.
     func testRemoteHookAsksTheKernelWhoListens() throws {

@@ -485,6 +485,23 @@ def _peer_is_island(sock):
     return uid is None or uid == SOCKET_OWNER_UID
 
 
+def _island_socket():
+    """The socket to send to: SOCKET_PATH — but for the path older installs
+    wrote into each hook command, /tmp/codeisland-<uid>.sock, where the island
+    forwarded before its socket had a folder of its own. An agent started
+    before this host's hooks were reinstalled still runs that command; once no
+    socket of the island's user is there, it means that user's socket in its
+    folder, /tmp/codeisland-<uid>/island.sock, checked like any other."""
+    folder, name = os.path.split(SOCKET_PATH)
+    prefix, suffix = "codeisland-", ".sock"
+    if folder != "/tmp" or not name.startswith(prefix) or not name.endswith(suffix):
+        return SOCKET_PATH
+    uid = name[len(prefix):-len(suffix)]
+    if not uid or not all(c in "0123456789" for c in uid) or _socket_is_ours(SOCKET_PATH):
+        return SOCKET_PATH
+    return "/tmp/codeisland-%s/island.sock" % uid
+
+
 def _send_event(payload, expects_response, stays_for_reply=True):
     """Sends the event and reads the island's reply to EOF; returns the reply
     when the hook waits for one. A hook nobody waits on reads it too, for a
@@ -493,12 +510,13 @@ def _send_event(payload, expects_response, stays_for_reply=True):
     thread, lost the event of a hook that had closed before it got there.
     Nothing is sent to a socket the island's user does not own, nor to one
     whose listener is not that user: as if the island were not there."""
-    if not _socket_is_ours(SOCKET_PATH):
+    path = _island_socket()
+    if not _socket_is_ours(path):
         return None
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(BLOCKING_TIMEOUT_SECONDS if expects_response else TIMEOUT_SECONDS)
     try:
-        sock.connect(SOCKET_PATH)
+        sock.connect(path)
         if not _peer_is_island(sock):
             return None
         sock.sendall(json.dumps(payload).encode("utf-8"))

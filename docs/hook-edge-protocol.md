@@ -25,7 +25,10 @@ quirk is then fixed once, in HookIntake, for every edge.
   does not matter. Once the tunnel is up, the socket is checked too (and,
   where agents run as other users, made 0666 without following a symlink)
   before anything is installed; a folder or a socket that fails closes the
-  tunnel, and the host says why.
+  tunnel, and the host says why. A hook command an older install wrote
+  names `/tmp/codeisland-<uid>.sock`, and an agent started before the
+  reinstall still runs it: the remote hook reads that path, once no socket
+  of the island's user is there, as `/tmp/codeisland-<uid>/island.sock`.
 - Only to a socket owned by the edge's own user, never through a symlink
   (`lstat`): the path is a predictable name in `/tmp`, and a socket another
   user created there first would get every event and could answer it. On a
