@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### English
+- **Releases ship the code they list again.** v1.0.36, v1.0.37 and v1.0.38 carried v1.0.35's app and hook bridge under new version numbers. After the build Mac moved to Xcode 27, SwiftPM's new default build system wrote its products to `.build/out/Products/Release`, while the release script kept copying from `.build/<arch>-apple-macosx/release`, where the v1.0.35 build still sat. Everything those three releases list arrives with this one. The release script now pins SwiftPM's native build system (the new one also writes both architectures to the same folder, so the second overwrote the first, and records the 14.0 deployment target as the SDK, which runs AppKit in its old-SDK compatibility mode), asks SwiftPM where the products are (#379, thanks @Naitellos), deletes the previous ones before building and refuses a binary with the wrong architecture or SDK
+- **Codex app-servers started by ChatGPT's bundled tools keep their CLI identity.** A `codex app-server` started by one of ChatGPT's bundled tool hosts (such as `Contents/Resources/cua_node/bin/node_repl`) shares ChatGPT's bundle id, so it was taken for Desktop's shared app-server and its threads were keyed as Desktop threads. Only an app-server whose parent is the app's own executable in `Contents/MacOS` counts as Desktop now (#372, thanks @burgerseater)
+
+### 中文
+- **发布包重新装着它列出的代码。** v1.0.36、v1.0.37、v1.0.38 实际装的是 v1.0.35 的主程序和 hook 桥接程序，只换了版本号。构建机升级到 Xcode 27 后，SwiftPM 新的默认构建系统把产物写到 `.build/out/Products/Release`，发版脚本却仍从 `.build/<架构>-apple-macosx/release` 复制，那里一直放着 v1.0.35 的构建结果。这三个版本列出的改动都随本版本一起送达。发版脚本现在固定使用 SwiftPM 的 native 构建系统（新构建系统还会把两个架构写进同一个目录，后编译的覆盖先编译的，并把 14.0 的部署目标记成 SDK 版本，让 AppKit 以旧 SDK 兼容模式运行），向 SwiftPM 询问产物位置（#379，感谢 @Naitellos），构建前删除旧产物，架构或 SDK 不对的二进制拒绝打包
+- **ChatGPT 内置工具启动的 Codex app-server 保持命令行身份。** ChatGPT 内置工具（例如 `Contents/Resources/cua_node/bin/node_repl`）启动的 `codex app-server` 和 ChatGPT 共用同一个 bundle id，之前被当成桌面版共享的 app-server，它的对话被算作桌面版对话。现在只有父进程是 App 自己 `Contents/MacOS` 里的可执行文件时，才算桌面版（#372，感谢 @burgerseater）
+
 ## [v1.0.38] - 2026-10-11
 
 ### English
