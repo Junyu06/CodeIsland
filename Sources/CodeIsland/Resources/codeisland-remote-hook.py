@@ -5,7 +5,7 @@ import socket
 import subprocess
 import sys
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 # Per-user socket path (#193): CodeIsland injects CODEISLAND_SOCKET_PATH via the hook
 # command, but fall back to a uid-scoped path so multiple users on a shared host never
 # collide on a single /tmp/codeisland.sock.
@@ -508,6 +508,14 @@ def _get_tty():
     return None
 
 
+def _is_cursor_payload(data):
+    """Cursor runs the Claude Code hooks it imports with its own input, which
+    always carries `cursor_version` (#377). Over Remote-SSH that is this script
+    under CODEISLAND_SOURCE=claude, so the card would otherwise say Claude."""
+    version = data.get("cursor_version")
+    return isinstance(version, str) and bool(version.strip())
+
+
 def main():
     if "--version" in sys.argv:
         print(VERSION)
@@ -524,17 +532,19 @@ def main():
         return 1
 
     normalized_event = _normalize_event(event_name)
+    is_cursor = _is_cursor_payload(data)
+    source = "cursor" if is_cursor else SOURCE
 
     payload = dict(data)
     payload["hook_event_name"] = event_name
     payload["session_id"] = session_id
     payload["cwd"] = cwd
-    payload["_source"] = payload.get("_source") or SOURCE
+    payload["_source"] = payload.get("_source") or source
     payload["_remote_host_id"] = payload.get("_remote_host_id") or REMOTE_HOST_ID
     payload["_remote_host_name"] = payload.get("_remote_host_name") or REMOTE_HOST_NAME
     payload["_tty"] = payload.get("_tty") or _get_tty()
 
-    if SOURCE == "claude":
+    if source == "claude":
         extras = _scan_claude_jsonl(session_id, cwd)
         for key, value in extras.items():
             if value and not payload.get(key):
@@ -579,9 +589,12 @@ def main():
         if store:
             payload["_hermes_store"] = store
 
-    # Blocking events: permission prompts + question prompts
-    expects_response = normalized_event == "PermissionRequest" or (
-        normalized_event == "Notification" and payload.get("question")
+    # Blocking events: permission prompts + question prompts. Never for a hook
+    # Cursor runs: it reads stdout against its own schema for the step, so an
+    # island answer is not one it acts on.
+    expects_response = not is_cursor and (
+        normalized_event == "PermissionRequest"
+        or (normalized_event == "Notification" and payload.get("question"))
     )
     response = _send_event(payload, expects_response)
     if response:
