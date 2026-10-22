@@ -17,8 +17,15 @@ quirk is then fixed once, in HookIntake, for every edge.
   `$CODEISLAND_SOCKET_PATH`, else `/tmp/codeisland-<uid>.sock` (on a remote
   host, the path the installer forwarded).
 - Write one JSON object, then half-close the write side (`shutdown(SHUT_WR)`).
-- Read the answer to EOF only when the hook waits for one (below). Print it to
-  stdout exactly as received; an empty answer means print nothing.
+- Read the answer to EOF, every time. A hook that waits for one (below) reads
+  as long as it takes, prints the answer to stdout exactly as received (an
+  empty answer means print nothing) and exits. A hook nobody waits on reads
+  for a short while only (the remote hook 2 s, the bridge 1 s) and prints
+  nothing; the island does not hold it, and answers `{}` or nothing once it
+  has read the event. That read is for older islands: they accepted
+  connections on their main thread and lost the event of a hook that had
+  closed before they got there. The island now accepts and reads every
+  connection off the main thread, however early its hook closes.
 - If the island is not running, exit 0 silently.
 
 ## Payload

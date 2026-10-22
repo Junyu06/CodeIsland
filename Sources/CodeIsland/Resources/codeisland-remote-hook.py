@@ -29,6 +29,11 @@ TIMEOUT_SECONDS = 300
 # agent side, and a socket timeout of 5 minutes would silently drop the decision
 # of anyone who stepped away (#306).
 BLOCKING_TIMEOUT_SECONDS = 86400
+# How long a hook nobody waits on waits for the island's reply (`{}`, or
+# nothing), which normally takes one round trip over the SSH link. Short, so
+# a busy island never holds up the agent long; within Codex's 3 s cap on its
+# SessionEnd hook.
+REPLY_TIMEOUT_SECONDS = 2
 TRANSCRIPT_TAIL_BYTES = 262144
 
 
@@ -406,22 +411,26 @@ def _parse_object(raw):
 
 
 def _send_event(payload, expects_response):
+    """Sends the event and reads the island's reply to EOF; returns the reply
+    when the hook waits for one. A hook nobody waits on reads it too, for a
+    short while: an older island, which accepted connections on its main
+    thread, lost the event of a hook that had closed before it got there."""
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(BLOCKING_TIMEOUT_SECONDS if expects_response else TIMEOUT_SECONDS)
     try:
         sock.connect(SOCKET_PATH)
         sock.sendall(json.dumps(payload).encode("utf-8"))
         sock.shutdown(socket.SHUT_WR)
-        if expects_response:
-            chunks = []
-            while True:
-                chunk = sock.recv(65536)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            response = b"".join(chunks)
-            return response.decode("utf-8") if response else None
-        return None
+        if not expects_response:
+            sock.settimeout(REPLY_TIMEOUT_SECONDS)
+        chunks = []
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        response = b"".join(chunks)
+        return response.decode("utf-8") if expects_response and response else None
     except (OSError, socket.error):
         # Socket may not exist or server may have shut down — fail silently (#45)
         return None

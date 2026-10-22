@@ -12,6 +12,10 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
     private var sandbox: URL!
     private var hookURL: URL!
     private var socketPath: String!
+    /// Of the last ``runHook``: whether the stand-in island could still hand
+    /// the hook its reply, and how long the hook's `main()` took.
+    private var lastReplyDelivered: Bool?
+    private var lastHookSeconds: Double = 0
 
     override func setUpWithError() throws {
         sandbox = FileManager.default.temporaryDirectory
@@ -30,16 +34,19 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
     }
 
     /// Runs the hook's `main()` on `stdin` as CODEISLAND_SOURCE=`source`; the
-    /// stand-in island answers `reply`. Returns the raw bytes the hook sent
-    /// (nil: it sent nothing) and what it printed.
+    /// stand-in island answers `reply`, `replyDelay` seconds after the hook's
+    /// EOF. Returns the raw bytes the hook sent (nil: it sent nothing) and
+    /// what it printed.
     private func runHook(
         source: String,
         stdin: String,
-        reply: Data = Data()
+        reply: Data = Data(),
+        replyDelay: Double = 0
     ) throws -> (sent: Data?, stdout: String) {
         let driver = """
-        import base64, importlib.util, io, json, os, socket, sys, threading
+        import base64, importlib.util, io, json, os, socket, sys, threading, time
         hook_path, socket_path, stdin_text, reply = sys.argv[1], sys.argv[2], sys.argv[3], base64.b64decode(sys.argv[4])
+        reply_delay = float(sys.argv[5])
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(socket_path)
         server.listen(1)
@@ -57,8 +64,13 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
                     break
                 data += chunk
             received["payload"] = base64.b64encode(data).decode()
+            time.sleep(reply_delay)
             if reply:
-                conn.sendall(reply)
+                try:
+                    conn.sendall(reply)
+                    received["delivered"] = True
+                except OSError:
+                    received["delivered"] = False
             conn.close()
         thread = threading.Thread(target=serve)
         thread.start()
@@ -69,16 +81,19 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
         sys.stdin = io.TextIOWrapper(io.BytesIO(stdin_text.encode("utf-8")), encoding="utf-8")
         printed = io.StringIO()
         real_stdout, sys.stdout = sys.stdout, printed
+        started = time.monotonic()
         try:
             hook.main()
         finally:
             sys.stdout = real_stdout
+        seconds = time.monotonic() - started
         thread.join(6)
-        print(json.dumps({"sent": received.get("payload"), "stdout": printed.getvalue()}))
+        print(json.dumps({"sent": received.get("payload"), "stdout": printed.getvalue(),
+                          "delivered": received.get("delivered"), "seconds": seconds}))
         """
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = ["-c", driver, hookURL.path, socketPath, stdin, reply.base64EncodedString()]
+        process.arguments = ["-c", driver, hookURL.path, socketPath, stdin, reply.base64EncodedString(), String(replyDelay)]
         var environment = ProcessInfo.processInfo.environment
         environment["HOME"] = sandbox.path
         environment["CODEISLAND_SOCKET_PATH"] = socketPath
@@ -98,6 +113,8 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
         try? FileManager.default.removeItem(atPath: socketPath)
         let result = try XCTUnwrap(JSONSerialization.jsonObject(with: out) as? [String: Any])
         let sent = (result["sent"] as? String).flatMap { Data(base64Encoded: $0) }
+        lastReplyDelivered = result["delivered"] as? Bool
+        lastHookSeconds = result["seconds"] as? Double ?? 0
         return (sent, result["stdout"] as? String ?? "")
     }
 
@@ -195,6 +212,27 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
         guard case .answerNothing = HookServer.intake(try XCTUnwrap(sent)) else {
             return XCTFail("a hook with no session is dropped")
         }
+    }
+
+    /// A hook nobody waits on reads the island's reply all the same: an older
+    /// island, which accepted connections on its main thread, lost the event
+    /// of a hook that had closed before it got there. It prints nothing.
+    func testAHookNobodyWaitsOnStaysForTheIslandsReply() throws {
+        let stdin = #"{"hook_event_name":"Stop","session_id":"sess-1","cwd":"/work/proj"}"#
+        let (_, printed) = try runHook(source: "claude", stdin: stdin, reply: Data("{}".utf8), replyDelay: 0.3)
+        XCTAssertEqual(lastReplyDelivered, true, "the hook closed before the island answered")
+        XCTAssertEqual(printed, "", "nothing waits on a Stop, nothing is printed")
+    }
+
+    /// …but not for long: an island that does not answer holds the agent no
+    /// more than a couple of seconds.
+    func testAHookNobodyWaitsOnDoesNotWaitLongForTheReply() throws {
+        let stdin = #"{"hook_event_name":"Stop","session_id":"sess-1","cwd":"/work/proj"}"#
+        let (sent, printed) = try runHook(source: "claude", stdin: stdin, reply: Data("{}".utf8), replyDelay: 3.5)
+        XCTAssertNotNil(sent)
+        XCTAssertEqual(printed, "")
+        XCTAssertEqual(lastReplyDelivered, false, "the hook was still waiting after 3.5 s")
+        XCTAssertLessThan(lastHookSeconds, 3.4)
     }
 
     /// HookServer's byte probes read paths as written (`/.cursor/` sends a
