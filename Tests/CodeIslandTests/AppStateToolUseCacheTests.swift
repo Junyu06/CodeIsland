@@ -19,7 +19,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
 
         appState.handleEvent(event)
 
-        let cached = try XCTUnwrap(appState.pendingToolUses["toolu_1"])
+        let cached = try XCTUnwrap(appState.pendingToolUses[ToolUseKey(sessionId: "s1", toolUseId: "toolu_1")])
         XCTAssertEqual(cached.sessionId, "s1")
         XCTAssertEqual(cached.toolName, "Bash")
     }
@@ -27,11 +27,11 @@ final class AppStateToolUseCacheTests: XCTestCase {
     func testPostToolUseClearsCache() throws {
         let appState = AppState()
         appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_1"))
-        XCTAssertNotNil(appState.pendingToolUses["toolu_1"])
+        XCTAssertNotNil(appState.pendingToolUses[ToolUseKey(sessionId: "s1", toolUseId: "toolu_1")])
 
         appState.handleEvent(try makeHookEvent(name: "PostToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_1"))
 
-        XCTAssertNil(appState.pendingToolUses["toolu_1"])
+        XCTAssertNil(appState.pendingToolUses[ToolUseKey(sessionId: "s1", toolUseId: "toolu_1")])
     }
 
     func testPostToolUseFailureAlsoClearsCache() throws {
@@ -40,19 +40,19 @@ final class AppStateToolUseCacheTests: XCTestCase {
 
         appState.handleEvent(try makeHookEvent(name: "PostToolUseFailure", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_1"))
 
-        XCTAssertNil(appState.pendingToolUses["toolu_1"])
+        XCTAssertNil(appState.pendingToolUses[ToolUseKey(sessionId: "s1", toolUseId: "toolu_1")])
     }
 
     func testPruneRemovesExpiredRecords() throws {
         let appState = AppState()
-        appState.pendingToolUses["ancient"] = PreToolUseRecord(
+        appState.pendingToolUses[ToolUseKey(sessionId: "s1", toolUseId: "ancient")] = PreToolUseRecord(
             sessionId: "s1",
             toolName: "Bash",
             toolDescription: nil,
             toolInput: nil,
             receivedAt: Date(timeIntervalSinceNow: -(AppState.pendingToolUseTTL + 60))
         )
-        appState.pendingToolUses["fresh"] = PreToolUseRecord(
+        appState.pendingToolUses[ToolUseKey(sessionId: "s1", toolUseId: "fresh")] = PreToolUseRecord(
             sessionId: "s1",
             toolName: "Bash",
             toolDescription: nil,
@@ -62,13 +62,15 @@ final class AppStateToolUseCacheTests: XCTestCase {
 
         appState.prunePendingToolUses()
 
-        XCTAssertNil(appState.pendingToolUses["ancient"])
-        XCTAssertNotNil(appState.pendingToolUses["fresh"])
+        XCTAssertNil(appState.pendingToolUses[ToolUseKey(sessionId: "s1", toolUseId: "ancient")])
+        XCTAssertNotNil(appState.pendingToolUses[ToolUseKey(sessionId: "s1", toolUseId: "fresh")])
     }
 
     // MARK: - Duplicate PermissionRequest replay
 
-    func testDuplicatePermissionRequestReplacesContinuationAndDeniesOld() async throws {
+    /// The replaced waiter gets no decision: a replay is no answer to the
+    /// request it repeats.
+    func testDuplicatePermissionRequestReplacesContinuationAndLeavesOldUndecided() async throws {
         let appState = AppState()
         let first = try makePermissionEvent(sessionId: "s1", toolName: "Bash", toolUseId: "dup_1")
         let second = try makePermissionEvent(sessionId: "s1", toolName: "Bash", toolUseId: "dup_1")
@@ -78,9 +80,9 @@ final class AppStateToolUseCacheTests: XCTestCase {
 
         let secondTask = await startHookRequest { appState.handlePermissionRequest(second, continuation: $0) }
 
-        // The old continuation should be denied immediately; queue length stays 1.
+        // The old continuation is answered at once, deciding nothing; queue length stays 1.
         let firstResponse = try await awaitValue(of: firstTask)
-        XCTAssertEqual(try behavior(firstResponse), "deny")
+        XCTAssertEqual(firstResponse, AppState.noDecisionAnswer)
         XCTAssertEqual(appState.permissionQueue.count, 1)
 
         // Second (replacement) continuation still waits for user decision.
@@ -140,7 +142,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
         ))
 
         let response = try await awaitValue(of: responseTask)
-        XCTAssertEqual(try behavior(response), "deny")
+        XCTAssertEqual(response, AppState.noDecisionAnswer)
         XCTAssertEqual(appState.permissionQueue.count, 0)
     }
 
@@ -161,7 +163,7 @@ final class AppStateToolUseCacheTests: XCTestCase {
         ))
 
         let drainedResponse = try await awaitValue(of: drainedTask)
-        XCTAssertEqual(try behavior(drainedResponse), "deny")
+        XCTAssertEqual(drainedResponse, AppState.noDecisionAnswer)
         XCTAssertEqual(appState.permissionQueue.count, 1)
         XCTAssertEqual(appState.permissionQueue.first?.toolUseId, "keep_me")
 

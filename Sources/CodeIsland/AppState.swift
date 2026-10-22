@@ -108,10 +108,10 @@ final class AppState {
             recentHookEvents.removeFirst(recentHookEvents.count - maxRecentHookEvents)
         }
     }
-    /// Cache of in-flight PreToolUse records keyed by tool_use_id. Used to correlate
+    /// Cache of in-flight PreToolUse records keyed by card and tool_use_id. Used to correlate
     /// permission requests back to their originating tool call. See AppState+ToolUseCache.
     @ObservationIgnored
-    var pendingToolUses: [String: PreToolUseRecord] = [:]
+    var pendingToolUses: [ToolUseKey: PreToolUseRecord] = [:]
     /// Records the transcript path currently watched for each session so we only
     /// reattach when the path actually changes. See AppState+TranscriptTailer.
     @ObservationIgnored

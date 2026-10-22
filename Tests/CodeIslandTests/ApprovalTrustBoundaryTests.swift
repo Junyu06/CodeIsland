@@ -211,6 +211,100 @@ final class ApprovalTrustBoundaryTests: XCTestCase {
         XCTAssertEqual(appState.surface, .collapsed)
     }
 
+    // MARK: - A tool_use_id names a request only within its card
+
+    /// A local request, and a step from another host — as HookOrigin stamps
+    /// one from host-1's socket — that carries the same tool_use_id. Agents
+    /// mint these ids, and a host can send any it likes: the step must not
+    /// reach the local request. Its own card's step still does.
+    func testARemoteHostsStepNeverReachesALocalRequestByItsToolUseId() async throws {
+        let appState = AppState()
+        let local = try event([
+            "hook_event_name": "PermissionRequest", "session_id": "local-s", "_source": "opencode",
+            "tool_name": "Bash", "tool_use_id": "call_1", "tool_input": ["command": "make release"],
+        ])
+        let response = await startHookRequest { appState.handlePermissionRequest(local, continuation: $0) }
+
+        for name in ["PostToolUse", "PostToolUseFailure", "PermissionDenied"] {
+            appState.handleEvent(try event([
+                "hook_event_name": name, "session_id": "anything",
+                "_remote_host_id": "host-1", "_remote_host_name": "Box",
+                "tool_name": "Bash", "tool_use_id": "call_1",
+            ]))
+        }
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        await assertStillPending(response, "another host's step reached a local request")
+
+        appState.handleEvent(try event([
+            "hook_event_name": "PostToolUse", "session_id": "local-s", "_source": "opencode",
+            "tool_name": "Bash", "tool_use_id": "call_1",
+        ]))
+        let answer = try await awaitValue(of: response)
+        XCTAssertNil(try decidedBehavior(answer), "its own call finishing drops it, deciding nothing")
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+    }
+
+    /// A remote request copying a local one — tool_use_id and input — is a
+    /// request of its own, not a replay: it neither answers the local waiter
+    /// nor takes over its card, and the user's answer on each card reaches
+    /// that card's hook.
+    func testARemoteReplayNeverTakesOverALocalRequestsCard() async throws {
+        let appState = AppState()
+        let input: [String: Any] = ["command": "make release"]
+        let local = try event([
+            "hook_event_name": "PermissionRequest", "session_id": "local-s", "_source": "opencode",
+            "tool_name": "Bash", "tool_use_id": "call_1", "tool_input": input,
+        ])
+        let remote = try event([
+            "hook_event_name": "PermissionRequest", "session_id": "evil", "_source": "opencode",
+            "_remote_host_id": "host-1", "_remote_host_name": "Box",
+            "tool_name": "Bash", "tool_use_id": "call_1", "tool_input": input,
+        ])
+        let localResponse = await startHookRequest { appState.handlePermissionRequest(local, continuation: $0) }
+        let remoteResponse = await startHookRequest { appState.handlePermissionRequest(remote, continuation: $0) }
+
+        XCTAssertEqual(appState.permissionQueue.map(\.event.sessionId), ["local-s", "remote:host-1:evil"])
+        await assertStillPending(localResponse, "the remote copy answered the local hook")
+
+        appState.approvePermission(expectedSessionId: "local-s")
+        let localAnswer = try await awaitValue(of: localResponse)
+        XCTAssertEqual(try behavior(localAnswer), "allow", "the user's Allow went to the local hook")
+        await assertStillPending(remoteResponse)
+
+        appState.denyPermission(expectedSessionId: "remote:host-1:evil")
+        let remoteAnswer = try await awaitValue(of: remoteResponse)
+        XCTAssertEqual(try behavior(remoteAnswer), "deny")
+    }
+
+    /// The PreToolUse cache is per card too: another host's PreToolUse never
+    /// describes a local request that arrives thin, and another host's
+    /// PostToolUse never clears a local call's record.
+    func testARemoteHostsToolStepsNeverTouchALocalCallsRecord() async throws {
+        let appState = AppState()
+        appState.handleEvent(try event([
+            "hook_event_name": "PreToolUse", "session_id": "evil",
+            "_remote_host_id": "host-1", "_remote_host_name": "Box",
+            "tool_name": "Read", "tool_use_id": "toolu_x", "tool_input": ["file_path": "/home/b/notes.txt"],
+        ]))
+        appState.handleEvent(try event([
+            "hook_event_name": "PreToolUse", "session_id": "local-s",
+            "tool_name": "Bash", "tool_use_id": "toolu_y", "tool_input": ["command": "ls"],
+        ]))
+        appState.handleEvent(try event([
+            "hook_event_name": "PostToolUse", "session_id": "evil",
+            "_remote_host_id": "host-1", "_remote_host_name": "Box",
+            "tool_name": "Bash", "tool_use_id": "toolu_y",
+        ]))
+        XCTAssertNotNil(appState.pendingToolUses[ToolUseKey(sessionId: "local-s", toolUseId: "toolu_y")])
+
+        let thin = try event(["hook_event_name": "PermissionRequest", "session_id": "local-s", "tool_use_id": "toolu_x"])
+        let response = await startHookRequest { appState.handlePermissionRequest(thin, continuation: $0) }
+        XCTAssertNil(appState.sessions["local-s"]?.currentTool, "another host's PreToolUse described a local request")
+
+        appState.denyPermission(expectedSessionId: "local-s")
+        _ = try await awaitValue(of: response)
+    }
+
     // MARK: - A host's socket: one connection never answers another's request
 
     private var socketPath: String?

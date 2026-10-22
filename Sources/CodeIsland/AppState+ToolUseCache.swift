@@ -4,19 +4,47 @@ import CodeIslandCore
 
 private let log = Logger(subsystem: "com.codeisland", category: "PermissionDeny")
 
-/// Cached metadata for an in-flight tool_use_id, written on PreToolUse and consumed by
-/// downstream PermissionRequest / PostToolUse events.
+/// Cached metadata for an in-flight tool call (``ToolUseKey``), written on PreToolUse and
+/// consumed by downstream PermissionRequest / PostToolUse events of the same card.
 ///
 /// This lets us (1) correlate PermissionRequest payloads back to the originating tool
 /// invocation even when some providers strip fields on re-emit, (2) drain stale queue
 /// entries when the agent moved on (PostToolUse arrives while a PermissionRequest for
-/// the same id is still queued), and (3) dedupe duplicate PermissionRequest replays.
+/// the same call is still queued), and (3) dedupe duplicate PermissionRequest replays.
 struct PreToolUseRecord {
     let sessionId: String
     let toolName: String?
     let toolDescription: String?
     let toolInput: [String: Any]?
     let receivedAt: Date
+}
+
+/// A tool call, named by the card it is filed under and the id its agent gave it.
+///
+/// Agents mint their own tool_use_ids, and another host's agent — or a process
+/// there passing itself off as one — can put any id it likes in a hook. An id
+/// alone must never reach another card's request: to drop it, to take its card
+/// over with a replay, or to catch the user's answer to it. The card session id
+/// carries the host (`remote:<host>:…`), so two hosts never share a key.
+struct ToolUseKey: Hashable {
+    let sessionId: String
+    let toolUseId: String
+
+    init(sessionId: String, toolUseId: String) {
+        self.sessionId = sessionId
+        self.toolUseId = toolUseId
+    }
+
+    /// The event's tool call; nil when it carries no tool_use_id.
+    init?(_ event: HookEvent) {
+        guard let toolUseId = event.toolUseId, !toolUseId.isEmpty else { return nil }
+        self.init(sessionId: event.sessionId ?? "default", toolUseId: toolUseId)
+    }
+}
+
+extension PermissionRequest {
+    /// The tool call this request is for; nil when its agent sent no tool_use_id.
+    var toolUseKey: ToolUseKey? { ToolUseKey(event) }
 }
 
 extension AppState {
@@ -44,14 +72,15 @@ extension AppState {
     ///   request, and Antigravity's `PreToolUse` is answered `ask` at the edge.
     nonisolated static let noDecisionAnswer = Data("{}".utf8)
 
-    /// Cache a PreToolUse so later PermissionRequest / PostToolUse events carrying the
-    /// same tool_use_id can be correlated back to the originating invocation.
+    /// Cache a PreToolUse so later PermissionRequest / PostToolUse events of the
+    /// same card carrying the same tool_use_id can be correlated back to the
+    /// originating invocation.
     func cachePreToolUseIfApplicable(_ event: HookEvent) {
         guard EventNormalizer.normalize(event.eventName) == "PreToolUse" else { return }
-        guard let toolUseId = event.toolUseId, !toolUseId.isEmpty else { return }
+        guard let key = ToolUseKey(event) else { return }
 
-        pendingToolUses[toolUseId] = PreToolUseRecord(
-            sessionId: event.sessionId ?? "default",
+        pendingToolUses[key] = PreToolUseRecord(
+            sessionId: key.sessionId,
             toolName: event.activityLabel,
             toolDescription: event.toolDescription,
             toolInput: event.toolInput,
@@ -60,42 +89,29 @@ extension AppState {
     }
 
     /// Drop cache entries for a completed tool invocation. If a PermissionRequest for the
-    /// same id is still sitting in the queue (e.g. agent moved on after a local timeout),
-    /// drain it with a deny so we don't hold the UI hostage to a dead waiter.
+    /// same call is still sitting in the queue (e.g. agent moved on after a local timeout),
+    /// drop it, with no decision, so we don't hold the UI hostage to a dead waiter.
+    /// Only the request's own card names that call (``ToolUseKey``).
     func resolveToolUseIfCompleted(_ event: HookEvent) {
         let normalized = EventNormalizer.normalize(event.eventName)
         guard normalized == "PostToolUse"
                 || normalized == "PostToolUseFailure"
                 || normalized == "PermissionDenied"
         else { return }
-        guard let toolUseId = event.toolUseId, !toolUseId.isEmpty else { return }
+        guard let key = ToolUseKey(event) else { return }
 
-        pendingToolUses.removeValue(forKey: toolUseId)
+        pendingToolUses.removeValue(forKey: key)
 
-        guard let staleIndex = permissionQueue.firstIndex(where: { $0.toolUseId == toolUseId })
+        guard let staleIndex = permissionQueue.firstIndex(where: { $0.toolUseKey == key })
         else { return }
 
-        if shouldKeepQueuedPermissionForCompletedEvent(event, normalizedEventName: normalized) {
+        if shouldKeepQueuedPermissionForCompletedEvent(
+            event, queued: permissionQueue[staleIndex], normalizedEventName: normalized
+        ) {
             return
         }
 
-        let stale = permissionQueue.remove(at: staleIndex)
-        log.notice("⚠️ permission deny reason=resolveToolUseIfCompleted session=\(stale.event.sessionId ?? "nil", privacy: .public) toolUseId=\(toolUseId, privacy: .public) tool=\(stale.event.toolName ?? "nil", privacy: .public) triggerEvent=\(normalized, privacy: .public)")
-        let denyBody = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#
-        stale.continuation.resume(returning: Data(denyBody.utf8))
-
-        // If the card we were showing was the drained one, advance to the next pending
-        // request (or collapse if nothing is left).
-        let wasHead = staleIndex == 0
-        if wasHead {
-            if permissionQueue.isEmpty {
-                if case .approvalCard = surface {
-                    surface = .collapsed
-                }
-            } else {
-                showNextPending()
-            }
-        }
+        dropPermissionsTheirAgentGotPast(at: [staleIndex], reason: "resolveToolUseIfCompleted", triggerEvent: normalized)
     }
 
     /// What shows an agent got past a request it asked: a tool step of its
@@ -188,15 +204,19 @@ extension AppState {
     }
 
     /// Try to merge this permission request into an existing queue entry for the same
-    /// tool_use_id. Returns true when the new arrival was treated as a replay and its
-    /// continuation has already been resolved (caller must not enqueue).
+    /// tool call — same card, same tool_use_id (``ToolUseKey``). Returns true when the
+    /// new arrival was treated as a replay and its continuation has already been
+    /// resolved (caller must not enqueue).
     ///
     /// Behavior: the newer continuation replaces the queued one in-place. The older
-    /// continuation is denied so Claude's prior waiter doesn't hang; the queue slot and
-    /// its position remain the same so the visible card doesn't reshuffle under the user.
+    /// continuation is answered with no decision so the prior waiter doesn't hang —
+    /// a replay is no answer to the request it repeats, and where an agent folds
+    /// several hooks' answers (Codex: any deny wins) a deny here would outvote the
+    /// user's answer to the new waiter. The queue slot and its position remain the
+    /// same so the visible card doesn't reshuffle under the user.
     func mergeDuplicatePermissionRequest(_ request: PermissionRequest) -> Bool {
-        guard let toolUseId = request.toolUseId, !toolUseId.isEmpty else { return false }
-        guard let existingIndex = permissionQueue.firstIndex(where: { $0.toolUseId == toolUseId })
+        guard let key = request.toolUseKey else { return false }
+        guard let existingIndex = permissionQueue.firstIndex(where: { $0.toolUseKey == key })
         else { return false }
 
         let existing = permissionQueue[existingIndex]
@@ -204,16 +224,15 @@ extension AppState {
         // Claude Code can emit several *parallel* tool calls (e.g. reading 4
         // files at once); if they carry the same id but different inputs they are
         // distinct requests and each needs its own decision. Treat it as a replay
-        // — deny the old waiter, keep the new one in place — only when the tool
+        // — answer the old waiter, keep the new one in place — only when the tool
         // inputs match. Otherwise let the new request enqueue on its own.
         let existingInput = existing.event.toolInput ?? [:]
         let newInput = request.event.toolInput ?? [:]
         guard NSDictionary(dictionary: existingInput).isEqual(to: NSDictionary(dictionary: newInput)) else {
             return false
         }
-        log.notice("⚠️ permission deny reason=mergeDuplicatePermissionRequest session=\(existing.event.sessionId ?? "nil", privacy: .public) toolUseId=\(toolUseId, privacy: .public) tool=\(existing.event.toolName ?? "nil", privacy: .public)")
-        let denyBody = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#
-        existing.continuation.resume(returning: Data(denyBody.utf8))
+        log.notice("⚠️ permission replayed, old waiter gets no decision reason=mergeDuplicatePermissionRequest session=\(key.sessionId, privacy: .public) toolUseId=\(key.toolUseId, privacy: .public) tool=\(existing.event.toolName ?? "nil", privacy: .public)")
+        existing.continuation.resume(returning: Self.noDecisionAnswer)
         // Same request, new waiter: it keeps its identity, so its reminders
         // and the card showing it carry on rather than starting over. It now
         // goes with the new waiter's hook; the old one has its answer.
@@ -226,12 +245,15 @@ extension AppState {
         return true
     }
 
-    func shouldKeepQueuedPermissionForCompletedEvent(_ event: HookEvent, normalizedEventName: String) -> Bool {
+    func shouldKeepQueuedPermissionForCompletedEvent(
+        _ event: HookEvent,
+        queued: PermissionRequest,
+        normalizedEventName: String
+    ) -> Bool {
         guard normalizedEventName != "PermissionDenied" else { return false }
 
         let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String)
-            ?? permissionQueue.first(where: { $0.toolUseId == event.toolUseId })
-                .flatMap { SessionSnapshot.normalizedSupportedSource($0.event.rawJSON["_source"] as? String) }
+            ?? SessionSnapshot.normalizedSupportedSource(queued.event.rawJSON["_source"] as? String)
 
         switch source {
         case "trae", "traecn", "traecli":
@@ -245,8 +267,7 @@ extension AppState {
     /// payload is missing fields (observed with some third-party CLIs that re-emit
     /// permission events without replaying the tool input).
     func enrichPermissionRequestFromCache(sessionId: String, event: HookEvent) {
-        guard let toolUseId = event.toolUseId, !toolUseId.isEmpty else { return }
-        guard let record = pendingToolUses[toolUseId] else { return }
+        guard let key = ToolUseKey(event), let record = pendingToolUses[key] else { return }
 
         if sessions[sessionId]?.currentTool == nil, let name = record.toolName {
             sessions[sessionId]?.currentTool = name
