@@ -524,13 +524,13 @@ final class AppState {
         return ids
     }
 
-    var rotatingSessionId: String?
+    /// The compact bar's mascot rotation through the active sessions.
+    let rotation = CompactBarRotation()
+    var rotatingSessionId: String? { rotation.rotatingSessionId }
     var rotatingSession: SessionSnapshot? {
         guard let rid = rotatingSessionId else { return nil }
         return sessions[rid]
     }
-    @ObservationIgnored
-    nonisolated(unsafe) private var rotationTimer: Timer?
 
     private func startCleanupTimer() {
         guard cleanupTimer == nil else { return }
@@ -1115,80 +1115,13 @@ final class AppState {
 
     // MARK: - Compact bar mascot rotation
 
-    /// Cached sorted active session IDs — refreshed by refreshActiveIds()
-    private var cachedActiveIds: [String] = []
-
-    private func refreshActiveIds() {
-        cachedActiveIds = sessions
-            .filter { $0.value.status != .idle }
-            .sorted { a, b in
-                let pa = statusPriority(a.value.status)
-                let pb = statusPriority(b.value.status)
-                if pa != pb { return pa > pb }
-                // Same priority — most recently active first
-                return a.value.lastActivity > b.value.lastActivity
-            }
-            .map(\.key)
-    }
-
-    /// Higher = more urgent, shown first in rotation
-    private func statusPriority(_ status: AgentStatus) -> Int {
-        switch status {
-        case .waitingApproval: return 5
-        case .waitingQuestion: return 4
-        case .running:         return 3
-        case .processing:      return 2
-        case .idle:            return 0
-        }
-    }
-
     private func startRotationIfNeeded() {
-        refreshActiveIds()
-        if cachedActiveIds.count > 1 {
-            // If the most urgent session changed, snap to it immediately
-            if let top = cachedActiveIds.first, top != rotatingSessionId {
-                let topStatus = sessions[top]?.status ?? .idle
-                let currentStatus = rotatingSessionId.flatMap { sessions[$0]?.status } ?? .idle
-                if statusPriority(topStatus) > statusPriority(currentStatus) {
-                    rotatingSessionId = top
-                }
-            }
-            if rotatingSessionId == nil || !cachedActiveIds.contains(rotatingSessionId!) {
-                rotatingSessionId = cachedActiveIds.first
-            }
-            if rotationTimer == nil {
-                let interval = TimeInterval(max(1, SettingsManager.shared.rotationInterval))
-                rotationTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-                    Task { @MainActor in
-                        self?.rotateToNextSession()
-                    }
-                }
-            }
-        } else {
-            rotationTimer?.invalidate()
-            rotationTimer = nil
-            rotatingSessionId = nil
-            // When rotation stops, ensure activeSessionId points to the remaining
-            // active session (if any) so the collapsed bar doesn't stick on an idle one.
-            if let active = cachedActiveIds.first,
-               activeSessionId != active {
-                activeSessionId = active
-            }
+        // When rotation stops, ensure activeSessionId points to the remaining
+        // active session (if any) so the collapsed bar doesn't stick on an idle one.
+        if let active = rotation.update(sessions: sessions),
+           activeSessionId != active {
+            activeSessionId = active
         }
-    }
-
-    private func rotateToNextSession() {
-        guard cachedActiveIds.count > 1 else {
-            rotatingSessionId = nil
-            return
-        }
-        if let current = rotatingSessionId, let idx = cachedActiveIds.firstIndex(of: current) {
-            rotatingSessionId = cachedActiveIds[(idx + 1) % cachedActiveIds.count]
-        } else {
-            rotatingSessionId = cachedActiveIds.first
-        }
-        ESP32StatePublisher.shared.notifyDirty()
-        AppleCompanionPublisher.shared.notifyDirty()
     }
 
     /// Start monitoring the CLI process for a session.
@@ -3178,8 +3111,8 @@ final class AppState {
     private func mostActiveSessionId() -> String? {
         // Pick the most urgent session: highest status priority, then most recent activity
         sessions.max { a, b in
-            let pa = statusPriority(a.value.status)
-            let pb = statusPriority(b.value.status)
+            let pa = CompactBarRotation.statusPriority(a.value.status)
+            let pb = CompactBarRotation.statusPriority(b.value.status)
             if pa != pb { return pa < pb }
             return a.value.lastActivity < b.value.lastActivity
         }?.key
@@ -5130,8 +5063,7 @@ final class AppState {
 
     func stopSessionDiscovery() {
         tearDownProjectsWatcher()
-        rotationTimer?.invalidate()
-        rotationTimer = nil
+        rotation.stopTimer()
         cleanupTimer?.invalidate()
         cleanupTimer = nil
         saveTimer?.invalidate()
@@ -5198,8 +5130,7 @@ final class AppState {
     /// hop. Safe from any thread so `deinit` stays uniformly main-safe.
     nonisolated private func tearDownMainThreadResources() {
         let teardown = { [self] in
-            rotationTimer?.invalidate()
-            rotationTimer = nil
+            rotation.tearDownAssumingMain()
             cleanupTimer?.invalidate()
             cleanupTimer = nil
             saveTimer?.invalidate()
