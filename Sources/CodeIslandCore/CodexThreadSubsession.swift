@@ -152,9 +152,10 @@ public enum CodexThreadSubsession {
 
         let childCardId = HookEvent.cardSessionId(forRawSessionId: sessionId, in: raw)
         let termBundleId = raw["_term_bundle"] as? String
+        let remoteHostId = SubsessionRouter.remoteHostId(in: raw)
         // A remote thread's rollout lives on its own host.
         let inspection: CodexTranscriptSubagentInspection
-        if !isRemote(raw), let path = SubsessionRouter.transcriptPath(in: raw) {
+        if remoteHostId == nil, let path = SubsessionRouter.transcriptPath(in: raw) {
             inspection = context.codexRolloutInspection(transcriptPath: path)
         } else {
             inspection = .unavailable
@@ -205,6 +206,7 @@ public enum CodexThreadSubsession {
             parentCardId = SubsessionCards.samePidCard(
                 source: "codex",
                 ppid: ppid,
+                remoteHostId: remoteHostId,
                 excluding: childCardId,
                 requireActive: agentId == nil,
                 in: context.cards,
@@ -228,10 +230,5 @@ public enum CodexThreadSubsession {
             // sign this thread is a child at all.
             isInferred: metadata == nil
         )
-    }
-
-    private static func isRemote(_ raw: [String: Any]) -> Bool {
-        guard let host = raw["_remote_host_id"] as? String else { return false }
-        return !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }

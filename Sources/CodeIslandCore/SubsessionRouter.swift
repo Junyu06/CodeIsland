@@ -299,8 +299,7 @@ public enum SubsessionRouter {
     /// The `session_id` that makes this payload file under `cardId`, if any.
     static func payloadSessionId(addressing cardId: String, in raw: [String: Any]) -> String? {
         var candidate = cardId
-        if let host = raw["_remote_host_id"] as? String,
-           !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if let host = remoteHostId(in: raw) {
             let prefix = "remote:\(host):"
             guard cardId.hasPrefix(prefix) else { return nil }
             candidate = String(cardId.dropFirst(prefix.count))
@@ -329,6 +328,16 @@ public enum SubsessionRouter {
 
     public static func sessionId(in raw: [String: Any]) -> String? {
         nonEmptyString(raw["session_id"]) ?? nonEmptyString(raw["sessionId"])
+    }
+
+    /// The remote host the hook came from (`_remote_host_id`); nil for this
+    /// Mac.
+    public static func remoteHostId(in raw: [String: Any]) -> String? {
+        guard let host = raw["_remote_host_id"] as? String,
+              !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return host
     }
 
     public static func transcriptPath(in raw: [String: Any]) -> String? {
@@ -382,6 +391,7 @@ public enum PluginProxySubsession {
             parentCardId = SubsessionCards.samePidCard(
                 source: source,
                 ppid: ppid,
+                remoteHostId: SubsessionRouter.remoteHostId(in: raw),
                 excluding: childCardId,
                 in: context.cards,
                 now: now

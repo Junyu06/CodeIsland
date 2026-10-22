@@ -167,8 +167,10 @@ public enum SubsessionCards {
         })?.key
     }
 
-    /// A card whose source matches and whose CLI PID is `ppid`: the session
-    /// a plugin proxy's or a Codex thread's process belongs to (#123).
+    /// A card whose source matches and whose CLI PID is `ppid`, on the
+    /// machine the hook came from (`remoteHostId`, nil for this Mac): the
+    /// session a plugin proxy's or a Codex thread's process belongs to (#123).
+    /// A process id means nothing on another host.
     ///
     /// The candidate must have been active in the last five minutes. This
     /// guards against macOS PID reuse — a stale session whose CLI long since
@@ -179,6 +181,7 @@ public enum SubsessionCards {
     public static func samePidCard(
         source: String,
         ppid: Int,
+        remoteHostId: String?,
         excluding excludedCardId: String? = nil,
         requireActive: Bool = false,
         in cards: [String: SessionSnapshot],
@@ -193,6 +196,7 @@ public enum SubsessionCards {
                 let snapSource = SessionSnapshot.normalizedSupportedSource(snap.source)
                 return snapSource == normalized
                     && snap.cliPid == pid
+                    && isCard(cardId, onHost: remoteHostId)
                     && snap.lastActivity >= cutoff
                     && cardId != excludedCardId
                     && (!requireActive || snap.status != .idle)
@@ -204,6 +208,14 @@ public enum SubsessionCards {
                 return lhs.value.startTime < rhs.value.startTime
             }
             .first?.key
+    }
+
+    /// Whether the card is a session of the machine a hook from
+    /// `remoteHostId` came from (nil: this Mac). A remote session's card is
+    /// filed under its host (``HookEvent/cardSessionId(forRawSessionId:in:)``).
+    public static func isCard(_ cardId: String, onHost remoteHostId: String?) -> Bool {
+        guard let remoteHostId else { return !cardId.hasPrefix("remote:") }
+        return cardId.hasPrefix("remote:\(remoteHostId):")
     }
 
     /// A Codex parent in the same Desktop/CLI namespace as its child. Raw

@@ -278,6 +278,7 @@ public enum CursorSubsessionRouter {
             if let match = uniqueActiveSamePidCursorSession(
                 source: src,
                 ppid: ppid,
+                remoteHostId: SubsessionRouter.remoteHostId(in: raw),
                 excluding: childSessionId,
                 activeSince: cutoff,
                 in: cards
@@ -293,6 +294,7 @@ public enum CursorSubsessionRouter {
     private static func uniqueActiveSamePidCursorSession(
         source: String,
         ppid: Int,
+        remoteHostId: String?,
         excluding excludedSessionId: String,
         activeSince cutoff: Date,
         in cards: [String: SessionSnapshot]
@@ -304,6 +306,7 @@ public enum CursorSubsessionRouter {
                 let snapSource = SessionSnapshot.normalizedSupportedSource(snap.source)
                 guard snapSource == normalized,
                       snap.cliPid == pid,
+                      SubsessionCards.isCard(sessionId, onHost: remoteHostId),
                       sessionId != excludedSessionId else {
                     return nil
                 }

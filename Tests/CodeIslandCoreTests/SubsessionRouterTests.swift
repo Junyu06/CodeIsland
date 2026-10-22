@@ -128,6 +128,34 @@ final class SubsessionRouterTests: XCTestCase {
         XCTAssertEqual(try placement(codexThread(), .hide, context), .hidden)
     }
 
+    func testSharedProcessIsGuessedOnlyOnTheHooksOwnHost() throws {
+        // A process id means nothing on another machine.
+        var remoteParent = subsessionCard(source: "codex", status: .running, cliPid: 7070)
+        remoteParent.remoteHostId = "devbox"
+        let context = StubSubsessionContext(cards: [
+            parent: subsessionCard(source: "codex", status: .running, cliPid: 7070),
+            "remote:devbox:remote-parent": remoteParent,
+        ])
+        func remote(_ host: String, _ raw: [String: Any]) -> [String: Any] {
+            raw.merging(["_remote_host_id": host]) { _, new in new }
+        }
+        XCTAssertEqual(try link(codexThread(), context).parentCardId, parent)
+        XCTAssertEqual(try link(remote("devbox", codexThread()), context).parentCardId, "remote:devbox:remote-parent")
+        XCTAssertNil(SubsessionRouter.link(in: remote("other-box", codexThread()), context: context), "nobody's child")
+
+        var opencode = subsessionCard(source: "opencode", status: .running, cliPid: 9090)
+        opencode.remoteHostId = "devbox"
+        let proxies = StubSubsessionContext(cards: ["remote:devbox:opencode-main": opencode])
+        XCTAssertNil(try link(pluginProxy(), proxies).parentCardId)
+        XCTAssertEqual(try link(remote("devbox", pluginProxy()), proxies).parentCardId, "remote:devbox:opencode-main")
+
+        var chat = subsessionCard(source: "cursor", status: .running, transcriptPath: cursorTranscript, cliPid: 4242)
+        chat.providerSessionId = cursorChat
+        let cursor = StubSubsessionContext(cards: [cursorChat: chat])
+        XCTAssertNil(SubsessionRouter.link(in: remote("devbox", cursorByProcess()), context: cursor))
+        XCTAssertEqual(try link(cursorByProcess(), cursor).parentCardId, cursorChat)
+    }
+
     func testCodexThreadCodexFiledUnderItsParentInEveryMode() throws {
         var root = subsessionCard(source: "codex")
         let context = StubSubsessionContext(cards: [parent: root])
@@ -417,8 +445,8 @@ final class SubsessionRouterTests: XCTestCase {
             ], context: context), source)
         }
         // Nor does the public lookup trap on one handed to it.
-        XCTAssertNil(SubsessionCards.samePidCard(source: "codex", ppid: 9_999_999_999, in: context.cards))
-        XCTAssertEqual(SubsessionCards.samePidCard(source: "codex", ppid: 4242, in: context.cards), parent)
+        XCTAssertNil(SubsessionCards.samePidCard(source: "codex", ppid: 9_999_999_999, remoteHostId: nil, in: context.cards))
+        XCTAssertEqual(SubsessionCards.samePidCard(source: "codex", ppid: 4242, remoteHostId: nil, in: context.cards), parent)
     }
 
     func testUnknownSettingReadsAsShowSeparately() {

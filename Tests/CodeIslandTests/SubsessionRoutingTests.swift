@@ -201,6 +201,26 @@ final class SubsessionRoutingTests: XCTestCase {
         XCTAssertEqual(merged.sessionId, parentThread)
     }
 
+    /// A remote Codex root whose remote `_ppid` equals a local Codex card's
+    /// process was guessed to be that card's child — by a process id from
+    /// another machine — and landed on a linked, quiet card.
+    func testRemoteRootSharingALocalProcessIdIsNobodysChild() throws {
+        setMode("merge")
+        let pid = Int(getpid())
+        let appState = AppState()
+        let server = HookServer(appState: appState)
+        let localPath = try writeRollout("local.jsonl", sessionMeta: rootRollout(parentThread))
+        try deliver(codex("UserPromptSubmit", thread: parentThread, transcript: localPath, ["prompt": "x", "_ppid": pid]), to: appState, server: server)
+
+        let remote = try deliver(codex("UserPromptSubmit", thread: "remote-root", transcript: "/home/u/.codex/sessions/r.jsonl", [
+            "prompt": "y", "_ppid": pid, "_remote_host_id": "devbox",
+        ]), to: appState, server: server)
+        XCTAssertEqual(remote.sessionId, "remote-root")
+        XCTAssertNil(remote.raw["agent_id"])
+        XCTAssertNil(remote.raw[SubsessionRouter.linkedParentKey])
+        XCTAssertNil(appState.sessions["remote:devbox:remote-root"]?.parentSessionId)
+    }
+
     // MARK: - Codex: a child stays where it is
 
     func testCodexChildThatStartedOnItsOwnCardKeepsItInMerge() throws {

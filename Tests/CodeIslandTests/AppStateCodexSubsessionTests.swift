@@ -887,7 +887,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         appState.sessions["child"] = child
 
         XCTAssertEqual(
-            SubsessionCards.samePidCard(source: "codex", ppid: 1234, excluding: "child", requireActive: true, in: appState.sessions),
+            SubsessionCards.samePidCard(source: "codex", ppid: 1234, remoteHostId: nil, excluding: "child", requireActive: true, in: appState.sessions),
             "parent"
         )
     }
@@ -904,7 +904,7 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         appState.sessions["idle"] = idle
 
         XCTAssertNil(
-            SubsessionCards.samePidCard(source: "codex", ppid: 1234, excluding: "new-thread", requireActive: true, in: appState.sessions)
+            SubsessionCards.samePidCard(source: "codex", ppid: 1234, remoteHostId: nil, excluding: "new-thread", requireActive: true, in: appState.sessions)
         )
     }
 
