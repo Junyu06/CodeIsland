@@ -1654,7 +1654,7 @@ private func applyHookEvent(
             effects.append(.tryMonitorSession(sessionId: sessionId))
         }
     case "SessionEnd":
-        // Side effect: AppState handles pending permission deny before removal
+        // Side effect: AppState drops the session's pending requests, undecided, before removal
         effects.append(.removeSession(sessionId: sessionId))
         return effects
     case "Notification":

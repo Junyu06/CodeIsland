@@ -118,8 +118,8 @@ final class AppStatePermissionFlowTests: XCTestCase {
         let responseA = try await awaitValue(of: responseTaskA)
         let responseB = try await awaitValue(of: responseTaskB)
 
-        XCTAssertEqual(try extractPermissionBehavior(from: responseA), "deny")
-        XCTAssertEqual(try extractPermissionBehavior(from: responseB), "deny")
+        XCTAssertEqual(responseA, AppState.noDecisionAnswer)
+        XCTAssertEqual(responseB, AppState.noDecisionAnswer)
         XCTAssertEqual(appState.permissionQueue.count, 0)
     }
 
@@ -144,7 +144,7 @@ final class AppStatePermissionFlowTests: XCTestCase {
 
         appState.handlePeerDisconnect(sessionId: sessionId)
         let response = try await awaitValue(of: responseTask)
-        XCTAssertEqual(try extractPermissionBehavior(from: response), "deny")
+        XCTAssertEqual(response, AppState.noDecisionAnswer)
     }
 
     func testDismissedSessionGetsShownAgainWhenNewPermissionArrivesAfterDrain() async throws {
@@ -159,7 +159,7 @@ final class AppStatePermissionFlowTests: XCTestCase {
 
         appState.handlePeerDisconnect(sessionId: sessionId)
         let firstResponse = try await awaitValue(of: firstResponseTask)
-        XCTAssertEqual(try extractPermissionBehavior(from: firstResponse), "deny")
+        XCTAssertEqual(firstResponse, AppState.noDecisionAnswer)
         XCTAssertEqual(appState.permissionQueue.count, 0)
 
         let secondEvent = try makePermissionRequestEvent(sessionId: sessionId, toolName: "Write")

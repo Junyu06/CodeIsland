@@ -27,8 +27,9 @@ extension AppState {
     /// The answer to a held request that decides nothing.
     ///
     /// The island answers for the user only when the user answers. A request
-    /// it takes off the queue because its agent got past it gets this, and
-    /// the agent goes on as it would without the island:
+    /// it takes off the queue for any other reason — its agent got past it,
+    /// its session ended — gets this, and the agent goes on as it would
+    /// without the island:
     /// - Claude Code, Codex and the Claude-format hooks (Qoder, CodeBuddy,
     ///   Trae, custom CLIs) find no `hookSpecificOutput.decision` and keep to
     ///   their own approval prompt; ZCode, whose schema is strict, falls back

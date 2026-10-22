@@ -2775,20 +2775,24 @@ final class AppState {
         refreshDerivedState()
     }
 
-    /// Drain queued permissions for a specific session, resuming their continuations with deny.
-    /// `matches` narrows the drain by the request's event — background subagents share the
-    /// parent's session_id, so callers reacting to one agent pass an agent_id filter.
+    /// Drain queued permissions for a specific session, answering each with no
+    /// decision (``noDecisionAnswer``). The session ending, or its agent asking
+    /// something else, says nothing of what the user would choose — and on a
+    /// host whose agents run as other users, any of them can send the
+    /// SessionEnd: a drain must not decide someone else's request, deny
+    /// included. `matches` narrows the drain by the request's event —
+    /// background subagents share the parent's session_id, so callers reacting
+    /// to one agent pass an agent_id filter.
     private func drainPermissions(
         forSession sessionId: String,
         reason: String = "unknown",
         where matches: (HookEvent) -> Bool = { _ in true }
     ) {
         dismissedPermissionSessionIds.remove(sessionId)
-        let denyResponse = Data(#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8)
         permissionQueue.removeAll { item in
             guard item.event.sessionId == sessionId, matches(item.event) else { return false }
-            log.notice("⚠️ permission deny reason=drainPermissions(\(reason, privacy: .public)) session=\(sessionId, privacy: .public) toolUseId=\(item.toolUseId ?? "nil", privacy: .public) tool=\(item.event.toolName ?? "nil", privacy: .public)")
-            item.continuation.resume(returning: denyResponse)
+            log.notice("⚠️ permission dropped, no decision reason=drainPermissions(\(reason, privacy: .public)) session=\(sessionId, privacy: .public) toolUseId=\(item.toolUseId ?? "nil", privacy: .public) tool=\(item.event.toolName ?? "nil", privacy: .public)")
+            item.continuation.resume(returning: Self.noDecisionAnswer)
             return true
         }
     }
@@ -2863,8 +2867,11 @@ final class AppState {
         refreshDerivedState()
     }
 
-    /// Drain all queued questions for a specific session.
-    /// AskUserQuestion-derived requests are denied; notification questions return empty.
+    /// Drain all queued questions for a specific session, deciding none: an
+    /// AskUserQuestion-derived request gets no decision (its agent asks in its
+    /// own prompt, as ``drainPermissions`` leaves a permission), a
+    /// notification question returns empty, and a Codex app-server request is
+    /// abandoned.
     private func drainQuestions(
         forSession sessionId: String,
         reason: String = "unknown",
@@ -2876,10 +2883,8 @@ final class AppState {
                 // Abandon the Codex app-server request so the server stops waiting.
                 item.resolveCodexAppServer(nil)
             } else if item.isFromPermission {
-                log.notice("⚠️ permission deny reason=drainQuestions(\(reason, privacy: .public)) session=\(sessionId, privacy: .public) tool=AskUserQuestion")
-                let denyData = Data(
-                    #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8)
-                item.resolution.resumeHook(returning: denyData)
+                log.notice("⚠️ permission dropped, no decision reason=drainQuestions(\(reason, privacy: .public)) session=\(sessionId, privacy: .public) tool=AskUserQuestion")
+                item.resolution.resumeHook(returning: Self.noDecisionAnswer)
             } else {
                 item.resolution.resumeHook(returning: Data("{}".utf8))
             }

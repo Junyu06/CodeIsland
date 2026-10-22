@@ -494,9 +494,9 @@ final class AppStateQuestionFlowTests: XCTestCase {
         XCTAssertEqual(appState.questionQueue.count, 0)
     }
 
-    // MARK: - Disconnect drains with deny
+    // MARK: - Disconnect drains, deciding nothing
 
-    func testDisconnectDuringAskUserQuestionReturnsDeny() async throws {
+    func testDisconnectDuringAskUserQuestionDecidesNothing() async throws {
         let appState = AppState()
         let sessionId = "s-disconnect"
         let event = try makeAskUserQuestionEvent(
@@ -510,8 +510,7 @@ final class AppStateQuestionFlowTests: XCTestCase {
         appState.handlePeerDisconnect(sessionId: sessionId)
 
         let responseData = try await awaitValue(of: responseTask)
-        let behavior = try extractPermissionBehavior(from: responseData)
-        XCTAssertEqual(behavior, "deny")
+        XCTAssertEqual(responseData, AppState.noDecisionAnswer)
         XCTAssertEqual(appState.questionQueue.count, 0)
     }
 

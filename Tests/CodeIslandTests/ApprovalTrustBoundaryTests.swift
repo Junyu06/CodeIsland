@@ -178,6 +178,39 @@ final class ApprovalTrustBoundaryTests: XCTestCase {
         XCTAssertEqual(try behavior(answer), "allow")
     }
 
+    // MARK: - A session ending decides none of its requests
+
+    /// SessionEnd takes the session's cards down, and answers what was waiting
+    /// on them with no decision — a permission and an AskUserQuestion alike —
+    /// never deny: the session ending says nothing of what the user would choose.
+    func testSessionEndDropsItsRequestsWithoutDecidingThem() async throws {
+        let appState = AppState()
+        let permission = try event([
+            "hook_event_name": "PermissionRequest", "session_id": "s-end",
+            "tool_name": "Bash", "tool_use_id": "toolu_end", "tool_input": ["command": "make deploy"],
+        ])
+        let ask = try event([
+            "hook_event_name": "PermissionRequest", "session_id": "s-end", "agent_id": "agent-q",
+            "tool_name": "AskUserQuestion",
+            "tool_input": ["questions": [["question": "Ship it?", "options": [["label": "Yes"], ["label": "No"]]]]],
+        ])
+        let permissionResponse = await startHookRequest { appState.handlePermissionRequest(permission, continuation: $0) }
+        let askResponse = await startHookRequest { appState.handleAskUserQuestion(ask, continuation: $0) }
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        XCTAssertEqual(appState.questionQueue.count, 1)
+
+        appState.handleEvent(try event(["hook_event_name": "SessionEnd", "session_id": "s-end"]))
+
+        let permissionAnswer = try await awaitValue(of: permissionResponse)
+        let askAnswer = try await awaitValue(of: askResponse)
+        XCTAssertNil(try decidedBehavior(permissionAnswer), String(decoding: permissionAnswer, as: UTF8.self))
+        XCTAssertNil(try decidedBehavior(askAnswer), String(decoding: askAnswer, as: UTF8.self))
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+        XCTAssertTrue(appState.questionQueue.isEmpty)
+        XCTAssertNil(appState.sessions["s-end"])
+        XCTAssertEqual(appState.surface, .collapsed)
+    }
+
     // MARK: - A host's socket: one connection never answers another's request
 
     private var socketPath: String?
@@ -252,6 +285,27 @@ final class ApprovalTrustBoundaryTests: XCTestCase {
 
         let answer = try XCTUnwrap(victim.answer)
         XCTAssertNil(try decidedBehavior(answer), "B's step decided A's request: \(String(decoding: answer, as: UTF8.self))")
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+    }
+
+    /// Nor can B end A's session to deny A's request: the card goes, and A's
+    /// hook gets no decision.
+    func testAnotherConnectionsSessionEndOnAHostSocketNeverDeniesARequest() throws {
+        let appState = AppState()
+        let path = startHostSocket(appState)
+
+        let victim = HookExchange.send(Data(#"""
+        {"hook_event_name":"PermissionRequest","session_id":"a-session","cwd":"/home/a/proj","tool_name":"Bash","tool_input":{"command":"make deploy"},"tool_use_id":"toolu_a"}
+        """#.utf8), to: path)
+        pump(until: { appState.permissionQueue.count == 1 }, "A's request never reached the island")
+
+        let attacker = HookExchange.send(Data(#"""
+        {"hook_event_name":"SessionEnd","session_id":"a-session","cwd":"/home/a/proj"}
+        """#.utf8), to: path)
+        pump(until: { victim.isDone && attacker.isDone }, "no answers")
+
+        let answer = try XCTUnwrap(victim.answer)
+        XCTAssertNil(try decidedBehavior(answer), "B's SessionEnd decided A's request: \(String(decoding: answer, as: UTF8.self))")
         XCTAssertTrue(appState.permissionQueue.isEmpty)
     }
 }
