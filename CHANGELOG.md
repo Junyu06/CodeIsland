@@ -11,6 +11,10 @@
 - **An aborted AiWork stream isn't chased as finished.** It no longer gets a "still waiting · finished" reminder and push
 - **A turn that ends without a card hands the island on.** A Hermes gateway chat, or a Stop with On completion set to Glance dot or Do nothing, kept the island's active spot instead of passing it to another working session
 - **Silent tool steps no longer ask the window server whether the screen is locked.** With sounds on, every tool hook read the lock state on the main thread before checking whether that event plays a sound at all
+- **Agent Sub-Sessions treats every kind of child the same way.** Codex subagent threads, Cursor Tasks, plugin-proxied sessions (such as omo in OpenCode) and children that name their parent (pi, Oh My Pi) now go through one set of rules. With Show separately, a Codex thread or Cursor Task whose parent is known keeps its own card but stays quiet (no chime, completion card or push), as pi children already did; its approvals and questions still alert you. A child stays where it started: switching the setting mid-run, or Cursor's process becoming ambiguous, no longer moves it between cards
+- **Hide never answers a request for you.** In some cases Hide approved a hidden child's request automatically. Now a Codex or Cursor child's request shows on a card of its own (or goes back to Codex's auto-review), and a plugin-proxied request goes back undecided so the agent asks you itself. A request that's waiting is also never denied because its card was folded or hidden by a background pass
+- **Codex subagent fixes.** With Merge into main, a folded thread's follow-up turns show up again (they were dropped), and a thread's Stop no longer ends its parent's turn early. A rollout that says a thread is a root beats a same-process guess, Desktop threads only fold into Desktop cards, and Desktop grandchildren fold into the right card
+- **Smaller fixes.** A malformed `_ppid` in a hook can no longer crash CodeIsland; remote card keys no longer get the host prefix twice; a SessionStart no longer unlinks a child from its parent; guesses by process id never match a card on another host; subagent rows created by a request take the hook's agent type
 
 ### 中文
 - **自己打断的回合不再响「完成」。** 自己停止一个回合（Claude Code 里按 Esc、停止 Hermes 回合、取消 Cline 任务）时，以前会响「任务完成」提示音，好像它真的做完了。现在会安静结束，各 agent 的卡片表现不变
@@ -21,6 +25,10 @@
 - **被中止的 AiWork 流不再被当成已完成去跟进。** 不再收到「仍在等待 · 已完成」的提醒和推送
 - **不弹卡片就结束的回合会让出刘海位置。** Hermes 网关对话，或「任务完成时」设为「仅亮起指示点」或「无动作」时的 Stop，以前会一直占着刘海的活跃位置，不让给其他正在工作的会话
 - **静默的工具步骤不再向窗口服务器查询锁屏状态。** 声音开启时，每个工具 hook 都会先在主线程读取锁屏状态，然后才检查这个事件是否需要响铃
+- **「Agent 子会话」对各类子会话一视同仁。** Codex 子线程、Cursor Task、插件代理的会话（例如 OpenCode 里的 omo），以及会声明父会话的子代理（pi、Oh My Pi）现在走同一套规则。「独立显示」时，能确定父会话的 Codex 子线程和 Cursor Task 保留自己的卡片，但保持安静（不响铃、不弹完成卡片、不推送），和 pi 子代理一样；它们的审批和提问仍会提醒。子会话在哪里开始就留在哪里：运行中切换设置，或 Cursor 进程变得无法区分，都不会再把它挪到别的卡片上
+- **「隐藏」不再替你回答请求。** 以前「隐藏」在某些情况下会自动批准被隐藏的子会话的请求。现在 Codex 或 Cursor 子会话的请求会显示在它自己的卡片上（或交回 Codex 的自动审查），插件代理的请求原样交回、不作决定，由 agent 自己来问你。正在等待的请求也不会因为卡片被后台流程折叠或隐藏而被拒绝
+- **Codex 子线程修复。** 「合并到主会话」时，已折叠的子线程后续的回合重新显示（以前会丢）；子线程的 Stop 也不会再提前结束父会话的回合。rollout 记录表明是根线程时，优先于同进程的推测；桌面版子线程只会并入桌面版卡片；桌面版的孙线程会并入正确的卡片
+- **其他小修复。** hook 里格式错误的 `_ppid` 不会再让 CodeIsland 崩溃；远程卡片的 key 不会再重复加主机前缀；SessionStart 不会再解除子会话和父会话的关联；按进程 id 的推测不会匹配到其他主机上的卡片；由请求创建的子任务行会使用 hook 里的 agent 类型
 
 ## [v1.0.39] - 2026-10-22
 
