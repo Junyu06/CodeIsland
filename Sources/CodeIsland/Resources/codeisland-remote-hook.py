@@ -32,7 +32,7 @@ BLOCKING_TIMEOUT_SECONDS = 86400
 # How long a hook nobody waits on waits for the island's reply (`{}`, or
 # nothing), which normally takes one round trip over the SSH link. Short, so
 # a busy island never holds up the agent long; within Codex's 3 s cap on its
-# SessionEnd hook.
+# SessionEnd hook. A tool step doesn't wait at all (see _TOOL_STEP_EVENTS).
 REPLY_TIMEOUT_SECONDS = 2
 TRANSCRIPT_TAIL_BYTES = 262144
 
@@ -57,6 +57,27 @@ def _waits_for_answer(data):
     if name in _PERMISSION_EVENTS:
         return True
     return name in _NOTIFICATION_EVENTS and isinstance(data.get("question"), str)
+
+
+# A tool step fires on every tool call, and the agent waits for the hook to
+# exit before it goes on, so its hook does not stay for the island's reply: the
+# island keeps the event of a hook that closed at once, and an older island
+# losing one tool step is harmless. A lifecycle event (a start, a prompt, a
+# finished turn, a session end) stays for it, so that an older island does not
+# lose it and leave a card behind. The names are those EventNormalizer maps to
+# PreToolUse, PostToolUse and PostToolUseFailure.
+_TOOL_STEP_EVENTS = {
+    "PreToolUse", "PostToolUse", "PostToolUseFailure",
+    "preToolUse", "postToolUse",
+    "pre_tool_use", "post_tool_use", "post_tool_use_failure",
+    "pre_tool_call", "post_tool_call",
+    "beforeShellExecution", "afterShellExecution", "beforeReadFile",
+    "afterFileEdit", "beforeMCPExecution", "afterMCPExecution", "AfterTool",
+}
+
+
+def _stays_for_reply(data, waits):
+    return waits or _event_name(data) not in _TOOL_STEP_EVENTS
 
 
 def _claude_config_dir():
@@ -410,10 +431,11 @@ def _parse_object(raw):
     return data if isinstance(data, dict) else None
 
 
-def _send_event(payload, expects_response):
+def _send_event(payload, expects_response, stays_for_reply=True):
     """Sends the event and reads the island's reply to EOF; returns the reply
     when the hook waits for one. A hook nobody waits on reads it too, for a
-    short while: an older island, which accepted connections on its main
+    short while, unless it is a tool step (`stays_for_reply`, see
+    _TOOL_STEP_EVENTS): an older island, which accepted connections on its main
     thread, lost the event of a hook that had closed before it got there."""
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(BLOCKING_TIMEOUT_SECONDS if expects_response else TIMEOUT_SECONDS)
@@ -422,6 +444,8 @@ def _send_event(payload, expects_response):
         sock.sendall(json.dumps(payload).encode("utf-8"))
         sock.shutdown(socket.SHUT_WR)
         if not expects_response:
+            if not stays_for_reply:
+                return None
             sock.settimeout(REPLY_TIMEOUT_SECONDS)
         chunks = []
         while True:
@@ -567,7 +591,7 @@ def main():
     _for_islands_without_facts(payload)
     waits = _waits_for_answer(data)
     payload["_edge"] = _edge_facts(raw, data, waits)
-    response = _send_event(payload, waits)
+    response = _send_event(payload, waits, _stays_for_reply(data, waits))
     # The island sends the answer as the agent reads it (Gemini's decision
     # included), or nothing when there is none to give.
     if response:

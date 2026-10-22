@@ -17,15 +17,20 @@ quirk is then fixed once, in HookIntake, for every edge.
   `$CODEISLAND_SOCKET_PATH`, else `/tmp/codeisland-<uid>.sock` (on a remote
   host, the path the installer forwarded).
 - Write one JSON object, then half-close the write side (`shutdown(SHUT_WR)`).
-- Read the answer to EOF, every time. A hook that waits for one (below) reads
-  as long as it takes, prints the answer to stdout exactly as received (an
-  empty answer means print nothing) and exits. A hook nobody waits on reads
-  for a short while only (the remote hook 2 s, the bridge 1 s) and prints
-  nothing; the island does not hold it, and answers `{}` or nothing once it
-  has read the event. That read is for older islands: they accepted
-  connections on their main thread and lost the event of a hook that had
-  closed before they got there. The island now accepts and reads every
-  connection off the main thread, however early its hook closes.
+- A hook that waits for an answer (below) reads it to EOF, as long as it
+  takes, prints it to stdout exactly as received (an empty answer means print
+  nothing) and exits.
+- A hook nobody waits on prints nothing. The island keeps the event of a hook
+  that closed right after its half-close: it accepts and reads every
+  connection off the main thread, however early its hook went. Older islands
+  accepted connections on their main thread and lost such events, so a
+  lifecycle event (a start, a prompt, a finished turn, a session end) reads
+  the reply for a short while anyway (the remote hook 2 s, the bridge 1 s):
+  losing one left a card behind. A tool step (an event that maps to
+  `PreToolUse`, `PostToolUse` or `PostToolUseFailure`) may close at once: it
+  fires on every tool call while the agent waits for the hook to exit, a reply
+  would add a round trip to each of them, and losing one to an older island
+  is harmless.
 - If the island is not running, exit 0 silently.
 
 ## Payload
@@ -189,7 +194,7 @@ as the edge's own interpretation, as it took the 0.3.1 remote hook's:
   instead.
 - It accepts connections on its main thread, so it lost the event of a hook
   that had closed before it got there; the remote hook therefore reads its
-  reply even when nothing waits on it (*Transport*).
+  reply for a lifecycle event even when nothing waits on it (*Transport*).
 
 ## For the Windows bridge
 

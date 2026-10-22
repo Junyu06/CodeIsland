@@ -235,6 +235,20 @@ final class RemoteHookEdgeFactsTests: XCTestCase {
         XCTAssertLessThan(lastHookSeconds, 3.4)
     }
 
+    /// A tool step fires on every tool call while the agent waits for its hook
+    /// to exit, so it leaves as soon as the event is sent: no round trip over
+    /// the SSH link per tool call. The island keeps the event of a hook that
+    /// closed at once.
+    func testAToolStepDoesNotStayForTheReply() throws {
+        for event in ["PreToolUse", "PostToolUse", "pre_tool_use", "post_tool_call"] {
+            let stdin = #"{"hook_event_name":"\#(event)","session_id":"sess-1","cwd":"/work/proj","tool_name":"Bash"}"#
+            let (sent, printed) = try runHook(source: "claude", stdin: stdin, reply: Data("{}".utf8), replyDelay: 1.5)
+            XCTAssertNotNil(sent, event)
+            XCTAssertEqual(printed, "", event)
+            XCTAssertLessThan(lastHookSeconds, 1.0, "\(event) stayed for the island's reply")
+        }
+    }
+
     /// HookServer's byte probes read paths as written (`/.cursor/` sends a
     /// Cursor Task's hook to Agent Sub-Sessions): the interpreted payload keeps
     /// its slashes unescaped, as the remote hook used to send them.
