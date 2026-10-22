@@ -111,7 +111,6 @@ final class AppStateStoreReadsTests: XCTestCase {
             return lastActivity.addingTimeInterval(1)
         }
         let card = try watchedThinkingQoderCard(in: appState, lastActivity: lastActivity)
-        defer { appState.processMonitor.stop("q") }
 
         appState.checkNativeAppTurnEnded(sessionId: "q", session: card, settleTime: 3)
         XCTAssertEqual(appState.sessions["q"]?.status, .processing, "the tick did not wait for the read")
@@ -125,7 +124,6 @@ final class AppStateStoreReadsTests: XCTestCase {
         let lastActivity = Date().addingTimeInterval(-10)
         appState.storeReaders.nativeAppFinishedTurn = { _, _ in lastActivity.addingTimeInterval(-5) }
         let card = try watchedThinkingQoderCard(in: appState, lastActivity: lastActivity)
-        defer { appState.processMonitor.stop("q") }
 
         appState.checkNativeAppTurnEnded(sessionId: "q", session: card, settleTime: 3)
         await waitUntil("the read never landed") { !appState.nativeAppTurnReadsInFlight.contains("q") }
@@ -148,18 +146,22 @@ final class AppStateStoreReadsTests: XCTestCase {
         XCTAssertFalse(probe.ranOnMainThread)
     }
 
-    /// A Qoder IDE card thinking with no tool, its exit watched on this test
-    /// process (alive for as long as the test runs).
+    /// A Qoder IDE card thinking with no tool. Its hook names this test
+    /// process (alive for as long as the test runs) as its CLI, so the
+    /// card's exit watch is attached the way a real one's is.
     private func watchedThinkingQoderCard(in appState: AppState, lastActivity: Date) throws -> SessionSnapshot {
-        var card = SessionSnapshot()
-        card.source = "qoder"
-        card.termBundleId = "com.qoder.ide"
-        card.status = .processing
-        card.lastActivity = lastActivity
+        appState.handleEvent(try event("UserPromptSubmit", sessionId: "q", source: "qoder", extra: [
+            "prompt": "hi",
+            "_ppid": Int(getpid()),
+            "_term_bundle": "com.qoder.ide",
+        ]))
+        appState.sessions["q"]?.status = .processing
+        appState.sessions["q"]?.currentTool = nil
+        appState.sessions["q"]?.toolDescription = nil
+        appState.sessions["q"]?.lastActivity = lastActivity
+        let card = try XCTUnwrap(appState.sessions["q"])
         XCTAssertTrue(card.isNativeAppMode)
-        appState.sessions["q"] = card
-        let me = try XCTUnwrap(ProcessTable.liveProcessIdentity(for: getpid()))
-        XCTAssertTrue(appState.processMonitor.watch(sessionId: "q", process: me) {})
+        XCTAssertEqual(card.cliPid, getpid())
         return card
     }
 }

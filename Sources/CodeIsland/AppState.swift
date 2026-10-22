@@ -327,11 +327,11 @@ final class AppState {
     /// Auto-collapse timer fired but mouse is inside panel — defer collapse until mouse leaves
     var deferCollapseOnMouseLeave = false
     /// Exit watches on the sessions' local CLI processes.
-    let processMonitor = SessionProcessMonitor()
+    private let processMonitor = SessionProcessMonitor()
     /// Sessions in the grace period after their process exited, with that process.
-    var exitingSessions: [String: ProcessIdentity] = [:]
+    private var exitingSessions: [String: ProcessIdentity] = [:]
     @ObservationIgnored
-    nonisolated(unsafe) var saveTimer: Timer?
+    nonisolated(unsafe) private var saveTimer: Timer?
     /// Session discovery: the session-store watcher and the scans it runs off
     /// the main actor, whose sessions land in `integrateDiscovered`.
     @ObservationIgnored
@@ -344,17 +344,17 @@ final class AppState {
     /// Task cards and folding Cursor-labelled ones. Built off the main actor;
     /// see `rebrandMisattributedCursorTaskCards`.
     @ObservationIgnored
-    var cursorSubagentIndex: CursorSubagentTranscriptIndex?
+    private var cursorSubagentIndex: CursorSubagentTranscriptIndex?
     @ObservationIgnored
-    nonisolated(unsafe) var cursorSubagentIndexTask: Task<Void, Never>?
+    nonisolated(unsafe) private var cursorSubagentIndexTask: Task<Void, Never>?
     @ObservationIgnored
-    nonisolated(unsafe) var cursorSubagentIndexRecheck: Task<Void, Never>?
+    nonisolated(unsafe) private var cursorSubagentIndexRecheck: Task<Void, Never>?
     /// When `cursorSubagentIndexRecheck` fires.
     @ObservationIgnored
-    var cursorSubagentIndexRecheckAt: Date?
+    private var cursorSubagentIndexRecheckAt: Date?
     /// The lookup schedule of each card the index does not resolve.
     @ObservationIgnored
-    var cursorSubagentLookups: [String: CursorSubagentLookupSchedule] = [:]
+    private var cursorSubagentLookups: [String: CursorSubagentLookupSchedule] = [:]
     /// When such a card is looked up after it first goes unresolved. Tests shorten it.
     @ObservationIgnored
     var cursorSubagentLookupDelays = CursorSubagentLookupSchedule.defaultDelays
@@ -381,7 +381,7 @@ final class AppState {
     @ObservationIgnored
     private(set) var cursorYoloReadsInFlight: Set<String> = []
     @ObservationIgnored
-    var nativeAppTurnReadsInFlight: Set<String> = []
+    private(set) var nativeAppTurnReadsInFlight: Set<String> = []
     /// The reads of the agents' own stores made for a known card, run off
     /// the main actor (see `SessionStoreReaders`). Tests install their own.
     @ObservationIgnored
@@ -464,18 +464,262 @@ final class AppState {
     }
 
     /// The compact bar's mascot rotation through the active sessions.
-    let rotation = CompactBarRotation()
+    private let rotation = CompactBarRotation()
     var rotatingSessionId: String? { rotation.rotatingSessionId }
     var rotatingSession: SessionSnapshot? {
         guard let rid = rotatingSessionId else { return nil }
         return sessions[rid]
     }
 
-    func startCleanupTimer() {
+    private func startCleanupTimer() {
         guard cleanupTimer == nil else { return }
         cleanupTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.cleanupIdleSessions()
+            }
+        }
+    }
+
+    /// Agents whose tracked process is a long-lived daemon rather than a
+    /// per-turn CLI. Process exit never marks the end of a reply, so when the
+    /// turn-end hook is missing (not approved on the agent's side, or the turn
+    /// died before it fired) a card that has gone quiet with no tool in flight
+    /// is the only evidence the turn is over. (#303)
+    nonisolated static let daemonBackedSources: Set<String> = ["hermes"]
+
+    /// How long a daemon-backed session may sit on bare "thinking" with no tool
+    /// and no new events before it settles. Only a safety net: Hermes's
+    /// on_session_end ends every turn, interrupted ones included (#364). The
+    /// card is on "thinking" from the prompt on (pre_llm_call), and a
+    /// reasoning model easily thinks for longer than 20 s before its first or
+    /// next tool call — the card must not read idle while it does.
+    nonisolated static let daemonTurnSettleTimeout: TimeInterval = 120
+
+    /// Minutes an idle card with no process to outlive waits before it goes.
+    nonisolated static let defaultStaleIdleMinutes = 10
+
+    /// Whether the idle sweep removes an idle card. The user's timeout applies
+    /// to every card. Otherwise a card whose process is monitored lives as
+    /// long as that process; one without (hook-only) goes after
+    /// `defaultStaleIdleMinutes`. So does a Hermes gateway chat's card: its
+    /// monitored process is the gateway daemon, which never exits (#364).
+    nonisolated static func isStaleIdleSession(
+        idleMinutes: Int,
+        userTimeoutMinutes: Int,
+        hasMonitor: Bool,
+        hermesChatElsewhere: Bool
+    ) -> Bool {
+        if userTimeoutMinutes > 0 && idleMinutes >= userTimeoutMinutes { return true }
+        let livesWithItsProcess = hasMonitor && !hermesChatElsewhere
+        return !livesWithItsProcess && idleMinutes >= defaultStaleIdleMinutes
+    }
+
+    nonisolated static func isDaemonBackedSource(_ source: String?) -> Bool {
+        guard let normalized = SessionSnapshot.normalizedSupportedSource(source) else { return false }
+        return daemonBackedSources.contains(normalized)
+    }
+
+    private func cleanupIdleSessions() {
+        // 1. Verify monitored PIDs are still alive (DispatchSource can silently miss exits)
+        //    Also kill orphaned processes (ppid <= 1, terminal closed but process survived).
+        let sweep = processMonitor.sweep()
+        let orphaned = sweep.reparented.filter {
+            shouldTerminateOrphanedProcess(sessionId: $0.sessionId, pid: $0.pid)
+        }
+        for (sessionId, process) in sweep.exited {
+            // PID gone but monitor didn't fire — treat as process exit so session is removed
+            // promptly (after 5s grace) instead of lingering for 10 minutes.
+            handleProcessExit(sessionId: sessionId, exitedProcess: process)
+        }
+        for (sessionId, pid) in orphaned {
+            log.notice("⚠️ terminating reparented orphan pid=\(pid, privacy: .public) session=\(sessionId, privacy: .public)")
+            kill(pid, SIGTERM)
+            removeSession(sessionId)
+        }
+
+        // 2. Reset likely-stuck sessions only when we have no process monitor.
+        //    If the process is still monitored/alive, trust explicit Stop/SessionEnd or
+        //    process exit instead of synthesizing idle and risking false-idle mid-thought.
+        //    - No tool + no monitor: 300s (agents can think for several minutes)
+        //    - Has tool + no monitor: 180s (long build / deep thinking with missed exit)
+        //    - waitingApproval/Question + no monitor: 300s (connection likely dropped)
+        //
+        //    Skip remote sessions: they NEVER have a local process monitor (the CLI runs
+        //    on the remote host), and a long-running remote task that doesn't fire hook
+        //    events for >180s shouldn't be force-flipped to idle here — it'll then be
+        //    swept by Section 4. Remote session lifecycle is driven by remote-end hooks
+        //    and SSH connection state in RemoteManager, not by local timeouts. (#121)
+        //    Claude Desktop Cowork cards are skipped too and settled on their own
+        //    clock right after: their session store stays silent through a long
+        //    tool run and for as long as a permission card is left open.
+        for (key, session) in sessions
+            where !processMonitor.isWatching(key)
+            && session.status != .idle
+            && !session.isRemote
+            && !key.hasPrefix(Self.coworkSessionPrefix) {
+            let elapsed = -session.lastActivity.timeIntervalSinceNow
+            let threshold: TimeInterval
+            switch session.status {
+            case .waitingApproval, .waitingQuestion: threshold = 300
+            default: threshold = session.currentTool != nil ? 180 : 300
+            }
+            if elapsed > threshold {
+                sessions[key]?.status = .idle
+                sessions[key]?.currentTool = nil
+                sessions[key]?.toolDescription = nil
+            }
+        }
+        settleCoworkCards()
+
+        // 2b. Some CLIs keep their parent process alive across requests, so a missed Stop hook
+        // can leave the UI stuck in bare "thinking" forever after an interrupt. If we've had no
+        // follow-up hook activity for a long time and there isn't even a live tool/description,
+        // reset that silent processing state back to idle.
+        let monitoredThinkingTimeout: TimeInterval = 300
+        let nativeAppThinkingTimeout: TimeInterval = 30
+        let codexTerminalTurnSettleTime: TimeInterval = 3
+        for (key, session) in sessions
+            where session.status == .processing
+            && session.currentTool == nil
+            && session.toolDescription == nil {
+            let elapsed = -session.lastActivity.timeIntervalSinceNow
+            // Daemon-backed agents settle on their own timeout whether or not we
+            // hold a process monitor: their backend never exits, so a live PID
+            // says nothing about whether the turn is over (#303).
+            if Self.isDaemonBackedSource(session.source) {
+                if elapsed > Self.daemonTurnSettleTimeout {
+                    sessions[key]?.status = .idle
+                }
+                continue
+            }
+            guard processMonitor.isWatching(key) else { continue }
+            // Native apps write transcripts synchronously — if the transcript check below
+            // didn't find a stop marker after 30s, the session is almost certainly idle.
+            if session.isNativeAppMode, elapsed > nativeAppThinkingTimeout {
+                sessions[key]?.status = .idle
+                continue
+            }
+            // Before that, the turn's end in its transcript settles it: read
+            // off the main actor, applied when the read lands.
+            if session.isNativeAppMode, elapsed >= codexTerminalTurnSettleTime {
+                checkNativeAppTurnEnded(sessionId: key, session: session, settleTime: codexTerminalTurnSettleTime)
+                continue
+            }
+            if elapsed > monitoredThinkingTimeout {
+                sessions[key]?.status = .idle
+            }
+        }
+
+        // 3. Verify PID liveness for sessions without monitors but with a known PID.
+        //    If the process died: idle sessions are removed directly (no grace needed),
+        //    non-idle sessions go through handleProcessExit for the 5s grace period.
+        for (key, session) in sessions where !processMonitor.isWatching(key) {
+            guard let process = resolvedSessionProcessIdentity(for: key) else { continue }
+            if !ProcessTable.isLiveProcess(process) {
+                if exitingSessions[key] == process { continue }
+                if session.status == .idle {
+                    removeSession(key)
+                } else {
+                    handleProcessExit(sessionId: key, exitedProcess: process)
+                }
+            }
+        }
+
+        // 3b. Native app sessions (OpenCode desktop, Codex app, etc.) whose app is no longer
+        //     running should be cleaned up — these apps can't send SessionEnd when force-quit.
+        //     Don't check PID liveness here: the dedup in integrateDiscovered may have
+        //     reattached a CLI PID to the old native app session, keeping it alive incorrectly.
+        // `NSWorkspace.runningApplications` is not a cheap array read: touching
+        // `bundleIdentifier` on each entry goes out to LaunchServices over XPC,
+        // and this timer fires every 3 seconds forever. Only two things below
+        // need it, and on an idle Mac neither does — so build it lazily and, in
+        // the common case, never at all (#299).
+        var cachedRunningBundleIds: Set<String>?
+        func runningBundleIds() -> Set<String> {
+            if let cachedRunningBundleIds { return cachedRunningBundleIds }
+            let ids = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+            cachedRunningBundleIds = ids
+            return ids
+        }
+
+        if sessions.values.contains(where: { $0.isNativeAppMode }) {
+            let running = runningBundleIds()
+            for (key, session) in sessions {
+                guard session.isNativeAppMode,
+                      let bundleId = session.termBundleId,
+                      !running.contains(bundleId) else { continue }
+                removeSession(key)
+            }
+        }
+        discovery.pollCodexDesktopIfDue(now: Date(), runningBundleIdentifiers: runningBundleIds)
+
+        // 4. Remove idle sessions past timeout (user setting, or 10 min default for no-monitor sessions)
+        let userTimeout = SettingsManager.shared.sessionTimeout
+        for (key, session) in sessions where session.status == .idle {
+            let idleMinutes = Int(-session.lastActivity.timeIntervalSinceNow / 60)
+            if Self.isStaleIdleSession(
+                idleMinutes: idleMinutes,
+                userTimeoutMinutes: userTimeout,
+                hasMonitor: processMonitor.isWatching(key),
+                hermesChatElsewhere: session.hermesChatElsewhere
+            ) {
+                removeSession(key)
+            }
+        }
+
+        // 4b. AiWork sessions come from the Agentix daemon's persistent session
+        //     store, which keeps every conversation as status:"active" forever and
+        //     never emits a close/delete event. A finished turn or an exited TUI/GUI
+        //     conversation just goes idle, so without this it would sit here for the
+        //     full 10-min no-monitor timeout (Section 4) — completed eval bursts pile
+        //     up in the notch. Backfill already treats idle AiWork entries as
+        //     historical and skips them, so mirror that: drop an idle AiWork session
+        //     shortly after its last activity. Live turns bump lastActivity on every
+        //     stream event, so an in-use conversation is never swept mid-thought and
+        //     re-appears the moment the next turn starts.
+        let aiworkIdleGrace: TimeInterval = 60
+        for (key, session) in sessions
+            where key.hasPrefix(AppState.aiworkSessionPrefix)
+            && session.status == .idle {
+            guard -session.lastActivity.timeIntervalSinceNow > aiworkIdleGrace else { continue }
+            if let daemonId = session.providerSessionId {
+                forgetAiWorkHydrateState(daemonId)
+            }
+            removeSession(key)
+        }
+
+        // 5. Reclaim memory for abandoned tool_use_id cache entries.
+        prunePendingToolUses()
+
+        refreshDerivedState()
+    }
+
+    /// Settle a native app's thinking card idle once its transcript shows
+    /// the turn ended after the card's last activity. The cleanup tick asks
+    /// every 3 s while the card thinks, and the read opens the state database
+    /// and reads the transcript's tail, so it runs off the main actor; the
+    /// card is settled when it lands if it is still the same quiet,
+    /// monitored, thinking card.
+    func checkNativeAppTurnEnded(sessionId: String, session: SessionSnapshot, settleTime: TimeInterval) {
+        guard nativeAppTurnReadsInFlight.insert(sessionId).inserted else { return }
+        let read = storeReaders.nativeAppFinishedTurn
+        Task.detached(priority: .utility) {
+            let finishedAt = read(sessionId, session)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.nativeAppTurnReadsInFlight.remove(sessionId)
+                guard let finishedAt,
+                      let current = self.sessions[sessionId],
+                      current.status == .processing,
+                      current.currentTool == nil,
+                      current.toolDescription == nil,
+                      current.isNativeAppMode,
+                      !Self.isDaemonBackedSource(current.source),
+                      self.processMonitor.isWatching(sessionId),
+                      -current.lastActivity.timeIntervalSinceNow >= settleTime,
+                      finishedAt >= current.lastActivity.addingTimeInterval(-1) else { return }
+                self.sessions[sessionId]?.status = .idle
+                self.refreshDerivedState()
             }
         }
     }
@@ -489,7 +733,144 @@ final class AppState {
         )
     }
 
-    // MARK: - Removing a session
+    // MARK: - Process Monitoring (DispatchSource)
+
+    private func currentSessionProcessIdentity(for sessionId: String) -> ProcessIdentity? {
+        guard let pid = sessions[sessionId]?.cliPid, pid > 0 else { return nil }
+        return ProcessIdentity(pid: pid, startTime: sessions[sessionId]?.cliStartTime)
+    }
+
+    private func resolvedSessionProcessIdentity(for sessionId: String) -> ProcessIdentity? {
+        guard let process = currentSessionProcessIdentity(for: sessionId) else { return nil }
+        if let resolved = ProcessTable.trackedProcessIdentity(for: process.pid, source: sessions[sessionId]?.source) {
+            if resolved != process {
+                setSessionProcessIdentity(resolved, for: sessionId)
+            }
+            return resolved
+        }
+        if process.startTime != nil { return process }
+        guard let refreshed = ProcessTable.liveProcessIdentity(for: process.pid) else { return process }
+        setSessionProcessIdentity(refreshed, for: sessionId)
+        return refreshed
+    }
+
+    private func setSessionProcessIdentity(_ process: ProcessIdentity, for sessionId: String) {
+        sessions[sessionId]?.cliPid = process.pid
+        sessions[sessionId]?.cliStartTime = process.startTime
+    }
+
+    private func shouldTerminateOrphanedProcess(sessionId: String, pid: pid_t) -> Bool {
+        guard let session = sessions[sessionId] else { return true }
+        if session.isNativeAppMode { return false }
+        guard let source = SessionSnapshot.normalizedSupportedSource(session.source) else { return true }
+        return !AgentProcessFinder.isNativeAppProcess(pid, source: source)
+    }
+
+    /// Watch a Claude process for exit — waits a grace period before removing, in case the
+    /// process restarts (e.g. auto-update) or a new hook event re-activates the session.
+    private func monitorProcess(sessionId: String, pid: pid_t) {
+        guard let process = ProcessTable.liveProcessIdentity(for: pid) else {
+            handleProcessExit(sessionId: sessionId, exitedProcess: ProcessIdentity(pid: pid, startTime: nil))
+            return
+        }
+        monitorProcess(sessionId: sessionId, process: process)
+    }
+
+    private func monitorProcess(sessionId: String, process: ProcessIdentity) {
+        let attached = processMonitor.watch(sessionId: sessionId, process: process) { [weak self] in
+            guard let self = self, self.sessions[sessionId] != nil else { return }
+            self.handleProcessExit(sessionId: sessionId, exitedProcess: process)
+        }
+        guard attached else { return }
+        exitingSessions.removeValue(forKey: sessionId)
+
+        // Keep cliPid aligned with the monitored process unless we already have a different
+        // live PID from a stronger source (hooks beat heuristic discovery).
+        if let currentProcess = resolvedSessionProcessIdentity(for: sessionId) {
+            if !ProcessTable.isLiveProcess(currentProcess) || currentProcess.pid == process.pid {
+                setSessionProcessIdentity(process, for: sessionId)
+            }
+        } else {
+            setSessionProcessIdentity(process, for: sessionId)
+        }
+
+        // Safety: if process already exited before monitor started
+        if !ProcessTable.isLiveProcess(process) {
+            handleProcessExit(sessionId: sessionId, exitedProcess: process)
+        }
+    }
+
+    /// Grace period after process exit — gives 5s for a replacement process or fresh hook event
+    /// to claim the session before removal. Prevents flicker during agent restarts.
+    private func handleProcessExit(sessionId: String, exitedProcess: ProcessIdentity) {
+        // Tear down the dead monitor immediately
+        stopMonitor(sessionId)
+
+        // If the session already moved to a replacement live PID, reattach immediately and
+        // avoid flashing idle because a stale/wrong monitor exited.
+        if let currentProcess = resolvedSessionProcessIdentity(for: sessionId),
+           currentProcess != exitedProcess, ProcessTable.isLiveProcess(currentProcess) {
+            monitorProcess(sessionId: sessionId, process: currentProcess)
+            return
+        }
+
+        if exitingSessions[sessionId] == exitedProcess {
+            return
+        }
+        exitingSessions[sessionId] = exitedProcess
+
+        // If session was actively doing something, reset state right away so the UI
+        // doesn't show a stale "running Edit" while we wait through the grace period.
+        if let status = sessions[sessionId]?.status, status != .idle {
+            sessions[sessionId]?.status = .idle
+            sessions[sessionId]?.currentTool = nil
+            sessions[sessionId]?.toolDescription = nil
+            // Drain any pending permissions/questions — the process is gone
+            drainPermissions(forSession: sessionId, reason: "process-exited")
+            drainQuestions(forSession: sessionId, reason: "process-exited")
+            refreshDerivedState()
+        }
+
+        let exitTime = Date()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard let self = self, self.sessions[sessionId] != nil else { return }
+            guard self.exitingSessions[sessionId] == exitedProcess else { return }
+
+            // A new monitor was attached during the grace period (new process took over)
+            if self.processMonitor.isWatching(sessionId) { return }
+
+            // Session was taken over by a different process (e.g. auto-update/restart):
+            // cliPid changed to a new PID that's still alive → attach monitor, don't remove.
+            if let currentProcess = self.resolvedSessionProcessIdentity(for: sessionId),
+               currentProcess != exitedProcess, ProcessTable.isLiveProcess(currentProcess) {
+                self.monitorProcess(sessionId: sessionId, process: currentProcess)
+                return
+            }
+
+            // Original process confirmed dead — remove regardless of lastActivity.
+            // This prevents a race where an in-flight hook event (e.g. "Stop") updates
+            // lastActivity after exitTime, causing the session to linger for 10+ minutes.
+            if !ProcessTable.isLiveProcess(exitedProcess) {
+                self.removeSession(sessionId)
+                return
+            }
+
+            // Session received fresh activity during the grace period and the original PID is
+            // still alive — the exit signal was stale/spurious, so restore monitoring.
+            if let lastActivity = self.sessions[sessionId]?.lastActivity,
+               lastActivity > exitTime {
+                self.monitorProcess(sessionId: sessionId, process: exitedProcess)
+                return
+            }
+
+            self.removeSession(sessionId)
+        }
+    }
+
+    private func stopMonitor(_ sessionId: String) {
+        processMonitor.stop(sessionId)
+    }
 
     /// Remove a session, clean up its monitor, and resume any pending continuations.
     /// Every removal path (cleanup timer, process exit, reducer effect) goes through here
@@ -535,12 +916,88 @@ final class AppState {
 
     // MARK: - Compact bar mascot rotation
 
-    func startRotationIfNeeded() {
+    private func startRotationIfNeeded() {
         // When rotation stops, ensure activeSessionId points to the remaining
         // active session (if any) so the collapsed bar doesn't stick on an idle one.
         if let active = rotation.update(sessions: sessions),
            activeSessionId != active {
             activeSessionId = active
+        }
+    }
+
+    /// Start monitoring the CLI process for a session.
+    /// Prefers the PID captured by the bridge (_ppid), falls back to source-aware process scans by CWD.
+    private func tryMonitorSession(_ sessionId: String) {
+        guard sessions[sessionId]?.isRemote != true else { return }
+        // Codex Desktop cards are owned by NSWorkspace/app-server lifecycle. A
+        // CWD lookup can only find an unrelated Codex CLI process (or the
+        // shared Desktop helper), and binding either PID would remove every
+        // Desktop thread when that one process exits. Other native providers
+        // keep their existing monitor behavior.
+        if sessions[sessionId]?.source == "codex",
+           sessions[sessionId]?.termBundleId == Self.codexAppBundleId {
+            stopMonitor(sessionId)
+            sessions[sessionId]?.cliPid = nil
+            sessions[sessionId]?.cliStartTime = nil
+            exitingSessions.removeValue(forKey: sessionId)
+            return
+        }
+        let currentMonitor = processMonitor.watchedProcess(for: sessionId)
+
+        // Primary: use PID from bridge (works for any CLI)
+        if let sessionProcess = resolvedSessionProcessIdentity(for: sessionId),
+           ProcessTable.isLiveProcess(sessionProcess) {
+            if backfillClaudeTerminalMetadata(sessionId: sessionId, process: sessionProcess) {
+                scheduleSave()
+            }
+            if currentMonitor == sessionProcess { return }
+            if currentMonitor != nil {
+                stopMonitor(sessionId)
+            }
+            monitorProcess(sessionId: sessionId, process: sessionProcess)
+            return
+        }
+
+        if let currentMonitor, ProcessTable.isLiveProcess(currentMonitor) {
+            setSessionProcessIdentity(currentMonitor, for: sessionId)
+            if backfillClaudeTerminalMetadata(sessionId: sessionId, process: currentMonitor) {
+                scheduleSave()
+            }
+            return
+        }
+
+        // Fallback: scan for matching processes by CWD (source-aware)
+        guard let cwd = sessions[sessionId]?.cwd else { return }
+        let source = sessions[sessionId]?.source
+        Task.detached {
+            let pid = AgentProcessFinder.findPidForCwd(cwd, source: source)
+            await MainActor.run { [weak self] in
+                guard let self = self, let pid = pid,
+                      self.sessions[sessionId] != nil else { return }
+                guard let discoveredProcess = ProcessTable.liveProcessIdentity(for: pid) else { return }
+
+                let preferredProcess: ProcessIdentity
+                if let currentProcess = self.resolvedSessionProcessIdentity(for: sessionId),
+                   ProcessTable.isLiveProcess(currentProcess) {
+                    preferredProcess = currentProcess
+                } else {
+                    preferredProcess = discoveredProcess
+                    self.setSessionProcessIdentity(discoveredProcess, for: sessionId)
+                }
+
+                if self.backfillClaudeTerminalMetadata(sessionId: sessionId, process: preferredProcess) {
+                    self.scheduleSave()
+                }
+                if let monitorProcess = self.processMonitor.watchedProcess(for: sessionId),
+                   monitorProcess == preferredProcess, ProcessTable.isLiveProcess(monitorProcess) {
+                    return
+                }
+
+                if self.processMonitor.isWatching(sessionId) {
+                    self.stopMonitor(sessionId)
+                }
+                self.monitorProcess(sessionId: sessionId, process: preferredProcess)
+            }
         }
     }
 
@@ -623,7 +1080,7 @@ final class AppState {
     /// Branch resolution runs detached: .git probing on a dead network mount
     /// must never beachball the main actor. Triggers on cwd changes, at Stop
     /// (the turn may have switched branches), and while unresolved (throttled).
-    func maybeRefreshGitBranch(for sessionId: String, cwdBefore: String?, normalizedEventName: String) {
+    private func maybeRefreshGitBranch(for sessionId: String, cwdBefore: String?, normalizedEventName: String) {
         guard let session = sessions[sessionId],
               session.remoteHostId == nil,
               let cwd = session.cwd else { return }
@@ -659,7 +1116,7 @@ final class AppState {
 
     /// Detect a UI harness (T3 Code) in the CLI's ancestry, off the main actor.
     /// Runs once per CLI pid; remote sessions never probe the local process table.
-    func maybeResolveHostHarness(for sessionId: String) {
+    private func maybeResolveHostHarness(for sessionId: String) {
         guard let session = sessions[sessionId],
               !session.isRemote,
               let pid = session.cliPid, pid > 1 else { return }
@@ -930,7 +1387,7 @@ final class AppState {
         AppleCompanionPublisher.shared.notifyDirty()
     }
 
-    func refreshProviderTitle(for trackedSessionId: String, providerSessionId: String? = nil) {
+    private func refreshProviderTitle(for trackedSessionId: String, providerSessionId: String? = nil) {
         guard let session = sessions[trackedSessionId] else { return }
         guard !session.isRemote else { return }
 
@@ -1302,7 +1759,7 @@ final class AppState {
         return true
     }
 
-    func isSupersededGrokDiscovery(_ info: DiscoveredSession) -> Bool {
+    private func isSupersededGrokDiscovery(_ info: DiscoveredSession) -> Bool {
         guard let process = supersededGrokSessions[info.sessionId] else { return false }
         if ProcessTable.isLiveProcess(process) { return true }
         supersededGrokSessions.removeValue(forKey: info.sessionId)
@@ -2246,7 +2703,7 @@ final class AppState {
     /// Drain queued permissions for a specific session, resuming their continuations with deny.
     /// `matches` narrows the drain by the request's event — background subagents share the
     /// parent's session_id, so callers reacting to one agent pass an agent_id filter.
-    func drainPermissions(
+    private func drainPermissions(
         forSession sessionId: String,
         reason: String = "unknown",
         where matches: (HookEvent) -> Bool = { _ in true }
@@ -2289,7 +2746,7 @@ final class AppState {
 
     /// Drain all queued questions for a specific session.
     /// AskUserQuestion-derived requests are denied; notification questions return empty.
-    func drainQuestions(
+    private func drainQuestions(
         forSession sessionId: String,
         reason: String = "unknown",
         where matches: (HookEvent) -> Bool = { _ in true }
@@ -2481,7 +2938,1414 @@ final class AppState {
         }?.key
     }
 
-    // MARK: - Teardown
+    // MARK: - Session Discovery (FSEventStream + process scan)
+    // MARK: - Session Persistence
+
+    func scheduleSave() {
+        saveTimer?.invalidate()
+        saveTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.saveSessions()
+            }
+        }
+    }
+
+    func saveSessions() {
+        SessionPersistence.save(sessions)
+    }
+
+    func restoreSessions() {
+        let persisted = SessionPersistence.load()
+        let cutoff = Date().addingTimeInterval(-30 * 60) // 30 minutes
+        for p in persisted where p.lastActivity > cutoff {
+            guard let source = SessionSnapshot.normalizedSupportedSource(p.source) else { continue }
+            let restoredSessionId = CodexDiscovery.canonicalRestoredCodexSessionId(
+                sessionId: p.sessionId,
+                source: source,
+                providerSessionId: p.providerSessionId,
+                termBundleId: p.termBundleId
+            )
+            guard sessions[restoredSessionId] == nil else { continue }
+            var snapshot = SessionSnapshot(startTime: p.startTime)
+            snapshot.cwd = p.cwd
+            snapshot.source = source
+            snapshot.model = p.model
+            snapshot.sessionTitle = p.sessionTitle
+            snapshot.sessionTitleSource = p.sessionTitleSource
+            snapshot.providerSessionId = p.providerSessionId
+            snapshot.lastUserPrompt = p.lastUserPrompt
+            snapshot.lastAssistantMessage = p.lastAssistantMessage
+            if let prompt = p.lastUserPrompt {
+                snapshot.addRecentMessage(ChatMessage(isUser: true, text: prompt))
+            }
+            if let reply = p.lastAssistantMessage {
+                snapshot.addRecentMessage(ChatMessage(isUser: false, text: reply))
+            }
+            snapshot.termApp = p.termApp
+            snapshot.itermSessionId = p.itermSessionId
+            snapshot.ttyPath = p.ttyPath
+            snapshot.kittyWindowId = p.kittyWindowId
+            snapshot.tmuxPane = p.tmuxPane
+            snapshot.tmuxClientTty = p.tmuxClientTty
+            snapshot.tmuxEnv = p.tmuxEnv
+            snapshot.termBundleId = p.termBundleId
+            snapshot.cmuxSurfaceId = p.cmuxSurfaceId
+            snapshot.cmuxWorkspaceId = p.cmuxWorkspaceId
+            snapshot.zellijPaneId = p.zellijPaneId
+            snapshot.zellijSessionName = p.zellijSessionName
+            snapshot.weztermPaneId = p.weztermPaneId
+            snapshot.herdrPaneId = p.herdrPaneId
+            snapshot.herdrSocketPath = p.herdrSocketPath
+            snapshot.herdrBinaryPath = p.herdrBinaryPath
+            snapshot.claudeDesktopSessionId = p.claudeDesktopSessionId
+            snapshot.hermesChatElsewhere = p.hermesChatElsewhere ?? false
+            snapshot.parentSessionId = p.parentSessionId
+            snapshot.lastActivity = p.lastActivity
+            snapshot.transcriptPath = p.transcriptPath
+            snapshot.recap = p.recap
+            snapshot.reasoningEffort = p.reasoningEffort
+            // A prompt typed while CodeIsland wasn't running supersedes the
+            // saved recap; the transcript tail is the judge. Restored cards
+            // don't always get a tailer, so check now rather than on attach.
+            if snapshot.recap != nil, let path = snapshot.transcriptPath,
+               let scan = JSONLTailer.scanFileTail(path: path) {
+                _ = snapshot.applyTranscriptBackfill(scan)
+            }
+            if let closed = p.closedSubagentIds, !closed.isEmpty {
+                snapshot.restoreClosedSubagentIds(closed)
+            }
+            if let agentTasks = p.agentTasks {
+                snapshot.agentTasks = agentTasks
+            }
+            // Restore persisted cliPid only if the process is still alive — avoids
+            // stale sessions reappearing briefly after the app or IDE restarts (#46).
+            if let pid = p.cliPid, pid > 0 {
+                let identity = ProcessIdentity(pid: pid, startTime: p.cliStartTime)
+                if ProcessTable.isLiveProcess(identity) {
+                    snapshot.cliPid = pid
+                    snapshot.cliStartTime = p.cliStartTime
+                }
+            }
+            // Skip sessions whose process is dead and status was idle — nothing to show.
+            // Keep Cursor Task tombstones / foldable orphans so applyCursor… can still
+            // honor closedSubagentIds after relaunch (otherwise merge can revive them).
+            if snapshot.cliPid == nil && snapshot.status == .idle && snapshot.lastUserPrompt == nil,
+               !Self.shouldKeepRestoredIdleCursorSession(
+                source: source,
+                sessionId: restoredSessionId,
+                providerSessionId: snapshot.providerSessionId,
+                transcriptPath: snapshot.transcriptPath,
+                closedSubagentIds: snapshot.closedSubagentIds
+               ) {
+                continue
+            }
+            sessions[restoredSessionId] = snapshot
+            refreshProviderTitle(for: restoredSessionId)
+            // Branch is re-read, not persisted — it may have changed between runs.
+            maybeRefreshGitBranch(
+                for: restoredSessionId,
+                cwdBefore: nil,
+                normalizedEventName: "SessionStart"
+            )
+            // Reattach exit monitoring without changing the restored idle/running snapshot.
+            tryMonitorSession(restoredSessionId)
+            // Harness is re-probed, not persisted — it may have restarted between runs.
+            maybeResolveHostHarness(for: restoredSessionId)
+        }
+        SessionPersistence.clear()
+        _ = applyCodexSubsessionModeToKnownSessions()
+        _ = applyCursorSubsessionModeToKnownSessions()
+        if activeSessionId == nil {
+            activeSessionId = sessions.first(where: { $0.value.status != .idle })?.key
+                ?? sessions.keys.sorted().first
+        }
+        refreshDerivedState()
+    }
+
+    /// Idle snapshots with no live process are usually discarded on restore.
+    /// Keep Cursor Task cards that carry a Stop tombstone so merge can still
+    /// honor `closedSubagentIds` after relaunch. A foldable transcript alone is
+    /// not enough — that would rehydrate finished Tasks when Stop was missed.
+    nonisolated static func shouldKeepRestoredIdleCursorSession(
+        source: String,
+        sessionId: String,
+        providerSessionId: String?,
+        transcriptPath: String?,
+        closedSubagentIds: [String]
+    ) -> Bool {
+        guard source == "cursor" || source == "cursor-cli" else { return false }
+        return !closedSubagentIds.isEmpty
+    }
+
+    func startSessionDiscovery() {
+        startCleanupTimer()
+        // Restore persisted sessions before process scan (deduped by scan)
+        restoreSessions()
+
+        // Initial scan for already-running sessions, respecting per-source toggles.
+        discovery.requestScan()
+        // Watch all known session-store roots so discovery keeps working when hooks are missed.
+        discovery.startProjectsWatcher()
+    }
+
+    /// Re-arm discovery after the watched roots changed — an extra config dir
+    /// was added, removed or paused in Settings → Hooks — and rescan at once so
+    /// sessions already running under a newly added root show up.
+    func restartProjectsWatcher() {
+        discovery.restartProjectsWatcher()
+    }
+
+    /// Provider thread IDs are authoritative when both sides have one. Two
+    /// native Codex Desktop threads can legitimately share a source and CWD
+    /// while having no PID, so they must not be collapsed into one card merely
+    /// because the generic discovery heuristic sees the same project path.
+    nonisolated static func providerSessionIdentifiersMayRepresentSameSession(
+        existing: String?,
+        discovered: String?
+    ) -> Bool {
+        guard let discovered, !discovered.isEmpty else { return true }
+        guard let existing, !existing.isEmpty else { return false }
+        return existing == discovered
+    }
+
+    /// Native-app and CLI discoveries are separate namespaces even when they
+    /// share the same provider and working directory. In particular, a Codex
+    /// CLI rollout has no native host bundle and must not be folded into a
+    /// Codex Desktop card left by state-database discovery.
+    nonisolated static func discoveryAppModesMayRepresentSameSession(
+        existingIsNativeAppMode: Bool,
+        discoveredTermBundleId: String?
+    ) -> Bool {
+        existingIsNativeAppMode == (discoveredTermBundleId != nil)
+    }
+
+    /// Completed Codex subagents are transient workers, not idle top-level
+    /// sessions. Their spawn-edge row may remain `open`, so transcript lifecycle
+    /// is the reliable signal for removing them from the island.
+    nonisolated static func isCompletedCodexSubagentDiscovery(
+        source: String,
+        parentSessionId: String?,
+        status: AgentStatus?
+    ) -> Bool {
+        source == "codex"
+            && parentSessionId?.isEmpty == false
+            && status == .idle
+    }
+
+    /// Update existing session's messages from discovered transcript data.
+    private func backfillSessionMessages(sessionId: String, from info: DiscoveredSession) -> Bool {
+        guard var session = sessions[sessionId], !info.recentMessages.isEmpty else { return false }
+        guard info.modifiedAt >= session.lastActivity || session.recentMessages.isEmpty else {
+            return false
+        }
+        var mutated = false
+        let messagesChanged = session.recentMessages.count != info.recentMessages.count ||
+            zip(session.recentMessages, info.recentMessages).contains { $0.isUser != $1.isUser || $0.text != $1.text }
+        if messagesChanged {
+            session.recentMessages = info.recentMessages
+            mutated = true
+        }
+        if let lastUser = info.recentMessages.last(where: { $0.isUser }),
+           session.lastUserPrompt != lastUser.text {
+            session.lastUserPrompt = lastUser.text
+            mutated = true
+        }
+        if let lastAssistant = info.recentMessages.last(where: { !$0.isUser }),
+           session.lastAssistantMessage != lastAssistant.text {
+            session.lastAssistantMessage = lastAssistant.text
+            mutated = true
+        }
+        if mutated {
+            sessions[sessionId] = session
+        }
+        return mutated
+    }
+
+    /// Merge discovered sessions into current state (skip already-known ones)
+    func integrateDiscovered(_ discovered: [DiscoveredSession]) {
+        var didMutate = false
+        for info in discovered {
+            if shouldSuppressClosedCodexDesktopDiscovery(info) {
+                continue
+            }
+            if isSupersededGrokDiscovery(info) {
+                continue
+            }
+            if routeDiscoveredSubsessionIfNeeded(info) {
+                didMutate = true
+                continue
+            }
+
+            if Self.isCompletedCodexSubagentDiscovery(
+                source: info.source,
+                parentSessionId: info.parentSessionId,
+                status: info.status
+            ), !hasWaitingRequest(onCard: info.sessionId) {
+                if sessions[info.sessionId] != nil {
+                    removeSession(info.sessionId)
+                    didMutate = true
+                }
+                continue
+            }
+
+            // Session already known — try to update PID and attach monitor.
+            // Discovery PIDs are heuristic (matched by CWD), so when the session already
+            // has a known-good alive PID that differs from discovery, we trust the existing
+            // one for both cliPid and monitor to avoid cross-session contamination.
+            if sessions[info.sessionId] != nil {
+                if applyDiscoveredRuntimeState(info, to: info.sessionId) {
+                    didMutate = true
+                }
+                if let pid = info.pid, pid > 0 {
+                    let existingPid = sessions[info.sessionId]?.cliPid ?? 0
+                    let existingProcess = resolvedSessionProcessIdentity(for: info.sessionId)
+                    let existingAlive = existingProcess.map(ProcessTable.isLiveProcess) ?? false
+                    if existingAlive && existingPid != pid {
+                        // Existing PID is alive and different — discovery PID is unreliable.
+                    } else {
+                        // No existing PID, or it's dead, or it matches — safe to use discovery PID.
+                        if !existingAlive, let process = ProcessTable.liveProcessIdentity(for: pid) {
+                            setSessionProcessIdentity(process, for: info.sessionId)
+                            didMutate = true
+                        }
+                    }
+                }
+                if backfillSessionMessages(sessionId: info.sessionId, from: info) {
+                    didMutate = true
+                }
+                if applyDiscoveredMetadata(info, to: info.sessionId) {
+                    didMutate = true
+                }
+                if linkDiscoveredChild(info) {
+                    didMutate = true
+                }
+                attachTranscriptTailerIfNeeded(sessionId: info.sessionId)
+                tryMonitorSession(info.sessionId)
+                refreshProviderTitle(
+                    for: info.sessionId,
+                    providerSessionId: info.providerSessionId ?? info.sessionId
+                )
+                continue
+            }
+
+            // Dedup: if a hook-created session already exists with same source + cwd + pid,
+            // skip the discovered one to avoid duplicate entries (e.g. Codex hooks vs
+            // file-based discovery produce different session IDs for the same process).
+            // Only dedup when PID matches (or discovered has no PID), so concurrent
+            // sessions in the same repo aren't incorrectly merged.
+            // Never merge a discovery (CLI) session with an existing native app session —
+            // they're fundamentally different even if they share source + cwd.
+            let duplicateKey = sessions.first(where: { (_, existing) in
+                guard existing.source == info.source,
+                      existing.cwd != nil, existing.cwd == info.cwd else { return false }
+                guard Self.discoveryAppModesMayRepresentSameSession(
+                    existingIsNativeAppMode: existing.isNativeAppMode,
+                    discoveredTermBundleId: info.termBundleId
+                ) else { return false }
+                guard Self.providerSessionIdentifiersMayRepresentSameSession(
+                    existing: existing.providerSessionId,
+                    discovered: info.providerSessionId
+                ) else { return false }
+                // Don't merge CLI discovery into a stale native app session whose app has quit —
+                // the PID was likely reattached incorrectly. If the native app IS running, allow merge.
+                if existing.isNativeAppMode,
+                   let bid = existing.termBundleId,
+                   !NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == bid }) {
+                    return false
+                }
+                // If we have PIDs for both and the existing one is still alive, they must match.
+                // Dead persisted PIDs should not block dedup / reattachment.
+                if let discoveredPid = info.pid, let existingPid = existing.cliPid,
+                   discoveredPid != existingPid,
+                   ProcessTable.isLiveProcess(ProcessIdentity(pid: existingPid, startTime: existing.cliStartTime)) { return false }
+                return true
+            })?.key
+
+            if let existingKey = duplicateKey {
+                if applyDiscoveredRuntimeState(info, to: existingKey) {
+                    didMutate = true
+                }
+                // Same guard as above: don't let unreliable discovery PID contaminate
+                // an existing session that has a known-good alive PID.
+                if let pid = info.pid, pid > 0 {
+                    let existingPid = sessions[existingKey]?.cliPid ?? 0
+                    let existingProcess = resolvedSessionProcessIdentity(for: existingKey)
+                    let existingAlive = existingProcess.map(ProcessTable.isLiveProcess) ?? false
+                    if existingAlive && existingPid != pid {
+                    } else {
+                        if !existingAlive, let process = ProcessTable.liveProcessIdentity(for: pid) {
+                            setSessionProcessIdentity(process, for: existingKey)
+                            didMutate = true
+                        }
+                    }
+                }
+                if backfillSessionMessages(sessionId: existingKey, from: info) {
+                    didMutate = true
+                }
+                if applyDiscoveredMetadata(info, to: existingKey) {
+                    didMutate = true
+                }
+                attachTranscriptTailerIfNeeded(sessionId: existingKey)
+                tryMonitorSession(existingKey)
+                refreshProviderTitle(
+                    for: existingKey,
+                    providerSessionId: info.providerSessionId ?? info.sessionId
+                )
+                continue
+            }
+
+            var session = SessionSnapshot(startTime: info.modifiedAt)
+            session.cwd = info.cwd
+            session.model = info.model
+            session.ttyPath = info.tty
+            session.recentMessages = info.recentMessages
+            session.source = info.source
+            session.status = info.status ?? .idle
+            session.lastActivity = info.modifiedAt
+            session.termBundleId = info.termBundleId
+            if let pid = info.pid, let process = ProcessTable.liveProcessIdentity(for: pid) {
+                session.cliPid = process.pid
+                session.cliStartTime = process.startTime
+            } else {
+                session.cliPid = info.pid
+            }
+            session.providerSessionId = SessionTitleStore.supports(provider: info.source)
+                ? (info.providerSessionId ?? info.sessionId)
+                : nil
+            if let last = info.recentMessages.last(where: { $0.isUser }) {
+                session.lastUserPrompt = last.text
+            }
+            if let last = info.recentMessages.last(where: { !$0.isUser }) {
+                session.lastAssistantMessage = last.text
+            }
+            session.transcriptPath = info.transcriptPath
+            session.parentSessionId = discoveredParentCardId(info)
+            sessions[info.sessionId] = session
+            refreshProviderTitle(
+                for: info.sessionId,
+                providerSessionId: info.providerSessionId ?? info.sessionId
+            )
+            tryMonitorSession(info.sessionId)
+            attachTranscriptTailerIfNeeded(sessionId: info.sessionId)
+            didMutate = true
+        }
+        if applyCodexSubsessionModeToKnownSessions() {
+            didMutate = true
+        }
+        if applyCursorSubsessionModeToKnownSessions() {
+            didMutate = true
+        }
+        if didMutate && activeSessionId == nil {
+            activeSessionId = sessions.keys.sorted().first
+        }
+        if didMutate {
+            scheduleSave()
+        }
+        refreshDerivedState()
+    }
+
+    private func shouldSuppressClosedCodexDesktopDiscovery(_ info: DiscoveredSession) -> Bool {
+        guard info.source == "codex",
+              info.termBundleId == Self.codexAppBundleId,
+              let providerSessionId = info.providerSessionId,
+              let closedAt = closedCodexAppThreads[providerSessionId] else {
+            return false
+        }
+        if info.modifiedAt <= closedAt {
+            return true
+        }
+        // A terminal flush may land just after `thread/closed`; only a newer
+        // processing lifecycle is evidence that the thread genuinely resumed.
+        guard info.status == .processing else { return true }
+        closedCodexAppThreads.removeValue(forKey: providerSessionId)
+        return false
+    }
+
+    /// Apply runtime fields that filesystem/state-DB discovery can know more
+    /// accurately than a stale restored snapshot. Interactive approval/question
+    /// states remain authoritative until their owning channel resolves them.
+    @discardableResult
+    private func applyDiscoveredRuntimeState(_ info: DiscoveredSession, to sessionId: String) -> Bool {
+        guard var session = sessions[sessionId] else { return false }
+        var mutated = false
+        let canApplyStatus = info.modifiedAt >= session.lastActivity
+
+        if info.modifiedAt > session.lastActivity {
+            session.lastActivity = info.modifiedAt
+            mutated = true
+        }
+        if let bundleId = info.termBundleId,
+           (canApplyStatus || session.termBundleId == nil),
+           session.termBundleId != bundleId {
+            session.termBundleId = bundleId
+            mutated = true
+        }
+        if let discoveredStatus = info.status,
+           canApplyStatus,
+           session.status != .waitingApproval,
+           session.status != .waitingQuestion,
+           session.status != discoveredStatus {
+            session.status = discoveredStatus
+            if discoveredStatus == .idle {
+                session.currentTool = nil
+                session.toolDescription = nil
+            }
+            mutated = true
+        }
+
+        if mutated {
+            sessions[sessionId] = session
+        }
+        return mutated
+    }
+
+    /// CWD and transcript path participate in tailer/process routing, so an old
+    /// asynchronous scan must not rewind them after a newer DB result. Missing
+    /// restored fields may still be filled regardless of timestamp.
+    @discardableResult
+    private func applyDiscoveredMetadata(_ info: DiscoveredSession, to sessionId: String) -> Bool {
+        guard var session = sessions[sessionId] else { return false }
+        let canReplace = info.modifiedAt >= session.lastActivity
+        var mutated = false
+
+        if (canReplace || session.cwd?.isEmpty != false), session.cwd != info.cwd {
+            session.cwd = info.cwd
+            mutated = true
+        }
+        if let path = info.transcriptPath,
+           (canReplace || session.transcriptPath == nil),
+           session.transcriptPath != path {
+            session.transcriptPath = path
+            mutated = true
+        }
+        if mutated {
+            sessions[sessionId] = session
+        }
+        return mutated
+    }
+
+    /// Link the discovered thread's own card to its parent (see
+    /// ``discoveredParentCardId(_:)``). Never a card the discovery was merged
+    /// into as a duplicate: a Codex CLI discovery names no provider thread, so
+    /// that can be another thread's card — a root, which a link would silence.
+    @discardableResult
+    private func linkDiscoveredChild(_ info: DiscoveredSession) -> Bool {
+        guard sessions[info.sessionId]?.parentSessionId == nil,
+              let parent = discoveredParentCardId(info) else {
+            return false
+        }
+        sessions[info.sessionId]?.parentSessionId = parent
+        return true
+    }
+
+    /// The card a discovered Codex subagent thread works for: its parent
+    /// thread's card, or the card that thread's hooks would build. Agent
+    /// Sub-Sessions shows it on a card of its own only in Show separately (or
+    /// while Merge has no parent card to fold it into), where it stays quiet.
+    private func discoveredParentCardId(_ info: DiscoveredSession) -> String? {
+        guard info.source == "codex",
+              let parentThreadId = info.parentSessionId,
+              !parentThreadId.isEmpty else {
+            return nil
+        }
+        let parent = findCodexParentSessionId(
+            providerSessionId: parentThreadId,
+            childTermBundleId: info.termBundleId
+        ) ?? CodexDiscovery.codexDiscoveryIdentity(
+            rawSessionId: parentThreadId,
+            isDesktop: info.termBundleId == Self.codexAppBundleId
+        ).sessionId
+        return parent == info.sessionId ? nil : parent
+    }
+
+    @discardableResult
+    func applyCodexSubsessionModeToKnownSessions(statePath: String? = nil) -> Bool {
+        let mode = Self.currentPluginSessionMode()
+        guard mode == .hide || mode == .merge else {
+            return false
+        }
+
+        let candidates = sessions.map { (sessionId: $0.key, session: $0.value) }
+        var transcriptMetadata: [String: CodexSubagentMetadata] = [:]
+        var databaseLookupIds: Set<String> = []
+
+        for candidate in candidates where candidate.session.source == "codex" {
+            let providerSessionId = candidate.session.providerSessionId ?? candidate.sessionId
+            if let transcriptPath = candidate.session.transcriptPath {
+                switch codexRollouts.inspection(transcriptPath: transcriptPath) {
+                case .subagent(let metadata):
+                    transcriptMetadata[candidate.sessionId] = metadata
+                    databaseLookupIds.insert(providerSessionId)
+                case .root:
+                    // A readable root session_meta is definitive. Falling back
+                    // to SQLite here turns every root card into a separate DB
+                    // open and can also resurrect stale spawn-edge relations.
+                    continue
+                case .unavailable:
+                    databaseLookupIds.insert(providerSessionId)
+                }
+            } else {
+                databaseLookupIds.insert(providerSessionId)
+            }
+        }
+        // One read-only DB connection for all candidates that genuinely need
+        // relation/status fallback. Root transcripts never enter this query.
+        let databaseRecords = CodexDiscovery.codexSpawnEdgeRecords(
+            threadIds: databaseLookupIds,
+            statePath: statePath
+        )
+        var didMutate = false
+
+        for candidate in candidates where candidate.session.source == "codex" {
+            let providerSessionId = candidate.session.providerSessionId ?? candidate.sessionId
+            guard let metadata = transcriptMetadata[candidate.sessionId]
+                    ?? databaseRecords[providerSessionId]?.metadata,
+                  metadata.parentThreadId != providerSessionId,
+                  !hasWaitingRequest(onCard: candidate.sessionId) else {
+                continue
+            }
+
+            if mode == .hide {
+                if sessions[candidate.sessionId] != nil {
+                    removeSession(candidate.sessionId)
+                    didMutate = true
+                }
+                continue
+            }
+
+            guard let parentKey = findCodexParentSessionId(
+                providerSessionId: metadata.parentThreadId,
+                childTermBundleId: candidate.session.termBundleId
+            ),
+                  parentKey != candidate.sessionId else {
+                continue
+            }
+
+            // Preserve the terminal snapshot before removeSession tears down the
+            // child card. Transcript lifecycle is authoritative even when the
+            // spawn edge is missing or remains "open".
+            let completedByTranscript = candidate.session.status == .idle
+            if sessions[candidate.sessionId] != nil {
+                removeSession(candidate.sessionId)
+                didMutate = true
+            }
+
+            if completedByTranscript
+                || databaseRecords[providerSessionId]?.status?.lowercased() == "closed" {
+                if sessions[parentKey]?.subagents.removeValue(forKey: providerSessionId) != nil {
+                    if sessions[parentKey]?.subagents.isEmpty == true {
+                        clearSubagentProjection(fromParentSession: parentKey)
+                    }
+                    didMutate = true
+                }
+                continue
+            }
+
+            let agentType = metadata.agentType ?? metadata.agentNickname ?? "Agent"
+            var subagent = sessions[parentKey]?.subagents[providerSessionId]
+                ?? SubagentState(agentId: providerSessionId, agentType: agentType)
+            subagent.status = candidate.session.status
+            subagent.currentTool = candidate.session.currentTool
+            subagent.toolDescription = candidate.session.toolDescription ?? metadata.agentNickname
+            if candidate.session.lastActivity > subagent.lastActivity {
+                subagent.lastActivity = candidate.session.lastActivity
+            }
+            // The thread's later hooks follow its row here.
+            subagent.subsessionKind = .codexThread
+            sessions[parentKey]?.subagents[providerSessionId] = subagent
+
+            if sessions[parentKey]?.status != .waitingApproval && sessions[parentKey]?.status != .waitingQuestion {
+                sessions[parentKey]?.status = .running
+                sessions[parentKey]?.currentTool = "Agent"
+                sessions[parentKey]?.toolDescription = metadata.agentNickname ?? agentType
+            }
+            if candidate.session.lastActivity > (sessions[parentKey]?.lastActivity ?? .distantPast) {
+                sessions[parentKey]?.lastActivity = candidate.session.lastActivity
+            }
+            activeSessionId = parentKey
+            didMutate = true
+        }
+
+        return didMutate
+    }
+
+    /// Whether an approval or question on this card still waits for the user.
+    /// The passes over known cards leave such a card alone: removing or
+    /// folding it would deny the request unseen. The next pass after it is
+    /// answered moves the card as usual.
+    private func hasWaitingRequest(onCard sessionId: String) -> Bool {
+        permissionQueue.contains(where: { ($0.event.sessionId ?? "default") == sessionId })
+            || questionQueue.contains(where: { ($0.event.sessionId ?? "default") == sessionId })
+    }
+
+    /// Apply Agent Sub-Sessions to known Cursor Task/subagent cards
+    /// (`transcriptPath` is the parent chat; `session_id` is the child).
+    /// `merge` / `hide` only; `separate` is handled by `separateMergedCursorSubagents()`.
+    @discardableResult
+    func applyCursorSubsessionModeToKnownSessions() -> Bool {
+        let mode = Self.currentPluginSessionMode()
+        guard mode == .hide || mode == .merge else {
+            return false
+        }
+
+        // Cursor Agent Tasks that fired Claude-format hooks keep default
+        // source=claude and never enter the fold loop — rebrand first.
+        var didMutate = rebrandMisattributedCursorTaskCards()
+
+        // Refresh after rebrand so newly tagged cursor cards are included.
+        let candidates = sessions.map { (sessionId: $0.key, session: $0.value) }
+
+        if mode == .hide {
+            for candidate in candidates {
+                let source = candidate.session.source
+                guard source == "cursor" || source == "cursor-cli" else { continue }
+                guard cursorFoldIdentity(for: candidate) != nil,
+                      !hasWaitingRequest(onCard: candidate.sessionId) else { continue }
+                if sessions[candidate.sessionId] != nil {
+                    removeSession(candidate.sessionId)
+                    didMutate = true
+                }
+            }
+            return hideMergedCursorSubagents() || didMutate
+        }
+
+        for candidate in candidates {
+            let source = candidate.session.source
+            guard source == "cursor" || source == "cursor-cli" else { continue }
+            guard let fold = cursorFoldIdentity(for: candidate),
+                  !hasWaitingRequest(onCard: candidate.sessionId) else { continue }
+            let parentId = fold.parentId
+            let childId = fold.childId
+
+            // If fold identity collides with this card, prefer the real parent id
+            // (child wrongly reused the parent's providerSessionId).
+            var parentKey = findSessionId(providerSessionId: parentId) ?? parentId
+            if parentKey == candidate.sessionId {
+                parentKey = parentId
+            }
+            if parentKey == candidate.sessionId { continue }
+
+            // Closed ids may sit on the parent (merge Stop) or the child card
+            // (separate Stop). Parent tombstone always wins over a late-running
+            // orphan card — relaunch clears via UserPromptSubmit on the hook path.
+            let candidateCarriesClosed = candidate.session.hasClosedSubagentId(childId)
+                || candidate.session.hasClosedSubagentId(candidate.sessionId)
+            let parentHoldsTombstone = sessions[parentKey]?.hasClosedSubagentId(childId) == true
+
+            if candidateCarriesClosed || parentHoldsTombstone {
+                if sessions[parentKey] == nil {
+                    var parent = SessionSnapshot(startTime: candidate.session.startTime)
+                    parent.source = source
+                    parent.cwd = candidate.session.cwd
+                    parent.model = candidate.session.model
+                    parent.termApp = candidate.session.termApp
+                    parent.termBundleId = candidate.session.termBundleId
+                    parent.transcriptPath = candidate.session.transcriptPath
+                    parent.providerSessionId = parentId
+                    // Closed ids only — parent is not actively working.
+                    parent.status = .idle
+                    parent.lastActivity = candidate.session.lastActivity
+                    sessions[parentKey] = parent
+                }
+                promoteCursorClosedIds(
+                    onto: parentKey,
+                    childId: childId,
+                    candidateSessionId: candidate.sessionId,
+                    childClosed: candidate.session.closedSubagentIds
+                )
+                if sessions[candidate.sessionId] != nil {
+                    removeSession(candidate.sessionId)
+                    didMutate = true
+                }
+                continue
+            }
+
+            // Idle orphan: always drop — never overwrite a live merged Task slot
+            // with an AfterAgentResponse→idle discovery card. Tombstones were
+            // already handled above; plain idle must not invent parents either.
+            if candidate.session.status == .idle {
+                if sessions[candidate.sessionId] != nil {
+                    removeSession(candidate.sessionId)
+                    didMutate = true
+                }
+                continue
+            }
+
+            if sessions[parentKey] == nil {
+                var parent = SessionSnapshot(startTime: candidate.session.startTime)
+                parent.source = source
+                parent.cwd = candidate.session.cwd
+                parent.model = candidate.session.model
+                parent.termApp = candidate.session.termApp
+                parent.termBundleId = candidate.session.termBundleId
+                parent.transcriptPath = candidate.session.transcriptPath
+                // Do not copy the Task/subagent process identity onto the parent chat.
+                parent.providerSessionId = parentId
+                parent.status = candidate.session.status == .idle ? .processing : candidate.session.status
+                parent.lastActivity = candidate.session.lastActivity
+                sessions[parentKey] = parent
+            } else if sessions[parentKey]?.transcriptPath == nil,
+                      let path = candidate.session.transcriptPath {
+                sessions[parentKey]?.transcriptPath = path
+            }
+
+            if sessions[candidate.sessionId] != nil {
+                removeSession(candidate.sessionId)
+                didMutate = true
+            }
+
+            // Prefer an existing parent monitor; skip if we only synthesized metadata.
+            if sessions[parentKey]?.cliPid != nil || sessions[parentKey]?.transcriptPath != nil {
+                if sessions[parentKey]?.transcriptPath != nil {
+                    attachTranscriptTailerIfNeeded(sessionId: parentKey)
+                }
+                if sessions[parentKey]?.cliPid != nil {
+                    tryMonitorSession(parentKey)
+                }
+            }
+
+            var subagent = sessions[parentKey]?.subagents[childId]
+                ?? SubagentState(agentId: childId, agentType: "cursor-subagent")
+            subagent.status = candidate.session.status
+            subagent.currentTool = candidate.session.currentTool
+            subagent.toolDescription = candidate.session.toolDescription
+            if candidate.session.lastActivity > subagent.lastActivity {
+                subagent.lastActivity = candidate.session.lastActivity
+            }
+            // The Task's later hooks follow its row here.
+            subagent.subsessionKind = .cursorTask
+            sessions[parentKey]?.subagents[childId] = subagent
+
+            if sessions[parentKey]?.status != .waitingApproval
+                && sessions[parentKey]?.status != .waitingQuestion {
+                sessions[parentKey]?.status = .running
+                if sessions[parentKey]?.currentTool == nil {
+                    sessions[parentKey]?.currentTool = "Agent"
+                    sessions[parentKey]?.toolDescription = "cursor-subagent"
+                }
+            }
+            if candidate.session.lastActivity > (sessions[parentKey]?.lastActivity ?? .distantPast) {
+                sessions[parentKey]?.lastActivity = candidate.session.lastActivity
+            }
+            activeSessionId = parentKey
+            didMutate = true
+        }
+
+        return didMutate
+    }
+
+    /// Record the foldable child id(s) on the parent — not an arbitrary union of
+    /// whatever closed set the orphan card carried.
+    private func promoteCursorClosedIds(
+        onto parentKey: String,
+        childId: String,
+        candidateSessionId: String,
+        childClosed: [String]
+    ) {
+        sessions[parentKey]?.recordClosedSubagentId(childId)
+        if candidateSessionId != childId {
+            sessions[parentKey]?.recordClosedSubagentId(candidateSessionId)
+        }
+        for id in childClosed where id == childId || id == candidateSessionId {
+            sessions[parentKey]?.recordClosedSubagentId(id)
+        }
+    }
+
+    private func markMergedSubagentWaiting(
+        sessionId: String,
+        event: HookEvent,
+        status: AgentStatus
+    ) {
+        guard let agentId = event.agentId else { return }
+        guard var session = sessions[sessionId] else { return }
+        // A row the request creates goes by the hook's own `agent_type` (a
+        // Codex thread's role, a pi child's agent). A child session Agent
+        // Sub-Sessions folded here is marked as one, so its later hooks
+        // follow this row.
+        let foldedKind = SubsessionRouter.foldedKind(of: event)
+        let agentType = (event.rawJSON["agent_type"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var subagent = session.subagents[agentId]
+            ?? SubagentState(
+                agentId: agentId,
+                agentType: agentType.flatMap { $0.isEmpty ? nil : $0 }
+                    ?? foldedKind?.defaultAgentType
+                    ?? "cursor-subagent"
+            )
+        subagent.status = status
+        subagent.lastActivity = Date()
+        if let foldedKind {
+            subagent.subsessionKind = foldedKind
+        }
+        session.subagents[agentId] = subagent
+        sessions[sessionId] = session
+    }
+
+    /// After Permission/Question UI resolves for a possibly folded Task.
+    /// With `agent_id`, never idle the parent — even if the subagent slot was
+    /// already removed (Stop race). Uses local copies to avoid exclusivity traps
+    /// when mutating nested `sessions[id].subagents[id]` fields.
+    private func resolveMergedSubagentAfterUI(
+        sessionId: String,
+        agentId: String?,
+        subagentStatus: AgentStatus,
+        keepSubagentTool: String?,
+        idleParentWhenNoAgent: Bool
+    ) {
+        if let agentId {
+            guard var session = sessions[sessionId] else { return }
+            if var subagent = session.subagents[agentId] {
+                subagent.status = subagentStatus
+                if subagentStatus == .processing {
+                    subagent.currentTool = nil
+                    subagent.toolDescription = nil
+                } else if let keepSubagentTool {
+                    subagent.currentTool = keepSubagentTool
+                }
+                session.subagents[agentId] = subagent
+            }
+            let hasNonIdleSubagents = session.subagents.values.contains { $0.status != .idle }
+            if hasNonIdleSubagents {
+                let agentType = session.subagents[agentId]?.agentType ?? "cursor-subagent"
+                session.status = .running
+                session.currentTool = "Agent"
+                if session.toolDescription == nil {
+                    session.toolDescription = agentType
+                }
+            } else {
+                session.status = .processing
+                session.currentTool = nil
+                session.toolDescription = nil
+            }
+            sessions[sessionId] = session
+            return
+        }
+
+        if idleParentWhenNoAgent {
+            sessions[sessionId]?.status = .idle
+            sessions[sessionId]?.currentTool = nil
+            sessions[sessionId]?.toolDescription = nil
+        } else {
+            sessions[sessionId]?.status = .processing
+            sessions[sessionId]?.currentTool = nil
+            sessions[sessionId]?.toolDescription = nil
+        }
+    }
+
+    /// Suppress Permission/Question UI for Stop'd Tasks: merged `agent_id` tombstones
+    /// or separate-mode self-tombstones (card id recorded in ``closedSubagentIds``).
+    private func shouldSuppressClosedSubagentUI(sessionId: String, agentId: String?) -> Bool {
+        if let agentId, sessions[sessionId]?.hasClosedSubagentId(agentId) == true { return true }
+        if agentId == nil, sessions[sessionId]?.hasClosedSubagentId(sessionId) == true { return true }
+        return false
+    }
+
+    /// Parent/child ids when this card's transcript belongs to another Cursor chat.
+    private func cursorFoldIdentity(
+        for candidate: (sessionId: String, session: SessionSnapshot)
+    ) -> (parentId: String, childId: String)? {
+        // Prefer providerSessionId if it folds; else the card key (used as agent_id).
+        let primaryId = candidate.session.providerSessionId ?? candidate.sessionId
+        let parentFromPrimary = CursorSessionFolding.foldTarget(
+            childSessionId: primaryId,
+            transcriptPath: candidate.session.transcriptPath
+        )
+        let parentFromCard = candidate.sessionId == primaryId
+            ? nil
+            : CursorSessionFolding.foldTarget(
+                childSessionId: candidate.sessionId,
+                transcriptPath: candidate.session.transcriptPath
+            )
+        if let parentFromPrimary {
+            return (parentFromPrimary, primaryId)
+        }
+        if let parentFromCard {
+            return (parentFromCard, candidate.sessionId)
+        }
+        return nil
+    }
+
+    /// Rebrand default-Claude cards that are actually Cursor Agent Tasks
+    /// (`~/.cursor/.../agent-transcripts/.../subagents/<id>.jsonl`), and give
+    /// Cursor-labelled Task cards that transcript, which folds them.
+    ///
+    /// Runs on every hook event and discovery scan, so it never touches the
+    /// disk: cards without a Cursor transcript path are looked up in
+    /// `cursorSubagentIndex`, and a card the index does not resolve is looked
+    /// up again by fresh walks off the main actor, on a bounded schedule
+    /// (`scheduleCursorSubagentLookups`). When a walk finds it, the card is
+    /// rebranded then (`installCursorSubagentIndex`).
+    @discardableResult
+    func rebrandMisattributedCursorTaskCards() -> Bool {
+        var didMutate = false
+        for (sessionId, snap) in sessions {
+            guard Self.needsCursorTaskTranscriptLookup(snap) else { continue }
+
+            if let path = snap.transcriptPath,
+               CursorSessionFolding.isCursorAgentTranscriptPath(path) {
+                sessions[sessionId]?.source = "cursor"
+                didMutate = true
+                continue
+            }
+            // A remote card's transcripts live on its own host, never in the local index.
+            guard !snap.isRemote else { continue }
+
+            guard let found = cursorSubagentIndex?.transcriptPath(
+                sessionId: sessionId,
+                preferredBase: Self.cursorProjectTranscriptBase(cwd: snap.cwd)
+            ) else {
+                continue
+            }
+            if !CursorSubsessionRouter.isCursorFamilySource(snap.source) {
+                sessions[sessionId]?.source = "cursor"
+            }
+            if sessions[sessionId]?.transcriptPath == nil {
+                sessions[sessionId]?.transcriptPath = found
+            }
+            didMutate = true
+        }
+        scheduleCursorSubagentLookups()
+        return didMutate
+    }
+
+    /// Cards the Task transcript index is consulted for: default-Claude cards,
+    /// and local Cursor cards with no transcript at all. A Task's own hooks
+    /// never carry one (Cursor resolves `transcript_path` only for a top-level
+    /// conversation), and since the bridge reads Cursor's payload (#377) the
+    /// Task hooks Cursor runs from Claude Code's config arrive labelled Cursor
+    /// rather than as the default Claude.
+    nonisolated static func needsCursorTaskTranscriptLookup(_ snap: SessionSnapshot) -> Bool {
+        switch SessionSnapshot.normalizedSupportedSource(snap.source) {
+        case nil, "claude":
+            return true
+        case "cursor", "cursor-cli":
+            return snap.transcriptPath == nil && !snap.isRemote
+        default:
+            return false
+        }
+    }
+
+    /// Give each card the index does not resolve a lookup schedule (kept
+    /// across calls, dropped once the card is gone or rebranded), then start
+    /// the walk its earliest due lookup needs, or arm the re-check timer for
+    /// it. At most one walk and one timer are ever pending.
+    private func scheduleCursorSubagentLookups(now: Date = Date()) {
+        // `separate` folds nothing, so nothing is looked up; leaving it starts
+        // every card's schedule afresh (`applyCurrentPluginSessionMode`).
+        let mode = Self.currentPluginSessionMode()
+        guard mode == .merge || mode == .hide else {
+            resetCursorSubagentLookups()
+            return
+        }
+        var lookups: [String: CursorSubagentLookupSchedule] = [:]
+        for sessionId in cursorRebrandCandidateIds()
+        where cursorSubagentIndex?.contains(sessionId: sessionId) != true {
+            lookups[sessionId] = cursorSubagentLookups[sessionId]
+                ?? CursorSubagentLookupSchedule(since: now, delays: cursorSubagentLookupDelays)
+        }
+        cursorSubagentLookups = lookups
+        guard cursorSubagentIndexTask == nil else { return }  // its completion reschedules
+        guard let due = lookups.values.compactMap(\.nextLookup).min() else {
+            cancelCursorSubagentIndexRecheck()
+            return
+        }
+        if due <= now {
+            startCursorSubagentIndexRebuild()
+        } else {
+            armCursorSubagentIndexRecheck(at: due)
+        }
+    }
+
+    /// The timer, not hook traffic, drives a card's later lookups.
+    private func armCursorSubagentIndexRecheck(at due: Date) {
+        if cursorSubagentIndexRecheck != nil, let armed = cursorSubagentIndexRecheckAt, armed <= due { return }
+        cursorSubagentIndexRecheck?.cancel()
+        cursorSubagentIndexRecheckAt = due
+        let delay = max(0, due.timeIntervalSinceNow)
+        cursorSubagentIndexRecheck = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64((delay * 1_000_000_000).rounded(.up)))
+            guard let self, !Task.isCancelled else { return }
+            self.cursorSubagentIndexRecheck = nil
+            self.cursorSubagentIndexRecheckAt = nil
+            self.scheduleCursorSubagentLookups()
+        }
+    }
+
+    private func cancelCursorSubagentIndexRecheck() {
+        cursorSubagentIndexRecheck?.cancel()
+        cursorSubagentIndexRecheck = nil
+        cursorSubagentIndexRecheckAt = nil
+    }
+
+    /// Drop every card's lookup schedule and the timer driving them.
+    private func resetCursorSubagentLookups() {
+        cursorSubagentLookups = [:]
+        cancelCursorSubagentIndexRecheck()
+    }
+
+    private func startCursorSubagentIndexRebuild() {
+        guard cursorSubagentIndexTask == nil else { return }
+        cancelCursorSubagentIndexRecheck()
+        let scan = discovery.scanners.cursorSubagentIndex
+        cursorSubagentIndexTask = Task.detached(priority: .utility) { [weak self] in
+            guard !Task.isCancelled else { return }
+            let index = scan()
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                // Cancelled by teardown, which already dropped the handle.
+                guard let self, !Task.isCancelled else { return }
+                self.cursorSubagentIndexTask = nil
+                self.installCursorSubagentIndex(index)
+            }
+        }
+    }
+
+    /// Adopt a freshly walked index: count it against the schedule of every
+    /// card it does not resolve, and rebrand (and fold) the cards it does.
+    private func installCursorSubagentIndex(_ index: CursorSubagentTranscriptIndex) {
+        cursorSubagentIndex = index
+        for sessionId in Array(cursorSubagentLookups.keys) where !index.contains(sessionId: sessionId) {
+            cursorSubagentLookups[sessionId]?.recordMiss(walkStartedAt: index.builtAt)
+        }
+
+        let resolvedAny = cursorRebrandCandidateIds().contains { index.contains(sessionId: $0) }
+        if resolvedAny, applyCursorSubsessionModeToKnownSessions() {
+            scheduleSave()
+            startRotationIfNeeded()
+            refreshDerivedState()
+        } else {
+            scheduleCursorSubagentLookups()
+        }
+    }
+
+    /// Local cards the index may resolve (``needsCursorTaskTranscriptLookup``)
+    /// whose transcript path does not already say Cursor.
+    private func cursorRebrandCandidateIds() -> [String] {
+        sessions.compactMap { sessionId, snap in
+            guard Self.needsCursorTaskTranscriptLookup(snap), !snap.isRemote,
+                  !CursorSessionFolding.isCursorAgentTranscriptPath(snap.transcriptPath) else { return nil }
+            return sessionId
+        }
+    }
+
+    /// `~/.cursor/projects/<cwd-encoded>/agent-transcripts` — where a Task run
+    /// from `cwd` keeps its transcripts.
+    nonisolated static func cursorProjectTranscriptBase(
+        cwd: String?,
+        home: String = FileManager.default.homeDirectoryForCurrentUser.path
+    ) -> String? {
+        guard let cwd, !cwd.isEmpty else { return nil }
+        return "\(home)/.cursor/projects/\(cwd.appProjectDirEncoded())/agent-transcripts"
+    }
+
+    func applyCurrentPluginSessionMode(persist: Bool = true) {
+        let mode = Self.currentPluginSessionMode()
+        var didMutate = false
+
+        switch mode {
+        case .separate:
+            // Back in merge or hide, every candidate card is looked up afresh.
+            resetCursorSubagentLookups()
+            didMutate = separateMergedCodexSubagents()
+            didMutate = separateMergedCursorSubagents() || didMutate
+        case .merge:
+            didMutate = applyCodexSubsessionModeToKnownSessions()
+            didMutate = applyCursorSubsessionModeToKnownSessions() || didMutate
+        case .hide:
+            didMutate = applyCodexSubsessionModeToKnownSessions()
+            didMutate = hideMergedCodexSubagents() || didMutate
+            didMutate = applyCursorSubsessionModeToKnownSessions() || didMutate
+        }
+
+        if didMutate {
+            if persist {
+                scheduleSave()
+                startRotationIfNeeded()
+            }
+            refreshDerivedState()
+        }
+    }
+
+    @discardableResult
+    private func separateMergedCodexSubagents() -> Bool {
+        let parentCandidates = sessions.map { (sessionId: $0.key, session: $0.value) }
+        let childIds = Set(parentCandidates.flatMap { $0.session.subagents.keys })
+        // One DB connection for the whole mode transition; never open SQLite
+        // once per child (each open carries a busy timeout).
+        let databaseRecords = CodexDiscovery.codexSpawnEdgeRecords(threadIds: childIds)
+        var didMutate = false
+
+        for parent in parentCandidates where parent.session.source == "codex" && !parent.session.subagents.isEmpty {
+            for (agentId, subagent) in parent.session.subagents {
+                let childIsDesktop = parent.session.termBundleId == Self.codexAppBundleId
+                let childKey = findCodexParentSessionId(
+                    providerSessionId: agentId,
+                    childTermBundleId: parent.session.termBundleId
+                ) ?? CodexDiscovery.codexDiscoveryIdentity(
+                    rawSessionId: agentId,
+                    isDesktop: childIsDesktop
+                ).sessionId
+                guard childKey != parent.sessionId else { continue }
+
+                var child = sessions[childKey] ?? SessionSnapshot(startTime: subagent.startTime)
+                child.source = "codex"
+                child.providerSessionId = agentId
+                child.cwd = child.cwd ?? parent.session.cwd
+                // The child's own model (its hooks, then its rollout below) —
+                // never the parent's: children routinely run on another model.
+                child.model = child.model ?? subagent.model
+                child.reasoningEffort = child.reasoningEffort ?? subagent.reasoningEffort
+                child.permissionMode = child.permissionMode ?? parent.session.permissionMode
+                child.termApp = child.termApp ?? parent.session.termApp
+                child.itermSessionId = child.itermSessionId ?? parent.session.itermSessionId
+                child.ttyPath = child.ttyPath ?? parent.session.ttyPath
+                child.kittyWindowId = child.kittyWindowId ?? parent.session.kittyWindowId
+                child.tmuxPane = child.tmuxPane ?? parent.session.tmuxPane
+                child.tmuxClientTty = child.tmuxClientTty ?? parent.session.tmuxClientTty
+                child.tmuxEnv = child.tmuxEnv ?? parent.session.tmuxEnv
+                child.termBundleId = child.termBundleId ?? parent.session.termBundleId
+                child.remoteHostId = child.remoteHostId ?? parent.session.remoteHostId
+                child.remoteHostName = child.remoteHostName ?? parent.session.remoteHostName
+                child.cliPid = child.cliPid ?? parent.session.cliPid
+                child.cliStartTime = child.cliStartTime ?? parent.session.cliStartTime
+                child.status = subagent.status
+                child.currentTool = subagent.currentTool
+                child.toolDescription = subagent.toolDescription ?? subagent.agentType
+                child.lastActivity = subagent.lastActivity
+                // Still the parent's child, on a card of its own: quiet.
+                child.parentSessionId = child.parentSessionId ?? parent.sessionId
+
+                let transcriptMetadata = child.transcriptPath.flatMap {
+                    CodexDiscovery.codexSubagentMetadata(inTranscriptPath: $0)
+                }
+                let metadata = transcriptMetadata ?? databaseRecords[agentId]?.metadata
+                if child.sessionTitle == nil {
+                    child.sessionTitle = metadata?.agentNickname ?? subagent.toolDescription ?? subagent.agentType
+                }
+                if child.transcriptPath == nil {
+                    if let statePath = databaseRecords[agentId]?.transcriptPath,
+                       FileManager.default.fileExists(atPath: statePath) {
+                        child.transcriptPath = statePath
+                    } else if let cwd = parent.session.cwd {
+                        let base = FileManager.default.homeDirectoryForCurrentUser
+                            .appendingPathComponent(".codex/sessions").path
+                        child.transcriptPath = CodexDiscovery.findRecentCodexSession(
+                            base: base,
+                            cwd: cwd,
+                            after: parent.session.cliStartTime,
+                            fm: .default
+                        )
+                    }
+                }
+                if let transcriptPath = child.transcriptPath {
+                    let (model, messages) = CodexDiscovery.readRecentFromCodexTranscript(path: transcriptPath)
+                    child.model = child.model ?? model
+                    if !messages.isEmpty {
+                        child.recentMessages = messages
+                        child.lastUserPrompt = messages.last(where: \.isUser)?.text
+                        child.lastAssistantMessage = messages.last(where: { !$0.isUser })?.text
+                    }
+                }
+
+                sessions[childKey] = child
+                refreshProviderTitle(for: childKey, providerSessionId: agentId)
+                attachTranscriptTailerIfNeeded(sessionId: childKey)
+                tryMonitorSession(childKey)
+                sessions[parent.sessionId]?.subagents.removeValue(forKey: agentId)
+                if subagent.status != .idle {
+                    activeSessionId = childKey
+                }
+                didMutate = true
+            }
+            if sessions[parent.sessionId]?.subagents.isEmpty == true {
+                clearSubagentProjection(fromParentSession: parent.sessionId)
+            }
+        }
+
+        return didMutate
+    }
+
+    @discardableResult
+    private func hideMergedCodexSubagents() -> Bool {
+        var didMutate = false
+        for (sessionId, session) in sessions where session.source == "codex" && !session.subagents.isEmpty {
+            sessions[sessionId]?.subagents.removeAll()
+            clearSubagentProjection(fromParentSession: sessionId)
+            didMutate = true
+        }
+        return didMutate
+    }
+
+    /// Split Cursor parent.subagents into standalone cards (Agent Sub-Sessions: separate).
+    @discardableResult
+    private func separateMergedCursorSubagents() -> Bool {
+        let parentCandidates = sessions.map { (sessionId: $0.key, session: $0.value) }
+        var didMutate = false
+
+        for parent in parentCandidates
+        where (parent.session.source == "cursor" || parent.session.source == "cursor-cli")
+            && !parent.session.subagents.isEmpty {
+            for (agentId, subagent) in parent.session.subagents {
+                let childKey = findSessionId(providerSessionId: agentId) ?? agentId
+                guard childKey != parent.sessionId else { continue }
+
+                var child = sessions[childKey] ?? SessionSnapshot(startTime: subagent.startTime)
+                child.source = parent.session.source
+                child.providerSessionId = agentId
+                child.cwd = child.cwd ?? parent.session.cwd
+                // Own model only, never the parent chat's (see the Codex split).
+                child.model = child.model ?? subagent.model
+                child.reasoningEffort = child.reasoningEffort ?? subagent.reasoningEffort
+                child.permissionMode = child.permissionMode ?? parent.session.permissionMode
+                child.termApp = child.termApp ?? parent.session.termApp
+                child.itermSessionId = child.itermSessionId ?? parent.session.itermSessionId
+                child.ttyPath = child.ttyPath ?? parent.session.ttyPath
+                child.kittyWindowId = child.kittyWindowId ?? parent.session.kittyWindowId
+                child.tmuxPane = child.tmuxPane ?? parent.session.tmuxPane
+                child.tmuxClientTty = child.tmuxClientTty ?? parent.session.tmuxClientTty
+                child.tmuxEnv = child.tmuxEnv ?? parent.session.tmuxEnv
+                child.termBundleId = child.termBundleId ?? parent.session.termBundleId
+                child.cmuxSurfaceId = child.cmuxSurfaceId ?? parent.session.cmuxSurfaceId
+                child.cmuxWorkspaceId = child.cmuxWorkspaceId ?? parent.session.cmuxWorkspaceId
+                child.zellijPaneId = child.zellijPaneId ?? parent.session.zellijPaneId
+                child.zellijSessionName = child.zellijSessionName ?? parent.session.zellijSessionName
+                child.weztermPaneId = child.weztermPaneId ?? parent.session.weztermPaneId
+                child.herdrPaneId = child.herdrPaneId ?? parent.session.herdrPaneId
+                child.herdrSocketPath = child.herdrSocketPath ?? parent.session.herdrSocketPath
+                child.herdrBinaryPath = child.herdrBinaryPath ?? parent.session.herdrBinaryPath
+                child.claudeDesktopSessionId = child.claudeDesktopSessionId ?? parent.session.claudeDesktopSessionId
+                child.remoteHostId = child.remoteHostId ?? parent.session.remoteHostId
+                child.remoteHostName = child.remoteHostName ?? parent.session.remoteHostName
+                // Keep the child's own process identity only — the parent Cursor chat
+                // often shares the IDE process, which must not be attributed to Tasks.
+                child.status = subagent.status
+                child.currentTool = subagent.currentTool
+                child.toolDescription = subagent.toolDescription ?? subagent.agentType
+                child.lastActivity = subagent.lastActivity
+                // Still the chat's Task, on a card of its own: quiet.
+                child.parentSessionId = child.parentSessionId ?? parent.sessionId
+                if child.sessionTitle == nil {
+                    child.sessionTitle = subagent.toolDescription ?? subagent.agentType
+                }
+                // Keep parent transcriptPath for later fold identity, but do not
+                // attach a second JSONLTailer on the same parent file (steals the
+                // parent's live tail). Prefer a child-specific path when present.
+                let parentTranscript = parent.session.transcriptPath
+                if child.transcriptPath == nil {
+                    child.transcriptPath = parentTranscript
+                }
+                let shouldTailChildTranscript =
+                    child.transcriptPath != nil && child.transcriptPath != parentTranscript
+
+                sessions[childKey] = child
+                refreshProviderTitle(for: childKey, providerSessionId: agentId)
+                if shouldTailChildTranscript {
+                    attachTranscriptTailerIfNeeded(sessionId: childKey)
+                }
+                if child.cliPid != nil {
+                    tryMonitorSession(childKey)
+                }
+                sessions[parent.sessionId]?.subagents.removeValue(forKey: agentId)
+                if subagent.status != .idle {
+                    activeSessionId = childKey
+                }
+                didMutate = true
+            }
+            if sessions[parent.sessionId]?.subagents.isEmpty == true {
+                clearSubagentProjection(fromParentSession: parent.sessionId)
+            }
+        }
+
+        return didMutate
+    }
+
+    /// Clear Cursor parent.subagents (Agent Sub-Sessions: hide).
+    @discardableResult
+    private func hideMergedCursorSubagents() -> Bool {
+        var didMutate = false
+        for (sessionId, session) in sessions
+        where (session.source == "cursor" || session.source == "cursor-cli") && !session.subagents.isEmpty {
+            sessions[sessionId]?.subagents.removeAll()
+            clearSubagentProjection(fromParentSession: sessionId)
+            didMutate = true
+        }
+        return didMutate
+    }
+
+    private func clearSubagentProjection(fromParentSession sessionId: String) {
+        guard sessions[sessionId]?.currentTool == "Agent" else { return }
+        sessions[sessionId]?.currentTool = nil
+        sessions[sessionId]?.toolDescription = nil
+        if sessions[sessionId]?.status == .running {
+            sessions[sessionId]?.status = .processing
+        }
+    }
+
+    private func routeDiscoveredSubsessionIfNeeded(_ info: DiscoveredSession) -> Bool {
+        guard info.source == "codex",
+              let parentSessionId = info.parentSessionId,
+              !parentSessionId.isEmpty,
+              // A thread whose request waits on its own card stays there
+              // until it is answered; discovery just keeps the card current.
+              !hasWaitingRequest(onCard: info.sessionId) else {
+            return false
+        }
+
+        let mode = Self.currentPluginSessionMode()
+        guard mode == .hide || mode == .merge else {
+            return false
+        }
+
+        if mode == .hide {
+            if sessions[info.sessionId] != nil {
+                removeSession(info.sessionId)
+            }
+            return true
+        }
+
+        guard let parentKey = findCodexParentSessionId(
+            providerSessionId: parentSessionId,
+            childTermBundleId: info.termBundleId
+        ) else {
+            return false
+        }
+
+        if sessions[info.sessionId] != nil {
+            removeSession(info.sessionId)
+        }
+
+        let providerSessionId = info.providerSessionId ?? info.sessionId
+
+        if info.subagentStatus?.lowercased() == "closed" || info.status == .idle {
+            if sessions[parentKey]?.subagents.removeValue(forKey: providerSessionId) != nil,
+               sessions[parentKey]?.subagents.isEmpty == true {
+                clearSubagentProjection(fromParentSession: parentKey)
+            }
+            return true
+        }
+
+        let agentType = info.agentType ?? info.agentNickname ?? "Agent"
+        var subagent = sessions[parentKey]?.subagents[providerSessionId]
+            ?? SubagentState(agentId: providerSessionId, agentType: agentType)
+        subagent.status = .running
+        subagent.toolDescription = info.agentNickname
+        subagent.lastActivity = info.modifiedAt
+        // The thread's hooks follow its row here.
+        subagent.subsessionKind = .codexThread
+        sessions[parentKey]?.subagents[providerSessionId] = subagent
+
+        if sessions[parentKey]?.status != .waitingApproval && sessions[parentKey]?.status != .waitingQuestion {
+            sessions[parentKey]?.status = .running
+            sessions[parentKey]?.currentTool = "Agent"
+            sessions[parentKey]?.toolDescription = info.agentNickname ?? agentType
+        }
+        // Read before the assignment: writing `sessions[...]` while the RHS also
+        // reads it overlaps a modify with a read access and traps at runtime.
+        let previousParentActivity = sessions[parentKey]?.lastActivity ?? .distantPast
+        sessions[parentKey]?.lastActivity = max(previousParentActivity, info.modifiedAt)
+        activeSessionId = parentKey
+        return true
+    }
 
     func stopSessionDiscovery() {
         discovery.stop()
