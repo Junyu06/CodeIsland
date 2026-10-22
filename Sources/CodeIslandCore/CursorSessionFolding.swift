@@ -273,7 +273,7 @@ public enum CursorSubsessionRouter {
               let ppid = SubsessionRouter.positivePpid(in: raw) else {
             return nil
         }
-        let cutoff = now.addingTimeInterval(-300)
+        let cutoff = now.addingTimeInterval(-SubsessionCards.samePidActivityWindow)
         for src in parentSourceSearchOrder(primarySource: source) {
             if let match = uniqueActiveSamePidCursorSession(
                 source: src,

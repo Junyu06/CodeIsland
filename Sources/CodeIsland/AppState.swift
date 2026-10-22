@@ -784,9 +784,13 @@ final class AppState {
         refreshDerivedState()
     }
 
-    private nonisolated static func currentPluginSessionMode() -> String {
-        UserDefaults.standard.string(forKey: SettingsKey.pluginSessionMode)
-            ?? SettingsDefaults.pluginSessionMode
+    /// Agent Sub-Sessions as set now; an unknown setting reads as Show
+    /// separately, the default (HookServer routes hooks by the same reading).
+    nonisolated static func currentPluginSessionMode() -> SubsessionMode {
+        SubsessionMode(
+            setting: UserDefaults.standard.string(forKey: SettingsKey.pluginSessionMode)
+                ?? SettingsDefaults.pluginSessionMode
+        )
     }
 
     // MARK: - Process Monitoring (DispatchSource)
@@ -4239,7 +4243,7 @@ final class AppState {
     @discardableResult
     func applyCodexSubsessionModeToKnownSessions(statePath: String? = nil) -> Bool {
         let mode = Self.currentPluginSessionMode()
-        guard mode == "hide" || mode == "merge" else {
+        guard mode == .hide || mode == .merge else {
             return false
         }
 
@@ -4283,7 +4287,7 @@ final class AppState {
                 continue
             }
 
-            if mode == "hide" {
+            if mode == .hide {
                 if sessions[candidate.sessionId] != nil {
                     removeSession(candidate.sessionId)
                     didMutate = true
@@ -4362,7 +4366,7 @@ final class AppState {
     @discardableResult
     func applyCursorSubsessionModeToKnownSessions() -> Bool {
         let mode = Self.currentPluginSessionMode()
-        guard mode == "hide" || mode == "merge" else {
+        guard mode == .hide || mode == .merge else {
             return false
         }
 
@@ -4373,7 +4377,7 @@ final class AppState {
         // Refresh after rebrand so newly tagged cursor cards are included.
         let candidates = sessions.map { (sessionId: $0.key, session: $0.value) }
 
-        if mode == "hide" {
+        if mode == .hide {
             for candidate in candidates {
                 let source = candidate.session.source
                 guard source == "cursor" || source == "cursor-cli" else { continue }
@@ -4711,7 +4715,7 @@ final class AppState {
         // `separate` folds nothing, so nothing is looked up; leaving it starts
         // every card's schedule afresh (`applyCurrentPluginSessionMode`).
         let mode = Self.currentPluginSessionMode()
-        guard mode == "merge" || mode == "hide" else {
+        guard mode == .merge || mode == .hide else {
             resetCursorSubagentLookups()
             return
         }
@@ -4820,20 +4824,18 @@ final class AppState {
         var didMutate = false
 
         switch mode {
-        case "separate":
+        case .separate:
             // Back in merge or hide, every candidate card is looked up afresh.
             resetCursorSubagentLookups()
             didMutate = separateMergedCodexSubagents()
             didMutate = separateMergedCursorSubagents() || didMutate
-        case "merge":
+        case .merge:
             didMutate = applyCodexSubsessionModeToKnownSessions()
             didMutate = applyCursorSubsessionModeToKnownSessions() || didMutate
-        case "hide":
+        case .hide:
             didMutate = applyCodexSubsessionModeToKnownSessions()
             didMutate = hideMergedCodexSubagents() || didMutate
             didMutate = applyCursorSubsessionModeToKnownSessions() || didMutate
-        default:
-            return
         }
 
         if didMutate {
@@ -5071,11 +5073,11 @@ final class AppState {
         }
 
         let mode = Self.currentPluginSessionMode()
-        guard mode == "hide" || mode == "merge" else {
+        guard mode == .hide || mode == .merge else {
             return false
         }
 
-        if mode == "hide" {
+        if mode == .hide {
             if sessions[info.sessionId] != nil {
                 removeSession(info.sessionId)
             }

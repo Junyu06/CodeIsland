@@ -391,10 +391,7 @@ class HookServer {
     /// child's own card, linked to its parent; folded into the parent's card;
     /// or hidden.
     private func routeSubsessionPayloadIfNeeded(data: Data) -> RoutedHook {
-        let mode = SubsessionMode(
-            setting: UserDefaults.standard.string(forKey: SettingsKey.pluginSessionMode)
-                ?? SettingsDefaults.pluginSessionMode
-        )
+        let mode = AppState.currentPluginSessionMode()
         guard Self.mayNeedSubsessionRouting(data: data, mode: mode),
               var raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return RoutedHook(data: data)
