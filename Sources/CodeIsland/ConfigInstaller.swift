@@ -1734,7 +1734,18 @@ struct ConfigInstaller {
         guard let merged = JSONMinimalEditor.setTopLevelValue(in: source, key: key, value: value) else {
             return false
         }
+        // Runs on every launch: a file that already says this is left alone.
+        // The dictionaries we build serialize in a different key order in
+        // each process, so writing anyway rewrote every config on every launch.
+        if let originalText, isSameJSONDocument(originalText, merged) { return true }
         return ConfigPathIdentity.write(Data(merged.utf8), to: cli.fullPath, fileManager: fm)
+    }
+
+    /// Whether two JSON (or JSONC) texts hold the same document, whatever
+    /// their key order, spacing or comments.
+    static func isSameJSONDocument(_ lhs: String, _ rhs: String) -> Bool {
+        guard let left = parseJSONString(lhs), let right = parseJSONString(rhs) else { return false }
+        return NSDictionary(dictionary: left).isEqual(to: right)
     }
 
     // MARK: - External CLIs (use bridge binary directly)
@@ -2743,6 +2754,7 @@ struct ConfigInstaller {
         if !original.isEmpty, parseJSONString(original) == nil { return false }
 
         let merged = mergeZcodeHooks(into: original)
+        if !original.isEmpty, isSameJSONDocument(original, merged) { return true }
         guard let data = merged.data(using: .utf8) else { return false }
         do {
             try data.write(to: URL(fileURLWithPath: zcodeConfigPath), options: .atomic)

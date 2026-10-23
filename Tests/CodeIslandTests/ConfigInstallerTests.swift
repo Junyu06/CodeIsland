@@ -134,6 +134,49 @@ final class ConfigInstallerTests: XCTestCase {
         XCTAssertTrue(command.contains("--event stop"))
     }
 
+    func testReinstallingUnchangedExternalHooksLeavesTheFileAlone() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let configPath = tempDir.appendingPathComponent("settings.json").path
+        let cli = CLIConfig(
+            name: "Qwen Code",
+            source: "qwen",
+            configPath: configPath,
+            configKey: "hooks",
+            format: .claude,
+            events: [("PreToolUse", 5, false), ("PostToolUse", 5, false), ("Stop", 5, false)]
+        )
+        XCTAssertTrue(ConfigInstaller.installExternalHooks(cli: cli, fm: fm))
+
+        // What another launch wrote: the same document with its keys in
+        // another order (each process orders our dictionaries differently).
+        let installed = try XCTUnwrap(fm.contents(atPath: configPath))
+        var root = try XCTUnwrap(JSONSerialization.jsonObject(with: installed) as? [String: Any])
+        let reordered = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+        try reordered.write(to: URL(fileURLWithPath: configPath))
+        let past = Date(timeIntervalSince1970: 1_000_000_000)
+        try fm.setAttributes([.modificationDate: past], ofItemAtPath: configPath)
+
+        XCTAssertTrue(ConfigInstaller.installExternalHooks(cli: cli, fm: fm))
+        XCTAssertEqual(fm.contents(atPath: configPath), reordered)
+        XCTAssertEqual(try fm.attributesOfItem(atPath: configPath)[.modificationDate] as? Date, past)
+
+        // A file that is missing something still gets it back.
+        var hooks = try XCTUnwrap(root["hooks"] as? [String: Any])
+        hooks["Stop"] = nil
+        root["hooks"] = hooks
+        try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted]).write(to: URL(fileURLWithPath: configPath))
+        try fm.setAttributes([.modificationDate: past], ofItemAtPath: configPath)
+
+        XCTAssertTrue(ConfigInstaller.installExternalHooks(cli: cli, fm: fm))
+        let repaired = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(fm.contents(atPath: configPath))) as? [String: Any])
+        XCTAssertNotNil((repaired["hooks"] as? [String: Any])?["Stop"])
+        XCTAssertNotEqual(try fm.attributesOfItem(atPath: configPath)[.modificationDate] as? Date, past)
+    }
+
     func testCodexSessionEndTimeoutRespectsTeardownCapAndRepairsStaleConfig() throws {
         let fm = FileManager.default
         let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
