@@ -64,7 +64,7 @@ struct PersistedSession: Codable {
 enum SessionPersistence {
     static let dirPath = directory(
         environment: ProcessInfo.processInfo.environment,
-        isRunningTests: RuntimeEnvironment.isRunningTests
+        isRunningTests: RuntimeEnvironment.isRunningTests || RuntimeEnvironment.isIsolated
     )
     static let filePath = filePath(in: dirPath)
 
@@ -74,7 +74,8 @@ enum SessionPersistence {
 
     /// Where sessions.json lives: `~/.codeisland`, unless `CODEISLAND_SESSIONS_DIR`
     /// names another folder (as `CODEISLAND_SOCKET_PATH` does for the socket).
-    /// A test process defaults to a folder of its own under the temp dir: a
+    /// A test process, and an isolated run (`RuntimeEnvironment.isIsolated`),
+    /// defaults to a folder of its own under the temp dir: a
     /// test's AppState used to overwrite the user's real session list from its
     /// 2 s save timer, and `startSessionDiscovery` restored it into the test and
     /// then deleted it.
@@ -88,7 +89,7 @@ enum SessionPersistence {
         }
         if isRunningTests {
             return (NSTemporaryDirectory() as NSString)
-                .appendingPathComponent("codeisland-tests-\(getpid())")
+                .appendingPathComponent("codeisland-sessions-\(getpid())")
         }
         return home + "/.codeisland"
     }

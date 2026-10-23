@@ -23,6 +23,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Read before anything else: the launch Apple Event that says "login
         // item" is only current during this synchronous call.
         let isLoginLaunch = LaunchContext.isCurrentLaunchAtLogin()
+        if let problem = RuntimeEnvironment.isolationProblem(ProcessInfo.processInfo.environment) {
+            Self.log.error("\(problem, privacy: .public): quitting")
+            standingAside = true
+            NSApp.terminate(nil)
+            return
+        }
+        let isolated = RuntimeEnvironment.isIsolated
         // One island per hook socket. A second one — `open -n`, a second copy
         // of the app — would take the socket from the first, which would go
         // on unheard, and remove its hosts' sockets. An island on a
@@ -60,19 +67,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Prewarm the usage footer off the launch path — first panel expansion
         // then shows data immediately instead of popping in a beat later.
-        Task { @MainActor [weak appState] in
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
-            appState?.refreshClaudeUsageIfStale()
+        if !isolated {
+            Task { @MainActor [weak appState] in
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                appState?.refreshClaudeUsageIfStale()
+            }
         }
 
         // Hook installation does subprocess version detection plus disk I/O —
         // keep it off the main thread so app launch isn't blocked even when a
         // CLI binary hangs. See #139.
-        Task.detached(priority: .userInitiated) {
-            if ConfigInstaller.install() {
-                Self.log.info("Hooks installed")
-            } else {
-                Self.log.warning("Failed to install hooks")
+        if isolated {
+            Self.log.notice("Isolated (CODEISLAND_ISOLATED=1): no hooks installed, no sessions discovered, no remote hosts connected")
+        } else {
+            Task.detached(priority: .userInitiated) {
+                if ConfigInstaller.install() {
+                    Self.log.info("Hooks installed")
+                } else {
+                    Self.log.warning("Failed to install hooks")
+                }
             }
         }
 
@@ -97,11 +110,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panelController = PanelWindowController(appState: appState)
         panelController?.showPanel()
 
-        appState.startSessionDiscovery()
-        appState.startCodexAppServerWatcher()
-        appState.startAiWorkWatcher()
-        appState.startCoworkWatcher()
-        RemoteManager.shared.startup()
+        if !isolated {
+            appState.startSessionDiscovery()
+            appState.startCodexAppServerWatcher()
+            appState.startAiWorkWatcher()
+            appState.startCoworkWatcher()
+            RemoteManager.shared.startup()
+        }
 
         // Buddy bridge (opt-in): mirrors the Dynamic Island onto the companion
         // device and routes its button press back to TerminalActivator.
@@ -149,17 +164,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         // Hooks auto-recovery: periodic + app activation trigger
-        hookRecoveryTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.checkAndRepairHooks()
+        if !isolated {
+            hookRecoveryTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    self?.checkAndRepairHooks()
+                }
             }
-        }
-        NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification,
-            object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.checkAndRepairHooks()
+            NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
+                object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.checkAndRepairHooks()
+                }
             }
         }
 
@@ -185,7 +202,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Sparkle runs scheduled checks itself on the cadence declared in
         // Info.plist (SUScheduledCheckInterval). Start the updater once — it
         // no-ops for Homebrew-installed builds (brew owns those upgrades).
-        UpdateChecker.shared.start()
+        if !isolated {
+            UpdateChecker.shared.start()
+        }
 
         // The jingle confirms a launch the user just made; at login it is
         // noise on every boot for everyone with Launch at Login on.

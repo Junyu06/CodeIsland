@@ -16,4 +16,24 @@ enum RuntimeEnvironment {
         }
         return NSClassFromString("XCTestCase") != nil
     }()
+
+    /// True when launched with `CODEISLAND_ISOLATED=1`: a development build or
+    /// a launch smoke test running next to the installed app, which must leave
+    /// this Mac's agents alone. It installs and repairs no hooks, discovers and
+    /// watches no sessions, connects no remote host, checks for no update or
+    /// plan limits, keeps its sessions in a folder of its own, and hears hooks
+    /// only on its own `CODEISLAND_SOCKET_PATH` (without one it quits).
+    static let isIsolated = isIsolated(ProcessInfo.processInfo.environment)
+
+    static func isIsolated(_ environment: [String: String]) -> Bool {
+        environment["CODEISLAND_ISOLATED"] == "1"
+    }
+
+    /// Why an isolated launch can't go on, or nil. Without a socket of its
+    /// own it would answer every hook on this Mac in place of the real app.
+    static func isolationProblem(_ environment: [String: String]) -> String? {
+        guard isIsolated(environment) else { return nil }
+        let socket = environment["CODEISLAND_SOCKET_PATH"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return socket.isEmpty ? "CODEISLAND_ISOLATED=1 needs CODEISLAND_SOCKET_PATH" : nil
+    }
 }

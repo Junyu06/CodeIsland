@@ -134,9 +134,10 @@ final class ClaudeQuotaMonitor {
         fetchNow()
     }
 
-    /// Kick off one fetch immediately (respects an in-flight request).
+    /// Kick off one fetch immediately (respects an in-flight request). An
+    /// isolated run never reads the keychain or calls the API.
     func fetchNow() {
-        guard isEnabled, !inFlight else { return }
+        guard isEnabled, !inFlight, !RuntimeEnvironment.isIsolated else { return }
         inFlight = true
         scheduler.recordFetchStart(now: now())
         let fetcher = self.fetcher

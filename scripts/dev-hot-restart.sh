@@ -12,6 +12,7 @@ set -euo pipefail
 #   scripts/dev-hot-restart.sh --build-cmd "swift build"
 #   scripts/dev-hot-restart.sh --with-tests
 #   scripts/dev-hot-restart.sh --socket-path /tmp/codeisland-dev.sock
+#   scripts/dev-hot-restart.sh --isolated --socket-path /tmp/codeisland-dev.sock
 
 DEBOUNCE="0.8"
 WATCH_PATHS="Sources,Tests,Package.swift"
@@ -19,6 +20,7 @@ APP_PATH=".build/debug/CodeIsland"
 BUILD_CMD="swift build"
 WITH_TESTS=0
 SOCKET_PATH=""
+ISOLATED=0
 
 print_usage() {
   cat <<'EOF'
@@ -32,6 +34,7 @@ Examples:
   scripts/dev-hot-restart.sh --build-cmd "swift build"
   scripts/dev-hot-restart.sh --with-tests
   scripts/dev-hot-restart.sh --socket-path /tmp/codeisland-dev.sock
+  scripts/dev-hot-restart.sh --isolated --socket-path /tmp/codeisland-dev.sock
 
 Options:
   --paths <csv>          Watch paths (default: Sources,Tests,Package.swift)
@@ -40,6 +43,8 @@ Options:
   --build-cmd <command>  Build command (default: swift build)
   --with-tests           Run swift test after successful build before restart
   --socket-path <path>   Set CODEISLAND_SOCKET_PATH when launching app
+  --isolated             Set CODEISLAND_ISOLATED=1: install no hooks, discover no
+                         sessions, connect no remote host (needs --socket-path)
   --help                 Show this help message
 EOF
 }
@@ -91,6 +96,10 @@ parse_args() {
       --socket-path)
         SOCKET_PATH="$2"
         shift 2
+        ;;
+      --isolated)
+        ISOLATED=1
+        shift
         ;;
       --help)
         print_usage
@@ -153,7 +162,11 @@ launch_app() {
   if [[ "$APP_PATH" != *.app/Contents/MacOS/* ]]; then
     log "NOTE: launching a bare executable; Buddy Bluetooth requires a signed .app bundle with Bluetooth entitlements"
   fi
-  if [[ -n "$SOCKET_PATH" ]]; then
+  if [[ "$ISOLATED" == "1" ]]; then
+    [[ -n "$SOCKET_PATH" ]] || fail "--isolated needs --socket-path"
+    log "Launching isolated app with CODEISLAND_SOCKET_PATH=$SOCKET_PATH"
+    CODEISLAND_ISOLATED=1 CODEISLAND_SOCKET_PATH="$SOCKET_PATH" "$APP_PATH" &
+  elif [[ -n "$SOCKET_PATH" ]]; then
     log "Launching app with CODEISLAND_SOCKET_PATH=$SOCKET_PATH"
     CODEISLAND_SOCKET_PATH="$SOCKET_PATH" "$APP_PATH" &
   else

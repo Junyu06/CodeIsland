@@ -74,6 +74,24 @@ final class TestIsolationTests: XCTestCase {
         XCTAssertNil(ConfigInstaller.claudeVersionProvider())
     }
 
+    // MARK: - Isolated runs
+
+    func testIsolatedRunsAreAskedForExplicitly() {
+        XCTAssertTrue(RuntimeEnvironment.isIsolated(["CODEISLAND_ISOLATED": "1"]))
+        XCTAssertFalse(RuntimeEnvironment.isIsolated([:]))
+        XCTAssertFalse(RuntimeEnvironment.isIsolated(["CODEISLAND_ISOLATED": "0"]))
+        XCTAssertFalse(RuntimeEnvironment.isIsolated(["CODEISLAND_ISOLATED": ""]))
+    }
+
+    /// Without a socket of its own, an isolated island would answer every
+    /// hook on this Mac in place of the installed app: it quits instead.
+    func testAnIsolatedRunNeedsASocketOfItsOwn() {
+        XCTAssertNotNil(RuntimeEnvironment.isolationProblem(["CODEISLAND_ISOLATED": "1"]))
+        XCTAssertNotNil(RuntimeEnvironment.isolationProblem(["CODEISLAND_ISOLATED": "1", "CODEISLAND_SOCKET_PATH": "  "]))
+        XCTAssertNil(RuntimeEnvironment.isolationProblem(["CODEISLAND_ISOLATED": "1", "CODEISLAND_SOCKET_PATH": "/tmp/dev.sock"]))
+        XCTAssertNil(RuntimeEnvironment.isolationProblem(["CODEISLAND_SOCKET_PATH": ""]), "a normal launch is never refused")
+    }
+
     // MARK: - Session persistence location
 
     func testExplicitDirectoryOverrideWins() {
