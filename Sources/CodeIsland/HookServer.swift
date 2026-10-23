@@ -106,14 +106,10 @@ class HookServer {
                     connection.cancel()
                 case .tooLarge:
                     log.warning("Payload too large (over \(limits.maxRequestBytes) bytes), dropping connection")
-                    // A remote host's limit is the smaller one, and a large
-                    // file an agent writes there passes it: its agent asks
-                    // in its own way rather than being told no.
-                    if case .remoteHost = originBox.value {
-                        connection.respond(Data())
-                    } else {
-                        connection.respond(Self.oversizedPayloadAnswer)
-                    }
+                    // Nobody read it, so nobody decides: a large file an
+                    // agent writes is not refused, its agent asks in its own
+                    // way (it used to be told "deny" on this Mac's socket).
+                    connection.respond(Data())
                 case .received(let data):
                     // The socket names the host, and an edge's facts are
                     // parsed and interpreted, here too, off the main thread.
@@ -156,9 +152,6 @@ class HookServer {
         }
     }
 
-    nonisolated private static let oversizedPayloadAnswer = Data(
-        #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8
-    )
 
     /// Internal tools that are safe to auto-approve without user confirmation.
     /// Read from user settings; defaults to all known internal tools.

@@ -386,15 +386,17 @@ final class HookServerTransportTests: XCTestCase {
             .count
     }
 
-    /// More than the island reads of one request is refused on this Mac's
-    /// socket, and nothing reaches a card.
-    func testAnOversizedRequestIsDenied() throws {
+    /// More than the island reads of one request on this Mac's socket is
+    /// not read on, nothing reaches a card, and the answer is nothing: the
+    /// island decides nothing it never read, so the agent asks in its own way.
+    func testAnOversizedRequestIsLeftToItsAgent() throws {
         let local = try startLocalServer()
         defer { stopLocalServer(local) }
         let hook = try XCTUnwrap(RawHook.connect(to: local.socketPath))
         let answer = hook.writeInBackground(Data(repeating: UInt8(ascii: " "), count: 10_485_761), thenRead: true)
         pump(until: { answer.value != nil }, timeout: 10, "no answer to an oversized request")
-        XCTAssertTrue(String(decoding: answer.value ?? Data(), as: UTF8.self).contains(#""behavior":"deny""#))
+        XCTAssertFalse(answer.timedOut, "an oversized request was read on")
+        XCTAssertEqual(answer.value, Data(), "an oversized request got an answer")
         XCTAssertNil(appState.pendingPermission)
         hook.close()
     }

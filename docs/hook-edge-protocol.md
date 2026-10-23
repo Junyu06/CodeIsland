@@ -67,7 +67,7 @@ quirk is then fixed once, in HookIntake, for every edge.
   32 requests waiting on an answer at once, and 8 MB of unfinished requests
   between them. A connection past that is closed at once; a request past
   the held cap, or over the size limit, is answered with nothing, so its
-  agent asks in its own way (this Mac's oversized request is denied). The
+  agent asks in its own way (so is this Mac's request over its 10 MB). The
   remote hook sends text as it is, in UTF-8, not as `\uXXXX` escapes that
   would double a CJK request against that limit.
 - Write one JSON object, then half-close the write side (`shutdown(SHUT_WR)`).
