@@ -103,11 +103,21 @@ enum SessionPersistence {
         !session.isRemote && !sessionId.hasPrefix(AppState.coworkSessionPrefix)
     }
 
+    /// The most of a prompt or reply the file keeps: plenty for the card it
+    /// brings back, where keeping all of a pasted 9 MB log made every save
+    /// (on the main thread, every couple of seconds) encode it again.
+    static let maxPersistedTextLength = 64 * 1024
+
     /// Writes the session list for the next launch. The file holds every
     /// local session's last prompt and reply, so it and its folder are this
     /// user's alone (PrivateFiles): 0600 in a 0700 folder, whichever save
     /// wrote it. `directory` is for tests.
     static func save(_ sessions: [String: SessionSnapshot], directory: String = dirPath) {
+        func kept(_ text: String?) -> String? {
+            // utf8.count is O(1); no more bytes than that means no more characters.
+            guard let text, text.utf8.count > maxPersistedTextLength else { return text }
+            return String(text.prefix(maxPersistedTextLength))
+        }
         let persisted: [PersistedSession] = sessions.compactMap { (id, s) in
             guard isPersisted(sessionId: id, session: s) else { return nil }
             return PersistedSession(
@@ -118,8 +128,8 @@ enum SessionPersistence {
                 sessionTitle: s.sessionTitle,
                 sessionTitleSource: s.sessionTitleSource,
                 providerSessionId: s.providerSessionId,
-                lastUserPrompt: s.lastUserPrompt,
-                lastAssistantMessage: s.lastAssistantMessage,
+                lastUserPrompt: kept(s.lastUserPrompt),
+                lastAssistantMessage: kept(s.lastAssistantMessage),
                 termApp: s.termApp,
                 itermSessionId: s.itermSessionId,
                 ttyPath: s.ttyPath,
