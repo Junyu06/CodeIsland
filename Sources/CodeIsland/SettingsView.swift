@@ -2308,6 +2308,10 @@ private struct BuddyPage: View {
                 Text(l10n["apple_companion_desc"])
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                Text(l10n["apple_companion_read_only"])
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section {

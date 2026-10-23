@@ -530,6 +530,7 @@ final class L10n: ObservableObject {
         "apple_companion_sync_interval": "Sync interval",
         "apple_companion_restart": "Restart iPhone Buddy",
         "apple_companion_desc": "Mirrors CodeIsland status to the iPhone app over the local network while foregrounded, and sends lightweight Bluetooth summaries for Live Activity and Apple Watch refreshes in the background.",
+        "apple_companion_read_only": "Approving, denying and answering from iPhone Buddy are paused until Buddy can pair with this Mac: until then any nearby device running it could answer for you. Buddy still shows your sessions.",
 
         // About
         "about_desc1": "Real-time AI coding agent status panel for macOS",
@@ -1124,6 +1125,7 @@ final class L10n: ObservableObject {
         "apple_companion_sync_interval": "Sync-Intervall",
         "apple_companion_restart": "iPhone Buddy neu starten",
         "apple_companion_desc": "Spiegelt den CodeIsland-Status im Vordergrund über das lokale Netzwerk zur iPhone-App und sendet im Hintergrund leichte Bluetooth-Zusammenfassungen für Live Activity und Apple-Watch-Aktualisierungen.",
+        "apple_companion_read_only": "Genehmigen, Ablehnen und Antworten über iPhone Buddy sind pausiert, bis Buddy sich mit diesem Mac koppeln kann – bis dahin könnte jedes Gerät in der Nähe, auf dem die App läuft, für dich antworten. Buddy zeigt deine Sitzungen weiterhin an.",
 
         // About
         "about_desc1": "Echtzeit-Statuspanel für AI-Coding-Agenten unter macOS",
@@ -1718,6 +1720,7 @@ final class L10n: ObservableObject {
         "apple_companion_sync_interval": "同步间隔",
         "apple_companion_restart": "重启 iPhone Buddy 广播",
         "apple_companion_desc": "前台通过本地网络把 CodeIsland 状态同步到 iPhone App；后台会通过蓝牙发送轻量状态摘要，用于刷新实时活动和 Apple Watch。",
+        "apple_companion_read_only": "在 iPhone Buddy 上批准、拒绝和回答的功能已暂停，等 Buddy 能与这台 Mac 配对后再恢复：在那之前，附近任何运行它的设备都可能替你作答。Buddy 仍会显示你的会话。",
 
         // About
         "about_desc1": "macOS 实时 AI 编码 Agent 状态面板",
@@ -2312,6 +2315,7 @@ final class L10n: ObservableObject {
         "apple_companion_sync_interval": "同步間隔",
         "apple_companion_restart": "重新啟動 iPhone Buddy 廣播",
         "apple_companion_desc": "前景透過區域網路把 CodeIsland 狀態同步到 iPhone App；背景會透過藍牙傳送輕量狀態摘要，用於更新即時動態與 Apple Watch。",
+        "apple_companion_read_only": "在 iPhone Buddy 上核准、拒絕和回答的功能已暫停，等 Buddy 能與這台 Mac 配對後再恢復：在那之前，附近任何執行它的裝置都可能替你作答。Buddy 仍會顯示你的工作階段。",
 
         // About
         "about_desc1": "macOS 即時 AI 編碼 Agent 狀態面板",
@@ -2906,6 +2910,7 @@ final class L10n: ObservableObject {
         "apple_companion_sync_interval": "同期間隔",
         "apple_companion_restart": "広告を再開",
         "apple_companion_desc": "フォアグラウンドではローカルネットワークで CodeIsland の状態を iPhone App に同期し、バックグラウンドでは Live Activity と Apple Watch の更新用に軽量な Bluetooth サマリーを送信します。",
+        "apple_companion_read_only": "iPhone Buddy からの許可・拒否・回答は、Buddy がこの Mac とペアリングできるようになるまで停止しています。それまでは、近くでアプリを実行している任意のデバイスがあなたの代わりに回答できてしまうためです。セッションの表示は引き続き行われます。",
 
         // About
         "about_desc1": "macOS 向けリアルタイム AI コーディングエージェント状態パネル",
@@ -3500,6 +3505,7 @@ final class L10n: ObservableObject {
         "apple_companion_sync_interval": "동기화 간격",
         "apple_companion_restart": "광고 다시 시작",
         "apple_companion_desc": "포그라운드에서는 로컬 네트워크로 CodeIsland 상태를 iPhone 앱에 동기화하고, 백그라운드에서는 Live Activity와 Apple Watch 갱신을 위해 가벼운 Bluetooth 요약을 보냅니다.",
+        "apple_companion_read_only": "iPhone Buddy에서 승인·거부·답변하는 기능은 Buddy가 이 Mac과 페어링할 수 있을 때까지 일시 중지됩니다. 그 전까지는 근처에서 앱을 실행하는 어떤 기기든 대신 답할 수 있기 때문입니다. 세션 표시는 계속됩니다.",
 
         // About
         "about_desc1": "macOS용 실시간 AI 코딩 에이전트 상태 패널",
@@ -4094,6 +4100,7 @@ final class L10n: ObservableObject {
         "apple_companion_sync_interval": "Senkronizasyon aralığı",
         "apple_companion_restart": "Yayını yeniden başlat",
         "apple_companion_desc": "Öndeyken CodeIsland durumunu yerel ağ üzerinden iPhone uygulamasına eşler; arka planda Live Activity ve Apple Watch yenilemeleri için hafif Bluetooth özetleri gönderir.",
+        "apple_companion_read_only": "iPhone Buddy üzerinden onaylama, reddetme ve yanıtlama, Buddy bu Mac ile eşleşebilene kadar duraklatıldı: o zamana kadar yakındaki, uygulamayı çalıştıran herhangi bir cihaz sizin yerinize yanıt verebilirdi. Buddy oturumlarınızı göstermeye devam eder.",
 
         // About
         "about_desc1": "macOS için gerçek zamanlı AI kodlama ajanı durum paneli",
