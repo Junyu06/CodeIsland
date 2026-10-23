@@ -112,9 +112,36 @@ parse_args() {
   done
 }
 
+# The CodeIsland processes running this script's build ($APP_PATH): the one
+# it launched last, or one an earlier run of it left behind. `comm` is the
+# path the process was started from, as given, so the installed app
+# (/Applications/CodeIsland.app/...) or any other copy is never one of them.
+own_app_pids() {
+  local pid
+  for pid in $(pgrep -x "CodeIsland" || true); do
+    if [[ "$(ps -ww -o comm= -p "$pid" 2>/dev/null)" == "$APP_PATH" ]]; then
+      printf '%s\n' "$pid"
+    fi
+  done
+}
+
+# Every other CodeIsland: the installed app, another build.
+other_app_pids() {
+  local pid
+  for pid in $(pgrep -x "CodeIsland" || true); do
+    if [[ "$(ps -ww -o comm= -p "$pid" 2>/dev/null)" != "$APP_PATH" ]]; then
+      printf '%s\n' "$pid"
+    fi
+  done
+}
+
+# Stops this build before the next launch, and nothing else: the installed
+# CodeIsland keeps running (a SIGTERM would kill it without saving its
+# sessions or closing its SSH tunnels). Next to it, the build needs a
+# socket of its own (--socket-path, --isolated).
 quit_app() {
   local existing_pids
-  existing_pids="$(pgrep -x "CodeIsland" || true)"
+  existing_pids="$(own_app_pids)"
   [[ -z "$existing_pids" ]] && return 0
 
   log "Stopping existing CodeIsland process(es): $existing_pids"
@@ -170,6 +197,13 @@ launch_app() {
     log "Launching app with CODEISLAND_SOCKET_PATH=$SOCKET_PATH"
     CODEISLAND_SOCKET_PATH="$SOCKET_PATH" "$APP_PATH" &
   else
+    # A second island on the default socket quits at launch.
+    local others
+    others="$(other_app_pids)"
+    if [[ -n "$others" ]]; then
+      log "Not launching: another CodeIsland (pid ${others//$'\n'/ }) serves the default socket, and this build would quit at once. Quit it, or restart this script with --socket-path <path>."
+      return 1
+    fi
     log "Launching app: $APP_PATH"
     "$APP_PATH" &
   fi
@@ -279,8 +313,9 @@ main() {
     if run_build_pipeline; then
       log "Build succeeded"
       quit_app
-      launch_app
-      log "Restart complete"
+      if launch_app; then
+        log "Restart complete"
+      fi
     else
       log "Build failed; keeping current app instance running"
     fi
@@ -295,4 +330,7 @@ main() {
   done
 }
 
-main "$@"
+# Sourced (tests), it only defines the functions.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
