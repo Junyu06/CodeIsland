@@ -89,6 +89,12 @@ public enum ClaudeConfigPaths {
     /// Where per-project transcripts live.
     public static func projectsDir() -> String { configDir() + "/projects" }
 
+    /// The record Claude Code keeps in `configDir` for one of its running
+    /// sessions, by process id: `<configDir>/sessions/<pid>.json`.
+    public static func sessionRecordPath(configDir: String, pid: Int32) -> String {
+        "\(configDir)/sessions/\(pid).json"
+    }
+
     /// The primary config dir followed by every enabled extra one registered in
     /// Settings → Hooks (`ExtraConfigDirs`), without duplicates. Readers that
     /// look *for* a session or its usage go through this; the hook installer

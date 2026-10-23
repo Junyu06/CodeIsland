@@ -63,20 +63,113 @@ enum ClaudeDiscovery {
             lookup: { scan.lookup(pid: $0.pid) },
             fallbackRoots: scan.fallbackRoots,
             discover: { root, group, claimed in
-                var taken = claimed
-                return group.compactMap { process in
-                    guard let session = claudeSession(
-                        for: process, root: root, excluding: taken, transcripts: transcripts(in:)
-                    ) else {
-                        return nil
-                    }
-                    taken.insert(session.sessionId)
-                    return session
-                }
+                claudeSessions(
+                    for: group,
+                    root: root,
+                    claimed: claimed,
+                    transcripts: transcripts(in:),
+                    recordedSessionId: { recordedSessionId(for: $0, root: root) }
+                )
             },
             sessionId: \.sessionId,
             belongsTo: { $0.pid == $1.pid }
         )
+    }
+
+    /// The sessions of `processes` under the config dir `root`.
+    ///
+    /// Claude Code records each running session in `<root>/sessions/<pid>.json`.
+    /// A process with a record is paired with that session's transcript.
+    /// Several sessions in one cwd share a project dir, and pairing by recency
+    /// alone gave the newest transcript to whichever process came first: a
+    /// card was then watched on another session's CLI and went away when that
+    /// terminal closed. A process with no record (an older Claude Code) keeps
+    /// the recency match, which cannot take a session recorded as another
+    /// process's.
+    static func claudeSessions(
+        for processes: [ClaudeDiscoveryProcess],
+        root: String,
+        claimed: Set<String>,
+        transcripts: (_ projectPath: String) -> [ClaudeTranscriptFile]?,
+        recordedSessionId: (ClaudeDiscoveryProcess) -> String?
+    ) -> [DiscoveredSession] {
+        var recorded: [pid_t: String] = [:]
+        for process in processes {
+            if let sessionId = recordedSessionId(process), !recorded.values.contains(sessionId) {
+                recorded[process.pid] = sessionId
+            }
+        }
+        var taken = claimed.union(recorded.values)
+        return processes.compactMap { process in
+            let session: DiscoveredSession?
+            if let sessionId = recorded[process.pid] {
+                session = claimed.contains(sessionId)
+                    ? nil
+                    : claudeSession(for: process, root: root, recordedSessionId: sessionId, transcripts: transcripts)
+            } else {
+                session = claudeSession(for: process, root: root, excluding: taken, transcripts: transcripts)
+            }
+            if let session { taken.insert(session.sessionId) }
+            return session
+        }
+    }
+
+    /// The session id the record Claude Code keeps for `process` in the config
+    /// dir `root` gives (`ClaudeConfigPaths.sessionRecordPath`), or nil. Only
+    /// when the process runs Claude Code's CLI (its argv, read here) and the
+    /// record is its own (`recordedSessionId(inRecord:pid:processStart:)`).
+    static func recordedSessionId(
+        for process: ClaudeDiscoveryProcess,
+        root: String,
+        readRecord: (_ path: String) -> Data? = { readSessionRecord(atPath: $0) },
+        arguments: (pid_t) -> [String]? = { ProcessTable.getProcessArgs($0) }
+    ) -> String? {
+        guard let argv = arguments(process.pid),
+              AgentProcessFinder.isClaudeCodeCLIInvocation(arguments: argv),
+              let data = readRecord(ClaudeConfigPaths.sessionRecordPath(configDir: root, pid: process.pid))
+        else { return nil }
+        return recordedSessionId(inRecord: data, pid: process.pid, processStart: process.startTime)
+    }
+
+    /// A record is a few hundred bytes; anything far larger is not one.
+    static let sessionRecordByteLimit = 64 * 1024
+
+    /// The record's bytes, or nil when it can't be read or is too large to be
+    /// one. Read only: nothing is opened for writing.
+    static func readSessionRecord(atPath path: String) -> Data? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: sessionRecordByteLimit + 1),
+              data.count <= sessionRecordByteLimit else { return nil }
+        return data
+    }
+
+    /// The session id in a record, when it is this process's: the record's
+    /// `pid` is `pid` and its `procStart` (UTC, second precision) is the live
+    /// process's start, so a record an earlier process with the same pid
+    /// left behind is not read as this one's. Anything missing, malformed
+    /// or different: nil.
+    static func recordedSessionId(inRecord data: Data, pid: pid_t, processStart: Date?) -> String? {
+        guard let processStart,
+              let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (record["pid"] as? NSNumber)?.int32Value == pid,
+              let raw = record["procStart"] as? String,
+              let recordedStart = parseRecordedProcessStart(raw),
+              abs(recordedStart.timeIntervalSince(processStart)) <= 1,
+              let sessionId = record["sessionId"] as? String,
+              !sessionId.isEmpty, !sessionId.contains("/") else { return nil }
+        return sessionId
+    }
+
+    /// `procStart` as Claude Code writes it: "Fri Oct 23 00:59:52 2026", UTC
+    /// (a day below 10 may be space-padded).
+    static func parseRecordedProcessStart(_ raw: String) -> Date? {
+        let collapsed = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
+        return formatter.date(from: collapsed)
     }
 
     struct ClaudeDiscoveryProcess {
@@ -111,11 +204,13 @@ enum ClaudeDiscovery {
         }
     }
 
-    /// One claude process → its CWD → the single most recent .jsonl under `root`.
+    /// One claude process → its CWD → the single most recent .jsonl under `root`
+    /// (or, given `recordedSessionId`, that session's own transcript).
     private static func claudeSession(
         for process: ClaudeDiscoveryProcess,
         root: String,
-        excluding claimed: Set<String>,
+        recordedSessionId: String? = nil,
+        excluding claimed: Set<String> = [],
         transcripts: (_ projectPath: String) -> [ClaudeTranscriptFile]?
     ) -> DiscoveredSession? {
         let projectPath = "\(root)/projects/\(process.cwd.claudeProjectDirEncoded())"
@@ -125,6 +220,7 @@ enum ClaudeDiscovery {
         var bestFile: String?
         var bestDate = Date.distantPast
         for file in files where file.modified > bestDate {
+            if let recordedSessionId, file.name != recordedSessionId + ".jsonl" { continue }
             // Skip files from old sessions: must be modified after process started
             if let start = process.startTime, file.modified < start.addingTimeInterval(-10) {
                 continue
