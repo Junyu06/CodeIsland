@@ -934,6 +934,9 @@ final class AppState {
     /// Prefers the PID captured by the bridge (_ppid), falls back to source-aware process scans by CWD.
     private func tryMonitorSession(_ sessionId: String) {
         guard sessions[sessionId]?.isRemote != true else { return }
+        // An isolated run watches no process: the pids its hooks name are this
+        // Mac's real agents, which an orphan sweep could otherwise signal.
+        guard !RuntimeEnvironment.isIsolated else { return }
         // Codex Desktop cards are owned by NSWorkspace/app-server lifecycle. A
         // CWD lookup can only find an unrelated Codex CLI process (or the
         // shared Desktop helper), and binding either PID would remove every

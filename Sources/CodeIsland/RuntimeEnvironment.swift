@@ -19,8 +19,9 @@ enum RuntimeEnvironment {
 
     /// True when launched with `CODEISLAND_ISOLATED=1`: a development build or
     /// a launch smoke test running next to the installed app, which must leave
-    /// this Mac's agents alone. It installs and repairs no hooks, discovers and
-    /// watches no sessions, connects no remote host, checks for no update or
+    /// this Mac's agents alone. It installs and repairs no hooks, discovers no
+    /// sessions, watches no process (not even one a hook names, so it never
+    /// signals one as an orphan), connects no remote host, checks for no update or
     /// plan limits, keeps its sessions in a folder of its own, and hears hooks
     /// only on its own `CODEISLAND_SOCKET_PATH` (without one it quits).
     static let isIsolated = isIsolated(ProcessInfo.processInfo.environment)
