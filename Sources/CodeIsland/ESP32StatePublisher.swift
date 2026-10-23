@@ -160,6 +160,11 @@ final class ESP32StatePublisher {
 
     private func scheduleInteractiveRetriesIfNeeded() {
         interactiveRetryTask?.cancel()
+        // The retries only re-flush, which needs a Buddy (as `flush` checks).
+        // Without one, computing the key re-segmented the whole message on the
+        // main thread on every hook while a card was up: 140 ms a hook for a
+        // 1 MB prompt, and the Buddy is off by default.
+        guard bridge.status == .connected, bridge.selectedBuddyIdentifier != nil else { return }
         guard let appState, let deliveryKey = appState.esp32InteractiveDeliveryKey() else { return }
         interactiveRetryTask = Task { [weak self] in
             let delays: [UInt64] = [600_000_000, 1_800_000_000]
@@ -283,7 +288,7 @@ extension AppState {
         let previews = esp32DisplayContext(session: session).messages
         let flattened = previews.flatMap { message in
             esp32MessagePreviewSegments(text: message.text).map { ChatMessage(isUser: message.isUser, text: $0) }
-        }
+        }.prefix(ESP32Protocol.maxMessagePreviewSegments)
         guard !flattened.isEmpty else {
             return [BuddyMessagePreviewPayload(index: 0, total: 0, isUser: false, text: nil)]
         }
@@ -533,6 +538,9 @@ extension AppState {
         var currentCount = 0
 
         for character in trimmed {
+            // Frames past the 255th can't be numbered; stop instead of
+            // walking the rest of a long message.
+            if segments.count >= ESP32Protocol.maxMessagePreviewSegments { break }
             let scalar = String(character)
             let byteCount = scalar.lengthOfBytes(using: .utf8)
             if currentCount > 0 && currentCount + byteCount > ESP32Protocol.maxMessagePreviewBytes {
@@ -556,6 +564,6 @@ extension AppState {
             segments.append(current)
         }
 
-        return segments
+        return Array(segments.prefix(ESP32Protocol.maxMessagePreviewSegments))
     }
 }

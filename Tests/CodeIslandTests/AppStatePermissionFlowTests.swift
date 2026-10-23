@@ -230,6 +230,19 @@ final class AppStatePermissionFlowTests: XCTestCase {
         _ = try await awaitValue(of: responseTask)
     }
 
+    func testMessagePreviewStopsAtTheFramesTheBuddyCanNumber() {
+        let appState = AppState()
+        let limit = ESP32Protocol.maxMessagePreviewSegments
+        let long = String(repeating: "abcdefghijklmnop", count: 64 * 1024)  // 1 MB
+        let segments = appState.esp32MessagePreviewSegments(text: long)
+        XCTAssertEqual(segments.count, limit)
+        XCTAssertEqual(segments.joined(), String(long.prefix(limit * ESP32Protocol.maxMessagePreviewBytes)))
+
+        // Characters too wide for one frame add two segments at once.
+        let wide = String(repeating: "x👨‍👩‍👧‍👦", count: 400)
+        XCTAssertEqual(appState.esp32MessagePreviewSegments(text: wide).count, limit)
+    }
+
     func testInteractiveDeliveryKeyChangesWhenApprovalDescriptionChanges() {
         let appState = AppState()
         let first = appState.esp32MessagePreviewSegments(text: "Need approval for npm run build --filter watch")
