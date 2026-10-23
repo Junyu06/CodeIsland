@@ -40,8 +40,12 @@ enum AgentProcessFinder {
         CLIProcessResolver.isTraeCNBundlePath(executablePath)
     }
 
-    static func isNativeAppProcess(_ pid: pid_t, source: String) -> Bool {
-        guard let executable = ProcessTable.executablePath(for: pid) else { return false }
+    static func isNativeAppProcess(
+        _ pid: pid_t,
+        source: String,
+        executablePath: (pid_t) -> String? = { ProcessTable.executablePath(for: $0) }
+    ) -> Bool {
+        guard let executable = executablePath(pid) else { return false }
         let path = executable.lowercased()
         switch source {
         case "cursor":     return path.contains("/cursor.app/contents/")
@@ -149,20 +153,82 @@ enum AgentProcessFinder {
 
     /// Get PIDs of running Claude Code processes
     /// Claude's binary is named by version (e.g. "2.1.91") under ~/.local/share/claude/versions/
-    static func findClaudePids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+    ///
+    /// Only the processes that run it as Claude Code's CLI
+    /// (`isClaudeCodeCLIInvocation`): the same file is also the grep / find /
+    /// ripgrep its shell and Grep tool run, and its background machinery.
+    /// Matched by cwd, one of those would claim a session's transcript, so the
+    /// card would go when a grep ended — and once its shell went away first,
+    /// the orphan sweep would SIGTERM it.
+    static func findClaudePids(
+        candidatePids: [pid_t]? = nil,
+        executablePath: (pid_t) -> String? = { ProcessTable.executablePath(for: $0) },
+        arguments: (pid_t) -> [String]? = { ProcessTable.getProcessArgs($0) }
+    ) -> [pid_t] {
         let claudeVersionsDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/share/claude/versions").path
 
         var claudePids: [pid_t] = []
 
         for pid in candidatePids ?? ProcessTable.allProcessIds() {
-            guard let path = ProcessTable.executablePath(for: pid) else { continue }
+            guard let path = executablePath(pid) else { continue }
             // Match processes whose executable is under claude's versions directory
-            if path.hasPrefix(claudeVersionsDir) {
-                claudePids.append(pid)
-            }
+            guard path.hasPrefix(claudeVersionsDir) else { continue }
+            if let args = arguments(pid), !isClaudeCodeCLIInvocation(arguments: args) { continue }
+            claudePids.append(pid)
         }
         return claudePids
+    }
+
+    /// argv[0] names Claude Code's native binary runs under as a tool, not as
+    /// Claude Code: the binary is multicall, and the shell it gives its Bash
+    /// tool defines `grep`, `find` and `rg` as `exec -a ugrep|bfs|rg <binary>`
+    /// (its Grep tool starts `rg` the same way). `apply-seccomp` is its Linux
+    /// sandbox helper.
+    static let claudeCodeToolNames: Set<String> = ["ugrep", "bfs", "rg", "apply-seccomp"]
+
+    /// Arguments that start the binary as Claude Code's own machinery rather
+    /// than a session: the detached terminal host and the spare worker inside
+    /// it (argv[0] `claude bg-pty-host`, `claude bg-spare`), daemon workers,
+    /// preloading, the `gh` shim, and the MCP servers and browser native host
+    /// it serves to Chrome or its own sessions. No user passes them.
+    static let claudeCodeHelperFlags: Set<String> = [
+        "--bg-pty-host", "--bg-spare", "--daemon-worker", "--preload", "--gh-standin",
+        "--chrome-native-host", "--claude-in-chrome-mcp", "--computer-use-mcp", "--eval-mock-server",
+    ]
+
+    /// Subcommands that run no session: `claude mcp serve` is an MCP server
+    /// for another client, the rest change settings or the install and exit.
+    static let claudeCodeNonSessionSubcommands: Set<String> = [
+        "mcp", "config", "doctor", "update", "install", "uninstall", "setup-token", "plugin", "auth",
+    ]
+
+    /// Whether argv starts Claude Code's CLI — interactive, `-p`, `--resume`,
+    /// `--continue` — rather than a tool, a background helper or a settings
+    /// subcommand that runs the same binary. An argv that can't be read counts
+    /// as the CLI.
+    static func isClaudeCodeCLIInvocation(arguments: [String]) -> Bool {
+        guard let argv0 = arguments.first else { return true }
+        // Background roles name themselves in argv[0]: `claude bg-pty-host`.
+        if argv0.hasPrefix("claude ") { return false }
+        if claudeCodeToolNames.contains((argv0 as NSString).lastPathComponent) { return false }
+        let rest = arguments.dropFirst()
+        if rest.contains(where: { claudeCodeHelperFlags.contains($0) }) { return false }
+        if let first = rest.first, claudeCodeNonSessionSubcommands.contains(first) { return false }
+        return true
+    }
+
+    /// A live process running a Claude Code executable as something other
+    /// than its CLI (`isClaudeCodeCLIInvocation`).
+    static func isClaudeCodeNonCLIProcess(
+        _ pid: pid_t,
+        executablePath: (pid_t) -> String? = { ProcessTable.executablePath(for: $0) },
+        arguments: (pid_t) -> [String]? = { ProcessTable.getProcessArgs($0) }
+    ) -> Bool {
+        guard let path = executablePath(pid),
+              CLIProcessResolver.sourceMatchesExecutablePath(path, source: "claude"),
+              let args = arguments(pid) else { return false }
+        return !isClaudeCodeCLIInvocation(arguments: args)
     }
 
     static func findGeminiPids(candidatePids: [pid_t]? = nil) -> [pid_t] {

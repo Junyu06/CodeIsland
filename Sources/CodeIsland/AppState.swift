@@ -764,10 +764,27 @@ final class AppState {
     }
 
     private func shouldTerminateOrphanedProcess(sessionId: String, pid: pid_t) -> Bool {
-        guard let session = sessions[sessionId] else { return true }
+        Self.shouldTerminateOrphanedProcess(session: sessions[sessionId], pid: pid)
+    }
+
+    /// cleanupIdleSessions' orphan filter: whether a watched process its
+    /// parent left (`SessionProcessMonitor.isReparentedOrphan`) is SIGTERMed.
+    /// Never one running Claude Code's binary as anything but its CLI — a
+    /// grep its shell ran, its terminal host or a spare worker its own
+    /// supervisor reaps — however the process came to be watched.
+    nonisolated static func shouldTerminateOrphanedProcess(
+        session: SessionSnapshot?,
+        pid: pid_t,
+        executablePath: (pid_t) -> String? = { ProcessTable.executablePath(for: $0) },
+        arguments: (pid_t) -> [String]? = { ProcessTable.getProcessArgs($0) }
+    ) -> Bool {
+        if AgentProcessFinder.isClaudeCodeNonCLIProcess(pid, executablePath: executablePath, arguments: arguments) {
+            return false
+        }
+        guard let session else { return true }
         if session.isNativeAppMode || session.isRemote { return false }
         guard let source = SessionSnapshot.normalizedSupportedSource(session.source) else { return true }
-        return !AgentProcessFinder.isNativeAppProcess(pid, source: source)
+        return !AgentProcessFinder.isNativeAppProcess(pid, source: source, executablePath: executablePath)
     }
 
     /// Watch a Claude process for exit — waits a grace period before removing, in case the

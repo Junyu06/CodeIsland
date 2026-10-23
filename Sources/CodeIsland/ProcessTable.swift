@@ -115,6 +115,8 @@ enum ProcessTable {
     /// The process a session's recorded pid stands for: the nearest of it
     /// and up to five ancestors whose executable is `source`'s CLI, or the
     /// pid itself when none is (hook shells and wrappers sit in between).
+    /// A Claude Code tool (`grep` run as `ugrep` by its binary) is not the
+    /// CLI either: the walk goes on to the session that ran it.
     static func trackedProcessIdentity(for pid: pid_t, source: String?) -> ProcessIdentity? {
         guard pid > 0 else { return nil }
 
@@ -135,12 +137,19 @@ enum ProcessTable {
                 firstLiveProcess = process
             }
             if let path = executablePath(for: candidatePid),
-               CLIProcessResolver.sourceMatchesExecutablePath(path, source: source) {
+               CLIProcessResolver.sourceMatchesExecutablePath(path, source: source),
+               !isClaudeCodeTool(candidatePid, source: source) {
                 return process
             }
             currentPid = parentPID(for: candidatePid)
         }
 
         return firstLiveProcess
+    }
+
+    private static func isClaudeCodeTool(_ pid: pid_t, source: String?) -> Bool {
+        guard SessionSnapshot.normalizedSupportedSource(source) == "claude",
+              let argv0 = getProcessArgs(pid)?.first else { return false }
+        return AgentProcessFinder.claudeCodeToolNames.contains((argv0 as NSString).lastPathComponent)
     }
 }
