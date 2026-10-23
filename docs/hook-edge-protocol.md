@@ -28,9 +28,16 @@ quirk is then fixed once, in HookIntake, for every edge.
   symlink, before anything is installed; a folder or a socket that fails
   closes the tunnel, and the host says why. A hook command an older install
   wrote names `/tmp/codeisland-<uid>.sock`, and an agent started before the
-  reinstall still runs it: where no island answers there (nothing there,
-  or the socket a finished tunnel left behind), the remote hook uses
-  `/tmp/codeisland-<uid>/island.sock` instead.
+  reinstall still runs it. The remote hook on the host is the one the
+  newest island installed, and only such an island listens in the folder:
+  for that command it tries `/tmp/codeisland-<uid>/island.sock` first, and
+  the old path only where no island answers in the folder (nothing there,
+  or the socket a finished tunnel left behind), for an older island that
+  still forwards to it. Whatever else still listens at the old path — the
+  tunnel of an older island whose app died, which forwards to a main socket
+  that refuses it, or an sshd whose client is gone, which never answers —
+  never takes the island's events. A host connected to two Macs of
+  different versions at once gives these agents' events to the newer one.
 - Only to a socket owned by the edge's own user, never through a symlink
   (`lstat`): the path is a predictable name in `/tmp`, and a socket another
   user created there first would get every event and could answer it. On a
@@ -228,9 +235,13 @@ From the facts and the stdin, in this order (HookIntake is normative):
 
 - A payload without `_edge` is its edge's own interpretation and is taken as
   it is: hooks installed before this protocol keep working unchanged.
-- Only the Mac's end of a host's forward moved to the host's own socket; the
-  remote end is where it was. A remote hook of any version keeps sending to
-  the same path, and what it names as its host is replaced by the socket's.
+- The Mac's end of a host's forward moved to the host's own socket, and the
+  remote end from `/tmp/codeisland-<uid>.sock` into the SSH user's folder
+  (`/tmp/codeisland-<uid>/island.sock`). Each connect reinstalls the remote
+  hook and rewrites every hook command; an agent started before that still
+  runs a command naming the old path, which the reinstalled hook takes to
+  the folder (*Transport*). What a remote hook of any version names as its
+  host is replaced by the socket's.
 - An island reads another `v` for the fields it knows.
 - Do not pipe facts through `codeisland-bridge`: it observes its own and
   drops an `_edge` it finds in its stdin.

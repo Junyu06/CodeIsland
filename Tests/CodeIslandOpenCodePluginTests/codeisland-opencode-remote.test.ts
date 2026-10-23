@@ -172,4 +172,40 @@ describe("remote OpenCode plugin", () => {
       expect(first.owner).toBe(owner);
     }
   });
+
+  // A plugin given the path older installs named, /tmp/codeisland-<uid>.sock,
+  // checks the sockets the remote hook tries for it, in the hook's order: the
+  // island's in that user's folder first, then the old path. With the island
+  // in the folder and nothing at the old path, the hook still runs.
+  test("the path an older install named finds the island in its folder", async () => {
+    const number = String(3_300_000_000 + process.pid);
+    const legacy = `/tmp/codeisland-${number}.sock`;
+    const folder = `/tmp/codeisland-${number}`;
+    mkdirSync(folder, { mode: 0o700 });
+    const inFolder = createServer((sock) => sock.end());
+    await new Promise<void>((resolve) => inFolder.listen(join(folder, "island.sock"), resolve));
+    try {
+      const otherHome = join(home, "older-install");
+      mkdirSync(otherHome);
+      const handedOn = join(otherHome, "received.jsonl");
+      standInHome(otherHome, handedOn);
+      process.env.HOME = otherHome;
+      process.env.CODEISLAND_SOCKET_PATH = legacy;
+      const { default: other } = await import("../../Sources/CodeIsland/Resources/codeisland-opencode-remote.js?older-install");
+      restore();
+
+      expect(existsSync(legacy)).toBe(false);
+      const hooks = await other.server({ client: undefined, serverUrl: undefined });
+      await hooks.event({ event: { type: "session.created", properties: { info: { id: "s-older" } } } });
+      await hooks.event({ event: { type: "session.status", properties: { sessionID: "s-older", status: { type: "idle" } } } });
+      // Within bun's 5 s test timeout, so a miss fails here and cleans up.
+      for (let i = 0; i < 120 && !existsSync(handedOn); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(existsSync(handedOn)).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => inFolder.close(() => resolve()));
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
 });

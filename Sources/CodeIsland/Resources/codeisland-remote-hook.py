@@ -490,14 +490,21 @@ def _peer_is_island(sock):
 
 
 def _island_sockets():
-    """The sockets to try, in order: SOCKET_PATH — and, for the path older
-    installs wrote into each hook command, /tmp/codeisland-<uid>.sock, where
-    the island forwarded before its socket had a folder of its own, after it
-    that user's socket in its folder, /tmp/codeisland-<uid>/island.sock. An
-    agent started before this host's hooks were reinstalled still runs that
-    command; where no island answers at the old path — nothing there, or the
-    socket a finished tunnel left behind, which sshd never removes — the
-    folder's is the island's."""
+    """The sockets to try, in order: SOCKET_PATH, the one the hook command
+    names — but for the path older installs wrote into each command,
+    /tmp/codeisland-<uid>.sock, where the island forwarded before its socket
+    had a folder of its own. An agent started before this host's hooks were
+    reinstalled still runs that command, and this script is the one the
+    newest island installed: that user's socket in its folder,
+    /tmp/codeisland-<uid>/island.sock, where only such an island listens,
+    comes first. The old path comes after it, for an older island that still
+    forwards there while the folder has no tunnel (nothing there, or the
+    socket a finished tunnel left behind, which sshd never removes). So
+    whatever else still listens at the old path never takes the island's
+    events: a tunnel an older island left running when its app died, which
+    forwards to a Mac's main socket that refuses them now, or an sshd whose
+    client is gone, which never answers. A host connected to two Macs of
+    different versions at once gives these agents' events to the newer."""
     folder, name = os.path.split(SOCKET_PATH)
     prefix, suffix = "codeisland-", ".sock"
     if folder != "/tmp" or not name.startswith(prefix) or not name.endswith(suffix):
@@ -505,7 +512,7 @@ def _island_sockets():
     uid = name[len(prefix):-len(suffix)]
     if not uid or not all(c in "0123456789" for c in uid):
         return [SOCKET_PATH]
-    return [SOCKET_PATH, "/tmp/codeisland-%s/island.sock" % uid]
+    return ["/tmp/codeisland-%s/island.sock" % uid, SOCKET_PATH]
 
 
 def _connect_to_island():

@@ -20,8 +20,17 @@ function socketOwnerUid() {
   return process.getuid?.();
 }
 
-// Whether the socket at SOCKET_PATH is the island's user's, as the remote hook
-// checks too: another user on this host could have created it first, and
+// The sockets the remote hook tries for SOCKET_PATH, in its order
+// (`_island_sockets` there): for the path older installs named,
+// /tmp/codeisland-<uid>.sock, that user's socket in its folder first, then
+// the old path; any other path alone.
+function islandSocketPaths() {
+  const legacy = /^\/tmp\/codeisland-([0-9]+)\.sock$/.exec(SOCKET_PATH);
+  return legacy ? [`/tmp/codeisland-${legacy[1]}/island.sock`, SOCKET_PATH] : [SOCKET_PATH];
+}
+
+// Whether a socket the remote hook would try is the island's user's, as the
+// hook checks too: another user on this host could have created it first, and
 // theirs would get every event and could answer a permission request. lstat:
 // a symlink stays its owner's to repoint. Not exported: the plugin stays this
 // file's only export.
@@ -31,14 +40,16 @@ function socketOwnerUid() {
 // and the plugin never connects itself. Every event goes through the remote
 // hook, which, once connected, asks the kernel who listens (SO_PEERCRED on
 // Linux, LOCAL_PEERCRED on macOS) and sends nothing unless it is the island's
-// user. This check only spares starting it when the file alone says no.
+// user. This check only spares starting it when the files alone say no.
 function socketIsOwnedByUser() {
   const owner = socketOwnerUid();
   if (owner === undefined) return false;
-  try {
-    const stat = lstatSync(SOCKET_PATH);
-    return stat.isSocket() && stat.uid === owner;
-  } catch { return false; }
+  return islandSocketPaths().some((path) => {
+    try {
+      const stat = lstatSync(path);
+      return stat.isSocket() && stat.uid === owner;
+    } catch { return false; }
+  });
 }
 
 function sendRemoteHook(json, timeoutMs = 300000) {

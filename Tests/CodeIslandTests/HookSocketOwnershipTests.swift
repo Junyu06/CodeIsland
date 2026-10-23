@@ -304,43 +304,53 @@ final class HookSocketOwnershipTests: XCTestCase {
         XCTAssertEqual(try runRemoteHook("impostor") ?? "", "", "the payload reached a listener of another user's")
     }
 
-    /// An agent started before its host's hooks were reinstalled still runs
-    /// the command an older install wrote, naming /tmp/codeisland-<uid>.sock.
-    /// Where no island answers there any more — nothing there, or the socket
-    /// a finished tunnel left behind (sshd never removes it) — its events
-    /// reach the island's socket in that user's folder; where an older
-    /// island still forwards to that path, they go there as before.
-    func testAHookAnOlderInstallWroteFindsTheSocketInItsFolder() throws {
+    /// What an agent started before its host's hooks were reinstalled sees,
+    /// running the command an older install wrote, which names
+    /// /tmp/codeisland-<uid>.sock. At each place: nothing, the socket a
+    /// finished tunnel left behind (sshd never removes it), an island that
+    /// answers, or a listener that takes the request and never answers. Runs
+    /// the shipped hook's `main()`; returns which listener got the event,
+    /// what the hook printed, and how long `main()` took.
+    private func runOlderInstallsCommand(
+        event: String,
+        atFolder: String,
+        atLegacy: String
+    ) throws -> (received: [String: Bool], printed: String, seconds: Double) {
         let hookURL = URL(fileURLWithPath: scratch + "/codeisland-remote-hook.py")
         try Data(XCTUnwrap(RemoteInstaller.remoteHookSource()).utf8).write(to: hookURL)
         // A uid's number no account has: only the path's digits matter.
         let number = String(Int.random(in: 3_000_000_000..<3_100_000_000))
         let driver = """
-        import importlib.util, io, json, os, socket, sys, threading
-        hook_path, number, at_legacy = sys.argv[1], sys.argv[2], sys.argv[3]
+        import importlib.util, io, json, os, socket, sys, threading, time
+        hook_path, number, event, at_folder, at_legacy = sys.argv[1:6]
         legacy = "/tmp/codeisland-%s.sock" % number
         folder = "/tmp/codeisland-%s" % number
         os.mkdir(folder, 0o700)
+        places = {"folder": os.path.join(folder, "island.sock"), "legacy": legacy}
+        if event == "PermissionRequest":
+            answer = b'{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+        else:
+            answer = b"{}"
         listeners = {}
-        def listen(key, path):
-            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            server.bind(path)
-            server.listen(1)
-            server.settimeout(1.5)
-            listeners[key] = (server, path)
-        listen("folder", os.path.join(folder, "island.sock"))
-        if at_legacy == "island":
-            listen("legacy", legacy)
-        stale = None
-        if at_legacy == "stale":
-            # A socket file nobody listens on: what a finished tunnel leaves.
-            stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            stale.bind(legacy)
-            stale.close()
+        stale = []
+        for key, kind in (("folder", at_folder), ("legacy", at_legacy)):
+            if kind in ("island", "silent"):
+                server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                server.bind(places[key])
+                server.listen(1)
+                server.settimeout(1.5)
+                listeners[key] = (server, kind)
+            elif kind == "stale":
+                # A socket file nobody listens on: what a finished tunnel leaves.
+                leftover = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                leftover.bind(places[key])
+                leftover.close()
+                stale.append(places[key])
         received = {}
-        def serve(key):
+        held = []
+        def serve(key, server, kind):
             try:
-                conn, _ = listeners[key][0].accept()
+                conn, _ = server.accept()
             except OSError:
                 return
             data = b""
@@ -350,8 +360,17 @@ final class HookSocketOwnershipTests: XCTestCase {
                     break
                 data += chunk
             received[key] = b"sown-legacy" in data
+            if kind == "silent":
+                # An orphaned tunnel, an sshd whose client is gone: it keeps
+                # the request and never answers.
+                held.append(conn)
+                return
+            try:
+                conn.sendall(answer)
+            except OSError:
+                pass
             conn.close()
-        threads = [threading.Thread(target=serve, args=(key,)) for key in listeners]
+        threads = [threading.Thread(target=serve, args=(key, server, kind)) for key, (server, kind) in listeners.items()]
         for thread in threads:
             thread.start()
         try:
@@ -360,50 +379,95 @@ final class HookSocketOwnershipTests: XCTestCase {
             hook = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(hook)
             hook._get_tty = lambda: "/dev/pts/7"
-            sys.stdin = io.TextIOWrapper(io.BytesIO(b'{"hook_event_name":"Stop","session_id":"sown-legacy"}'), encoding="utf-8")
+            # Bounds a request sent where nobody answers; the real wait is a day.
+            hook.BLOCKING_TIMEOUT_SECONDS = 5
+            stdin = json.dumps({"hook_event_name": event, "session_id": "sown-legacy",
+                                "tool_name": "Bash", "tool_input": {"command": "make"}})
+            sys.stdin = io.TextIOWrapper(io.BytesIO(stdin.encode("utf-8")), encoding="utf-8")
             printed = io.StringIO()
             real_stdout, sys.stdout = sys.stdout, printed
+            started = time.monotonic()
             try:
                 hook.main()
             finally:
                 sys.stdout = real_stdout
+            seconds = time.monotonic() - started
             for thread in threads:
                 thread.join(3)
         finally:
-            for server, path in listeners.values():
+            for conn in held:
+                conn.close()
+            for server, _ in listeners.values():
                 server.close()
+            for path in [places[key] for key in listeners] + stale:
                 os.unlink(path)
-            if stale is not None:
-                os.unlink(legacy)
             os.rmdir(folder)
-        print(json.dumps(received))
+        print(json.dumps({"received": received, "printed": printed.getvalue().strip(), "seconds": seconds}))
         """
-        let cases: [(atLegacy: String, expected: [String: Bool])] = [
-            ("nothing", ["folder": true]),
-            ("stale", ["folder": true]),
-            ("island", ["legacy": true]),
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-c", driver, hookURL.path, number, event, atFolder, atLegacy]
+        var environment = ProcessInfo.processInfo.environment
+        environment["HOME"] = scratch
+        environment["CODEISLAND_SOURCE"] = "claude"
+        environment.removeValue(forKey: "CODEISLAND_SOCKET_OWNER_UID")
+        process.environment = environment
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        let out = stdout.fileHandleForReading.readDataToEndOfFile()
+        let err = String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0, "hook driver failed: \(err)")
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: out) as? [String: Any])
+        return (
+            try XCTUnwrap(result["received"] as? [String: Bool]),
+            result["printed"] as? String ?? "",
+            result["seconds"] as? Double ?? .infinity
+        )
+    }
+
+    /// The script on the host is the one the newest island installed, and
+    /// only such an island listens in the folder: its socket comes first.
+    /// The old path is used only while the folder has no island, for an
+    /// older one still forwarding there; with both up (a host connected to
+    /// two Macs of different versions), the newer island gets the event.
+    func testAHookAnOlderInstallWroteFindsTheSocketInItsFolder() throws {
+        let cases: [(atFolder: String, atLegacy: String, expected: [String: Bool])] = [
+            ("island", "nothing", ["folder": true]),
+            ("island", "stale", ["folder": true]),
+            ("island", "island", ["folder": true]),
+            ("nothing", "island", ["legacy": true]),
+            ("stale", "island", ["legacy": true]),
         ]
-        for (atLegacy, expected) in cases {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-            process.arguments = ["-c", driver, hookURL.path, number, atLegacy]
-            var environment = ProcessInfo.processInfo.environment
-            environment["HOME"] = scratch
-            environment["CODEISLAND_SOURCE"] = "claude"
-            environment.removeValue(forKey: "CODEISLAND_SOCKET_OWNER_UID")
-            process.environment = environment
-            let stdout = Pipe()
-            let stderr = Pipe()
-            process.standardOutput = stdout
-            process.standardError = stderr
-            try process.run()
-            let out = stdout.fileHandleForReading.readDataToEndOfFile()
-            let err = String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            process.waitUntilExit()
-            XCTAssertEqual(process.terminationStatus, 0, "hook driver failed: \(err)")
-            let received = try XCTUnwrap(JSONSerialization.jsonObject(with: out) as? [String: Bool])
-            XCTAssertEqual(received, expected, "with \(atLegacy) at the old path")
+        for (atFolder, atLegacy, expected) in cases {
+            let run = try runOlderInstallsCommand(event: "Stop", atFolder: atFolder, atLegacy: atLegacy)
+            XCTAssertEqual(run.received, expected, "with \(atFolder) in the folder and \(atLegacy) at the old path")
         }
+    }
+
+    /// Something still listens at the old path that is no island: the tunnel
+    /// of an older island whose app crashed or was force-quit (it forwards to
+    /// the Mac's main socket, which refuses a remote host's requests now), or
+    /// an sshd whose client is gone. Taking the old path first, the hook lost
+    /// every event of an agent started before the reinstall to it — a Stop
+    /// after its 2 s wait for a reply, a permission request after waiting as
+    /// long as the agent lets it. The island in the folder gets them now, at
+    /// once.
+    func testAListenerLeftAtTheOldPathDoesNotTakeTheIslandsEvents() throws {
+        let stop = try runOlderInstallsCommand(event: "Stop", atFolder: "island", atLegacy: "silent")
+        XCTAssertEqual(stop.received, ["folder": true])
+        XCTAssertLessThan(stop.seconds, 1.5, "the Stop waited for a reply that never came")
+
+        let request = try runOlderInstallsCommand(event: "PermissionRequest", atFolder: "island", atLegacy: "silent")
+        XCTAssertEqual(request.received, ["folder": true])
+        XCTAssertLessThan(request.seconds, 1.5, "the permission request hung on the old path")
+        XCTAssertTrue(
+            request.printed.contains(#""behavior":"allow""#),
+            "the island's answer never reached the agent: \(request.printed)"
+        )
     }
 
     /// The hook sends text as it is, in UTF-8: `\uXXXX` escapes would double
