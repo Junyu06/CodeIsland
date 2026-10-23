@@ -136,6 +136,11 @@ public enum CLIProcessResolver {
                 || lowercasedPath.contains("/@minimax-ai/code/")
         case "mimo":
             return isMimoCLIPath(lowercasedPath)
+        case "pi":
+            // pi and Oh My Pi by name: as a substring, "/pi" is also pinentry,
+            // pip, pico, and every program under a home folder like /Users/pierre.
+            let basename = (lowercasedPath as NSString).lastPathComponent
+            return basename == "pi" || basename == "omp" || lowercasedPath.contains("/pi-coding-agent/")
         default:
             return lowercasedPath.contains("/\(normalizedSource)")
         }

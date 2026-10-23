@@ -128,22 +128,27 @@ enum AgentProcessFinder {
 
     private static func findPids(
         matchingPathSubstrings pathSubstrings: [String],
+        pathSuffixes: [String] = [],
         argSubstrings: [String] = [],
-        candidatePids: [pid_t]? = nil
+        candidatePids: [pid_t]? = nil,
+        executablePath: (pid_t) -> String? = { ProcessTable.executablePath(for: $0) },
+        arguments: (pid_t) -> [String]? = { ProcessTable.getProcessArgs($0) }
     ) -> [pid_t] {
         let loweredPaths = pathSubstrings.map { $0.lowercased() }
+        let loweredSuffixes = pathSuffixes.map { $0.lowercased() }
         let loweredArgs = argSubstrings.map { $0.lowercased() }
-        guard !loweredPaths.isEmpty || !loweredArgs.isEmpty else { return [] }
+        guard !loweredPaths.isEmpty || !loweredSuffixes.isEmpty || !loweredArgs.isEmpty else { return [] }
 
         var matched: [pid_t] = []
         for pid in candidatePids ?? ProcessTable.allProcessIds() {
-            guard let path = ProcessTable.executablePath(for: pid)?.lowercased() else { continue }
-            if loweredPaths.contains(where: { path.contains($0) }) {
+            guard let path = executablePath(pid)?.lowercased() else { continue }
+            if loweredPaths.contains(where: { path.contains($0) })
+                || loweredSuffixes.contains(where: { path.hasSuffix($0) }) {
                 matched.append(pid)
                 continue
             }
             guard !loweredArgs.isEmpty,
-                  let args = ProcessTable.getProcessArgs(pid)?.map({ $0.lowercased() }) else { continue }
+                  let args = arguments(pid)?.map({ $0.lowercased() }) else { continue }
             if args.contains(where: { arg in loweredArgs.contains(where: { arg.contains($0) }) }) {
                 matched.append(pid)
             }
@@ -560,20 +565,24 @@ enum AgentProcessFinder {
         }
     }
 
-    private static func findPiPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+    /// pi and Oh My Pi. A `bin` entry is the program's whole name: as a
+    /// substring, `/bin/pi` also took pinentry (which gpg starts to sign a
+    /// commit), pigz, pico and any other program whose name starts with "pi".
+    static func findPiPids(
+        candidatePids: [pid_t]? = nil,
+        executablePath: (pid_t) -> String? = { ProcessTable.executablePath(for: $0) },
+        arguments: (pid_t) -> [String]? = { ProcessTable.getProcessArgs($0) }
+    ) -> [pid_t] {
         findPids(
-            matchingPathSubstrings: [
-                "/pi-coding-agent/",
-                "/.local/bin/pi",
-                "/.local/bin/omp",
-                "/bin/pi",
-                "/bin/omp",
-            ],
+            matchingPathSubstrings: ["/pi-coding-agent/"],
+            pathSuffixes: ["/bin/pi", "/bin/omp"],
             argSubstrings: [
                 "pi-coding-agent",
                 "/.local/bin/omp",
             ],
-            candidatePids: candidatePids
+            candidatePids: candidatePids,
+            executablePath: executablePath,
+            arguments: arguments
         )
     }
 
