@@ -120,6 +120,17 @@ final class CodeislandFolderPrivacyTests: XCTestCase {
         XCTAssertEqual(try String(contentsOfFile: script, encoding: .utf8), ConfigInstaller.hookScript)
     }
 
+    /// v1.0.39 left its v5 script 0755: the update replaces it, owner-only.
+    func testTheHookScriptAnOlderBuildWroteIsReplacedForThisUserAlone() throws {
+        let script = scratch + "/codeisland-hook.sh"
+        let older = "#!/bin/bash\n# CodeIsland hook v5 — native bridge with shell fallback\nSOCK=\"/tmp/codeisland-$(id -u).sock\"\n[ -S \"$SOCK\" ] || exit 0\n"
+        XCTAssertTrue(FileManager.default.createFile(atPath: script, contents: Data(older.utf8)))
+        XCTAssertEqual(chmod(script, 0o755), 0)
+        ConfigInstaller.installHookScript(fm: .default, path: script)
+        XCTAssertEqual(try String(contentsOfFile: script, encoding: .utf8), ConfigInstaller.hookScript)
+        XCTAssertEqual(try mode(script), 0o700)
+    }
+
     func testACurrentHookScriptLeftOpenIsNarrowed() throws {
         let script = scratch + "/codeisland-hook.sh"
         XCTAssertTrue(FileManager.default.createFile(atPath: script, contents: Data(ConfigInstaller.hookScript.utf8)))
