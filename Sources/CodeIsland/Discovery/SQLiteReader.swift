@@ -9,15 +9,44 @@ enum SQLiteReader {
         at path: String,
         body: (OpaquePointer) -> T?
     ) -> T? {
-        var db: OpaquePointer?
-        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK,
-              let db else {
-            if let db { sqlite3_close_v2(db) }
-            return nil
-        }
+        guard let db = openReadOnly(path) else { return nil }
         sqlite3_busy_timeout(db, 1000)
         defer { sqlite3_close_v2(db) }
         return body(db)
+    }
+
+    /// A read-only connection to the store at `path`.
+    ///
+    /// A WAL database whose -wal and -shm files are gone can't be read by a
+    /// read-only connection: it may not create them, so every statement fails
+    /// with SQLITE_CANTOPEN. Codex leaves `state_5.sqlite` that way whenever
+    /// its last connection closes (an idle Codex Desktop). With no writer on
+    /// it, the file holds the whole database, so it is then opened
+    /// `immutable`, which reads it without creating, locking or changing
+    /// anything. Never read-write: closing the last read-write connection
+    /// would checkpoint into the agent's own database.
+    private static func openReadOnly(_ path: String) -> OpaquePointer? {
+        guard let db = open(path, flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX) else { return nil }
+        // Opening is lazy: the first statement is where the WAL index is needed.
+        guard sqlite3_exec(db, "SELECT 1 FROM sqlite_master LIMIT 1;", nil, nil, nil) == SQLITE_CANTOPEN else {
+            return db
+        }
+        sqlite3_close_v2(db)
+        var components = URLComponents()
+        components.scheme = "file"
+        components.path = path
+        components.queryItems = [URLQueryItem(name: "immutable", value: "1")]
+        guard let uri = components.string else { return nil }
+        return open(uri, flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI)
+    }
+
+    private static func open(_ filename: String, flags: Int32) -> OpaquePointer? {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(filename, &db, flags, nil) == SQLITE_OK, let db else {
+            if let db { sqlite3_close_v2(db) }
+            return nil
+        }
+        return db
     }
 
     static func prepareSQLiteStatement(db: OpaquePointer, sql: String) -> OpaquePointer? {
