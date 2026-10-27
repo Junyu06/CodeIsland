@@ -1562,6 +1562,12 @@ final class AppState {
             return
         }
 
+        // Claude Code compacting a finished session in the background: no
+        // card to open again, none to wake.
+        if isIdleBackgroundCompaction(event, session: sessions[sessionId]) {
+            return
+        }
+
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
