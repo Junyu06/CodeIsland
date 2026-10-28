@@ -155,6 +155,46 @@ final class ApprovalTrustBoundaryTests: XCTestCase {
         XCTAssertEqual(appState.surface, .collapsed)
     }
 
+    /// However long the user takes to answer where the request was asked, the
+    /// call stays known by its PreToolUse while the request waits: the
+    /// cleanup tick's TTL forgets only records no waiting request may need.
+    func testARequestAnsweredInTheAppAfterTheCacheTTLStillGoesWhenItsCallFinishes() async throws {
+        let appState = AppState()
+        let asked: [String: Any] = ["suggested": "fix/stuck-card"]
+        let call: [String: Any] = [
+            "session_id": "s1", "tool_name": "mcp__ccd_directory__propose_branch",
+        ]
+        appState.handleEvent(try event(call.merging([
+            "hook_event_name": "PreToolUse", "tool_use_id": "toolu_pb", "tool_input": asked,
+        ]) { $1 }))
+        appState.handleEvent(try event([
+            "hook_event_name": "PreToolUse", "session_id": "s2",
+            "tool_name": "Read", "tool_use_id": "toolu_other", "tool_input": ["file_path": "/tmp/x"],
+        ]))
+        let request = try event(call.merging([
+            "hook_event_name": "PermissionRequest", "tool_input": asked,
+        ]) { $1 })
+        let response = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+
+        appState.prunePendingToolUses(now: Date().addingTimeInterval(AppState.pendingToolUseTTL + 60))
+        XCTAssertNotNil(appState.pendingToolUses[ToolUseKey(sessionId: "s1", toolUseId: "toolu_pb")])
+        XCTAssertNil(appState.pendingToolUses[ToolUseKey(sessionId: "s2", toolUseId: "toolu_other")],
+                     "a card with nothing waiting is pruned as before")
+
+        appState.handleEvent(try event(call.merging([
+            "hook_event_name": "PostToolUse", "tool_use_id": "toolu_pb",
+            "tool_input": asked.merging([
+                "_setupAnswer": ["kind": "branch", "choice": "stay"],
+            ]) { $1 },
+        ]) { $1 }))
+
+        let answer = try await awaitValue(of: response)
+        XCTAssertNil(try decidedBehavior(answer), "no decision: \(String(decoding: answer, as: UTF8.self))")
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+        XCTAssertNil(appState.pendingToolUses[ToolUseKey(sessionId: "s1", toolUseId: "toolu_pb")],
+                     "the finished call's record goes with it")
+    }
+
     /// What a call was asked with counts only for the agent that asked: a
     /// background subagent's call with the same input as the main thread's
     /// request finishing is still no sign the main thread got past it — nor

@@ -10,7 +10,9 @@ private let log = Logger(subsystem: "com.codeisland", category: "PermissionDeny"
 /// This lets us (1) correlate PermissionRequest payloads back to the originating tool
 /// invocation even when some providers strip fields on re-emit, (2) drain stale queue
 /// entries when the agent moved on (PostToolUse arrives while a PermissionRequest for
-/// the same call is still queued), and (3) dedupe duplicate PermissionRequest replays.
+/// the same call is still queued), (3) dedupe duplicate PermissionRequest replays, and
+/// (4) know a finishing call by the input it was asked with, for a request that carries
+/// no tool_use_id (``AppState/resolveOrphanPermissionsOnActivity(_:)``).
 struct PreToolUseRecord {
     let sessionId: String
     let toolName: String?
@@ -207,9 +209,19 @@ extension AppState {
     }
 
     /// Remove stale cache entries. Called from the cleanup timer tick.
+    ///
+    /// A card's records stay while a request with no tool_use_id waits in it:
+    /// the call it asks about is known by its PreToolUse until that call
+    /// finishes (``resolveOrphanPermissionsOnActivity(_:)``), however long the
+    /// user takes to answer where it was asked.
     func prunePendingToolUses(now: Date = Date()) {
         let cutoff = now.addingTimeInterval(-AppState.pendingToolUseTTL)
-        pendingToolUses = pendingToolUses.filter { $0.value.receivedAt >= cutoff }
+        let cardsWaiting = Set(permissionQueue
+            .filter { $0.toolUseId?.isEmpty ?? true }
+            .map { $0.event.sessionId ?? "default" })
+        pendingToolUses = pendingToolUses.filter { key, record in
+            record.receivedAt >= cutoff || cardsWaiting.contains(key.sessionId)
+        }
     }
 
     /// Try to merge this permission request into an existing queue entry for the same
