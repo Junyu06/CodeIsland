@@ -132,6 +132,9 @@ extension AppState {
     /// one, or several Task agents at once), and a sibling's Read says nothing
     /// about a pending `rm -rf`. Where the step names a tool call, it must be
     /// the request's: another call of the same agent is not this one (#147).
+    /// The call is known by the input it was asked with, which its PreToolUse
+    /// recorded: the host that ran it may have changed the input it finished
+    /// with (the Claude app's `propose_branch` does, answered in the app).
     ///
     /// Nor is the step ever taken for the user's answer. What the user chose
     /// in the terminal is not known here — a denied call is followed by a
@@ -144,25 +147,31 @@ extension AppState {
         guard Self.movedOnEvents.contains(normalized) else { return }
 
         let sessionId = event.sessionId ?? "default"
+        let calledWith = ToolUseKey(event).flatMap { pendingToolUses[$0] }?.toolInput
         let stale = permissionQueue.indices.filter { index in
             let request = permissionQueue[index]
             return (request.event.sessionId ?? "default") == sessionId
                 && (request.toolUseId?.isEmpty ?? true)
-                && Self.step(event, isPastRequest: request.event)
+                && Self.step(event, calledWith: calledWith, isPastRequest: request.event)
         }
         dropPermissionsTheirAgentGotPast(at: stale, reason: "resolveOrphanPermissionsOnActivity", triggerEvent: normalized)
     }
 
     /// Whether `step` comes from the agent that asked `request` — the same
     /// subagent, or the main thread for the main thread's — and, where both
-    /// name a tool call, is that call.
-    nonisolated static func step(_ step: HookEvent, isPastRequest request: HookEvent) -> Bool {
+    /// name a tool call, is that call. `calledWith` is the input the step's
+    /// call had at its PreToolUse, where that was seen; it or the step's own
+    /// input must be the request's.
+    nonisolated static func step(
+        _ step: HookEvent, calledWith: [String: Any]?, isPastRequest request: HookEvent
+    ) -> Bool {
         guard step.agentId == request.agentId else { return false }
         if let tool = step.toolName, let asked = request.toolName, tool != asked {
             return false
         }
-        if let input = step.toolInput, let asked = request.toolInput,
-           !NSDictionary(dictionary: input).isEqual(to: asked) {
+        let inputs = [step.toolInput, calledWith].compactMap { $0 }
+        if let asked = request.toolInput, !inputs.isEmpty,
+           !inputs.contains(where: { NSDictionary(dictionary: $0).isEqual(to: asked) }) {
             return false
         }
         return true

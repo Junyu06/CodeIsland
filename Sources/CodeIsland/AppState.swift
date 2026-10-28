@@ -1574,11 +1574,13 @@ final class AppState {
         // Cache PreToolUse payloads so downstream events sharing tool_use_id can be
         // correlated, and drain queue entries whose agent already moved on.
         cachePreToolUseIfApplicable(event)
-        resolveToolUseIfCompleted(event)
         // #216: permission requests with no correlatable tool_use_id can't be drained by
         // resolveToolUseIfCompleted. A later step of the agent that asked means it was
         // answered in the terminal: its card goes, answered with no decision — never allow.
+        // Runs first: the step's call is known by its PreToolUse, which
+        // resolveToolUseIfCompleted forgets once that call is done.
         resolveOrphanPermissionsOnActivity(event)
+        resolveToolUseIfCompleted(event)
 
         let reduction = reduceHookEvent(sessions: &sessions, event: event, maxHistory: maxHistory,
                                         replyCompletePlaceholder: L10n.shared["reply_complete_placeholder"])

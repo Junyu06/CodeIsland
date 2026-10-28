@@ -123,6 +123,73 @@ final class ApprovalTrustBoundaryTests: XCTestCase {
         XCTAssertEqual(appState.surface, .collapsed)
     }
 
+    /// Answered in the Claude app, `propose_branch` finishes with other input
+    /// than it was asked with (its schema keeps `_setupAnswer` for the app),
+    /// so its PostToolUse no longer has the request's input. Its PreToolUse
+    /// did: the call it names finishing is still the request's.
+    func testTheAskingAgentsOwnCallFinishingWithAnInputItsHostRewroteDropsItsRequest() async throws {
+        let appState = AppState()
+        let asked: [String: Any] = ["suggested": "fix/stuck-card"]
+        let call: [String: Any] = [
+            "session_id": "s1", "tool_name": "mcp__ccd_directory__propose_branch",
+        ]
+        appState.handleEvent(try event(call.merging([
+            "hook_event_name": "PreToolUse", "tool_use_id": "toolu_pb", "tool_input": asked,
+        ]) { $1 }))
+        let request = try event(call.merging([
+            "hook_event_name": "PermissionRequest", "tool_input": asked,
+        ]) { $1 })
+        let response = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+        XCTAssertEqual(appState.surface, .approvalCard(sessionId: "s1"))
+
+        appState.handleEvent(try event(call.merging([
+            "hook_event_name": "PostToolUse", "tool_use_id": "toolu_pb",
+            "tool_input": asked.merging([
+                "_setupAnswer": ["answer": "set by the app"],
+            ]) { $1 },
+        ]) { $1 }))
+
+        let answer = try await awaitValue(of: response)
+        XCTAssertNil(try decidedBehavior(answer), "no decision: \(String(decoding: answer, as: UTF8.self))")
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+        XCTAssertEqual(appState.surface, .collapsed)
+    }
+
+    /// What a call was asked with counts only for the agent that asked: a
+    /// background subagent's call with the same input as the main thread's
+    /// request finishing is still no sign the main thread got past it — nor
+    /// is another call of the asking agent, whatever it finished with.
+    func testAnotherAgentsOrCallsAskedInputLeavesTheRequestWaiting() async throws {
+        let appState = AppState()
+        let asked: [String: Any] = ["command": "git push --force origin main"]
+        let request = try event([
+            "hook_event_name": "PermissionRequest", "session_id": "s-main",
+            "tool_name": "Bash", "tool_input": asked,
+        ])
+        let response = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+
+        let steps: [(agentId: String?, toolUseId: String, asked: [String: Any])] = [
+            ("agent-bg-1", "toolu_bg_1", asked),
+            (nil, "toolu_2", ["command": "ls"]),
+        ]
+        for step in steps {
+            var call: [String: Any] = ["session_id": "s-main", "tool_name": "Bash", "tool_use_id": step.toolUseId]
+            call["agent_id"] = step.agentId
+            appState.handleEvent(try event(call.merging([
+                "hook_event_name": "PreToolUse", "tool_input": step.asked,
+            ]) { $1 }))
+            appState.handleEvent(try event(call.merging([
+                "hook_event_name": "PostToolUse", "tool_input": ["command": "rewritten"],
+            ]) { $1 }))
+        }
+
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        await assertStillPending(response, "neither call was the main thread's force-push")
+        appState.approvePermission(expectedSessionId: "s-main")
+        let answer = try await awaitValue(of: response)
+        XCTAssertEqual(try behavior(answer), "allow")
+    }
+
     /// The same agent's turn ending, its user typing the next prompt, or —
     /// for a subagent's request — that subagent's own step past it also show
     /// it is past the request: dropped, no decision.
