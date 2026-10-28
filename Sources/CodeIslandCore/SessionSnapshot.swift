@@ -1201,15 +1201,15 @@ public func reduceEvent(
 }
 
 /// Whether `event` is Claude Code compacting a finished session in the
-/// background. While a session sits idle, Claude Code precomputes its next
-/// compaction (about 54 minutes after the turn ended, ahead of the prompt
-/// cache expiring). It reports PreCompact — trigger "auto", the same as a
-/// compaction mid-turn — then the SubagentStop of the agent that ran it,
-/// and nothing after: there is no turn, so no Stop. Read as work, the
-/// PreCompact left a finished card on "thinking" for good, or brought one
-/// the idle sweep had removed back as "thinking". The SubagentStop goes on
-/// as any other: it leaves an idle parent idle, and it still closes the
-/// agent's id. A manual /compact is the user's doing and still shows.
+/// background. While a session sits idle, Claude Code compacts it ahead of
+/// the prompt cache expiring (about 54 minutes after the turn ended; its
+/// `idleCompaction` setting). It reports PreCompact — trigger "auto", the
+/// same as a compaction mid-turn — and no turn follows, so no Stop. Read
+/// as work, the PreCompact left a finished card on "thinking" for good, or
+/// brought one the idle sweep had removed back as "thinking". The
+/// compaction's other hooks are ``BackgroundCompactionFilter``'s, which
+/// AppState asks first. A manual /compact is the user's doing and still
+/// shows.
 public func isIdleBackgroundCompaction(_ event: HookEvent, session: SessionSnapshot?) -> Bool {
     let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) ?? "claude"
     guard source == "claude" else { return false }
